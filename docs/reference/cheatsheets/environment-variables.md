@@ -174,3 +174,13 @@ Collector or local Docker log forwarding. See [Observability](../../guides/obser
 - `OTEL_COLLECTOR_PORT` — Local Collector Fluent Forward port; default: `24224`.
 - `OTEL_COLLECTOR_METRICS_PORT` — Local Collector metrics port; default: `8888`.
 - `OCC_DOCKER_LOGGING_ADDRESS` — Docker Compute log destination; local override default: `127.0.0.1:24224`.
+
+## Public GitHub reader
+
+The chart sets these required file paths for the HTTPS reader. See
+[public GitHub reads](../public-github-reads.md#enable-the-reader) for TLS, public
+trust, Installation scope and per-Agent selection.
+
+- `PUBLIC_GITHUB_READ_TLS_CERT_FILE`, `PUBLIC_GITHUB_READ_TLS_KEY_FILE` — Reader leaf certificate and key files. Production startup requires both.
+- `PUBLIC_GITHUB_READ_POLICY_FILE` — Current Installation all/list ceiling JSON file.
+- `PUBLIC_GITHUB_READ_AUTHORIZATIONS_FILE` — Compute-managed authorization registry JSON file, mounted as an updating directory.
