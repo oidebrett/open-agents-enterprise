@@ -118,10 +118,12 @@ export {
 export type { SandboxPolicyDecision } from "./sandbox-policy.ts";
 export type { SandboxPolicyViewWire } from "./api/sandbox-policy.ts";
 export { SandboxPolicyDecisionSchema, validSandboxPolicyDecision } from "./sandbox-policy.ts";
+import type { ComputeServiceAccess } from "./drivers/compute/index.ts";
 import type { SandboxPolicySnapshot } from "./sandbox-policy.ts";
 
 export type {
   ProtectedCodexArtifactPolicyAdmission,
+  ProtectedNetworkPolicyAdmission,
   SandboxNetworkGrant,
   SandboxPolicy,
   SandboxPolicySnapshot,
@@ -1091,6 +1093,8 @@ export interface AgentRevision extends Scope {
   readonly compute: {
     readonly id: string;
     readonly implementation: string;
+    /** Nonsecret service contributions selected from this revision's source Configuration. */
+    readonly serviceAccess?: readonly ComputeServiceAccess[];
     /** Private, immutable admission state owned by the selected Compute Driver. */
     readonly admission?: string;
   };
@@ -1149,7 +1153,7 @@ export function freezeAgentRevision(revision: AgentRevision): Readonly<AgentRevi
       ? {}
       : { repositoryCredentials: immutableCopy(revision.repositoryCredentials) }),
     harness: Object.freeze({ ...revision.harness }),
-    compute: Object.freeze({ ...revision.compute }),
+    compute: immutableCopy(revision.compute),
     harnessAuth: immutableCopy(revision.harnessAuth),
     ...(revision.credentialSources === undefined
       ? {}
@@ -1418,6 +1422,7 @@ export type {
 } from "./drivers/channel/index.ts";
 export type {
   ComputeDriver,
+  ComputeServiceAccess,
   ComputeRevisionContext,
   WorkloadLaunchContext,
   ComputeLifecycleHooks,
