@@ -9363,7 +9363,11 @@ export class OpenClawController {
   ): readonly ComputeServiceAccess[] {
     try {
       const services = immutableCopy(
-        compute.admitServiceAccess?.({ configuration, harness }) ?? [],
+        compute.admitServiceAccess?.({
+          installationId: this.installation.id,
+          configuration,
+          harness,
+        }) ?? [],
       );
       if (
         !Array.isArray(services) ||
