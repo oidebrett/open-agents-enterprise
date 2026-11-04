@@ -1996,6 +1996,7 @@ test(
       [63, "preGatewayManagedMode"],
       [64, "preSelectedRepositorySet"],
       [65, "preAgentDeployIntent"],
+      [66, "preComputeServiceAccess"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -2020,6 +2021,20 @@ test(
         await assertCompletedHistory(db, receipts);
         await assertUpgradedRevisionReadable(db);
         assert.deepEqual(await canonicalData(db), upgradedCanonicalData(before));
+        if (history === "preComputeServiceAccess") {
+          const legacy = await db.app.query(
+            `SELECT admitted_spec #> '{compute,serviceAccess}' AS compute_services,
+                    admitted_spec #> '{sandbox_policy,serviceAccess}' AS sandbox_services
+             FROM occ.agent_revisions`,
+          );
+          assert.ok(legacy.rows.length > 0);
+          assert.ok(
+            legacy.rows.every(
+              (row) => row.compute_services === null && row.sandbox_services === null,
+            ),
+            "the forward migration must not grant service access to existing revisions",
+          );
+        }
         // Upgrading an existing revision must never invent a recoverable first-deployment intent.
         const existingBindings = await db.app.query(
           "SELECT first_deployment_digest FROM occ.agent_revisions",
@@ -2549,6 +2564,9 @@ test(
           await readFile(join(migrationsDirectory, "meta/_canonical-history.json"), "utf8"),
         );
         const upgraded = await logicalRestoreSnapshot(restored);
+        context.diagnostic(
+          JSON.stringify({ lineage, upgradedDigest: catalogDigest(upgraded.occ) }),
+        );
         assert.deepEqual(upgraded.identities, native.identities);
         assert.deepEqual(upgraded.receipts.slice(0, 51), native.receipts);
         assert.deepEqual(
