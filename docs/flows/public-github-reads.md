@@ -1,7 +1,7 @@
 ---
 created: "2026-10-15"
 updated: "2026-11-04"
-last_updated_session: authoring-run/bfe7275c-8f39-483b-98a4-680042d905b7
+last_updated_session: authoring-run/c6923421-fc77-433e-b0ce-8fb4632fded1
 ---
 
 # Public GitHub read flow
@@ -64,7 +64,11 @@ authorization store checks its owner label and rows against the frozen identity.
 The `public-github-read:v2`
 admission digest selects a distinct launcher; rebuilding an older revision does
 not implicitly enable it. Existing `v1` ordinary API-reader revisions retain
-their earlier admission and ownership checks.
+their earlier admission and ownership checks. When an API-key Harness selects
+an Installation model provider, `admitRevision` wraps that runtime fact in the
+provider digest. Execution refuses a changed provider before credential delivery;
+`runtimeAdmission` extracts the saved inner fact for reader checks and cleanup.
+The public service does not bypass provider admission.
 
 The chart mounts operator-created TLS and authorization resources into a
 reader without a service-account token. Helm owns public policy and trust files;
@@ -170,6 +174,8 @@ that the owning runtime has stopped.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-11-04 07:13: Preserve public-service launch facts inside shared model-provider admission (accompanying merge; authoring-run/c6923421-fc77-433e-b0ce-8fb4632fded1 - 35de595e06a0acfe556772fa3eb898f606dc8051)
 
 - 2026-11-04 06:24: Project generated public Git material through the ordinary native read-only profile (accompanying correction; authoring-run/bfe7275c-8f39-483b-98a4-680042d905b7 - f3bcd113bd01ca1c510228b4acb1caaf7d1b70e4)
 

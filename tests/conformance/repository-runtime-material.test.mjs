@@ -3080,6 +3080,10 @@ test("admitted public Git runtime carries only nonsecret configuration and a dis
     caBundle: "public-ca",
   });
   f.revision.configuration.plugins.entries.codex.config.publicGithubRead = { mode: "all" };
+  f.driver.options.runtime.modelProvider = {
+    protocol: "openai-responses",
+    baseUrl: "https://models.example.test/v1",
+  };
   const services = f.driver.admitServiceAccess({
     installationId: "installation-test",
     configuration: f.revision.configuration,
@@ -3087,6 +3091,7 @@ test("admitted public Git runtime carries only nonsecret configuration and a dis
   });
   f.revision.compute.serviceAccess = services;
   f.revision.compute.admission = f.driver.admitRevision(f.revision);
+  assert.match(f.revision.compute.admission, /^model-provider:v1:[a-f0-9]{64}:public-github-read:/);
   const snapshot = f.driver.pluginRuntimeSnapshot(f.revision);
   assert.equal(snapshot.runtime.publicGithubRead.endpoint, `https://${publicReader.address}:8080`);
   assert.notEqual(
@@ -3094,6 +3099,7 @@ test("admitted public Git runtime carries only nonsecret configuration and a dis
     originalLauncher,
     "new service access requires a separately admitted launcher",
   );
+  assert.equal(snapshot.runtime.modelEndpoint.baseUrl, "https://models.example.test/v1");
   const files = f.driver.sandboxWorkloadFiles(snapshot);
   const config = JSON.parse(files.find(({ name }) => name === "public-github-read.json").content);
   assert.deepEqual(config, {
@@ -3123,6 +3129,19 @@ test("admitted public Git runtime carries only nonsecret configuration and a dis
       : value,
   );
   assert.deepEqual(f.driver.pluginRuntimeSnapshot(rehydrated), snapshot);
+  // Provider and public-service facts have separate authority. A preserved provider
+  // cannot authorize altered service scope; a preserved service cannot authorize a
+  // changed provider. Both refusals precede credential delivery or workload writes.
+  const alteredService = structuredClone(f.revision);
+  alteredService.compute.serviceAccess[0].configuration.policy = {
+    mode: "repositories",
+    repositories: ["example/other"],
+  };
+  assert.throws(() => f.driver.pluginRuntimeSnapshot(alteredService), /no exact Compute admission/);
+  const before = structuredClone(f.calls);
+  f.driver.options.runtime.modelProvider.baseUrl = "https://changed.example.test/v1";
+  await assert.rejects(f.driver.prepareRevision(f.revision, f.context()), /model provider changed/);
+  assert.deepEqual(f.calls, before);
 });
 
 for (const operation of ["stopRevision", "retireRevision"]) {

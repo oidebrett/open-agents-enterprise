@@ -195,7 +195,8 @@ import {
 } from "../workspace-setup-runtime.ts";
 import { requireHarnessAuthMethod } from "../harness-auth-method.ts";
 import { ComputeLifecycleDispatcher } from "../lifecycle-hooks.ts";
-import { managedInstalls, requireManagedCredentialRuntime } from "../../plugin/managed-catalog.ts";
+import { managedInstalls, managedMcpCredentialBinding } from "../../plugin/managed-catalog.ts";
+import { requireManagedCredentialRuntime } from "../../plugin/managed-runtime.ts";
 import {
   validatePlaintextNativeGateway,
   validateRoutableNativeListener,
@@ -223,6 +224,14 @@ import {
 import { managedGatewayConfiguration, validateGatewayToolPolicy } from "../gateway-tool-policy.ts";
 import { nodeProgramArguments } from "../node-program.ts";
 import { codexGatewayModelConfiguration } from "../codex-model-configuration.ts";
+import {
+  modelProviderBaseUrl,
+  modelProviderReferenceSetting,
+  MODEL_PROVIDER_REFERENCE_REQUIREMENT,
+  modelProviderConfiguration,
+  requireModelSourceDestination,
+  type ModelProviderConfiguration,
+} from "../model-provider.ts";
 import { discoverHarnessModels } from "../model-discovery.ts";
 import { failureAfterCleanup, mapPrimaryFailure } from "../cleanup-failure.ts";
 import {
@@ -272,6 +281,7 @@ import {
   PROTECTED_CODEX_RUNTIME_ENTRYPOINT,
   PROTECTED_CODEX_WITH_NODE_ENTRYPOINT,
   GATEWAY_STOP_TIMEOUT_MS,
+  MANAGED_PLUGIN_ENVIRONMENT,
   MANAGED_CONFIGURATION_DIRECTORY,
   NATIVE_HOOK_CREDENTIAL_DIRECTORY,
   NATIVE_WORKER_ENTRYPOINT,
@@ -540,10 +550,8 @@ export interface KubernetesComputeDriverOptions {
     readonly nodeSelector?: Readonly<Record<string, string>>;
     readonly gatewayNodeSelector?: Readonly<Record<string, string>>;
     readonly codexSeccompProfile?: string;
-    /** HTTPS OpenAI-compatible Responses endpoint for dedicated Codex API-key auth. */
-    readonly codexModelBaseUrl?: string;
-    /** Declare standalone web search support for the explicit Codex model endpoint. */
-    readonly codexModelSupportsStandaloneWebSearch?: boolean;
+    /** Installation-owned OpenAI-compatible provider shared by supported Harnesses. */
+    readonly modelProvider?: ModelProviderConfiguration;
     readonly channels?: {
       readonly proxyUrl: string;
       readonly managedProxy?: KubernetesWorkloadPeer & {
@@ -2657,36 +2665,6 @@ function harnessPrimaryModel(
   return model;
 }
 
-// The setting under `setting` (`value`'s path) that holds a `${` or is a SecretRef, if any.
-function referenceSetting(value: unknown, setting: string): string | undefined {
-  if (typeof value === "string") {
-    return value.includes("${") ? setting : undefined;
-  }
-  if (Array.isArray(value)) {
-    for (const [index, item] of value.entries()) {
-      const found = referenceSetting(item, `${setting}.${index}`);
-      if (found !== undefined) {
-        return found;
-      }
-    }
-    return undefined;
-  }
-  const record = asRecord(value);
-  if (record === undefined) {
-    return undefined;
-  }
-  if (typeof record.source === "string" && typeof record.id === "string") {
-    return setting;
-  }
-  for (const [key, item] of Object.entries(record)) {
-    const found = referenceSetting(item, keyedSettingPath(setting, key));
-    if (found !== undefined) {
-      return found;
-    }
-  }
-  return undefined;
-}
-
 // The startup model probe gets only the selected provider's settings, the primary model's entry
 // and the binding's credential, so a reference there (other than the binding's apiKey) cannot
 // resolve. Another Compute may resolve it, so Configuration save accepts it; Kubernetes admission
@@ -2713,13 +2691,10 @@ function harnessProbeConfiguration(
   const defaults = asRecord(asRecord(configuration.agents)?.defaults);
   const modelEntry = asRecord(asRecord(defaults?.models)?.[model]);
   const reference =
-    referenceSetting(fragment, keyedSettingPath("models.providers", providerId)) ??
-    referenceSetting(modelEntry, keyedSettingPath("agents.defaults.models", model));
+    modelProviderReferenceSetting(fragment, keyedSettingPath("models.providers", providerId)) ??
+    modelProviderReferenceSetting(modelEntry, keyedSettingPath("agents.defaults.models", model));
   if (reference !== undefined) {
-    throw settingError(
-      reference,
-      "must not hold an environment or Secret reference: the startup model check on Kubernetes gets only the Harness credential",
-    );
+    throw settingError(reference, MODEL_PROVIDER_REFERENCE_REQUIREMENT);
   }
   // A custom provider has no ambient native key name. Its isolated probe uses only
   // the Compute-owned process environment, not caller Secret provider configuration.
@@ -3595,8 +3570,16 @@ export class KubernetesComputeDriver implements ComputeDriver {
             writeOnly: true,
           },
           codexSeccompProfile: { type: "string", minLength: 1 },
-          codexModelBaseUrl: { type: "string", minLength: 1 },
-          codexModelSupportsStandaloneWebSearch: { type: "boolean" },
+          modelProvider: {
+            type: "object",
+            required: ["protocol", "baseUrl"],
+            additionalProperties: false,
+            properties: {
+              protocol: { type: "string", enum: ["openai-responses", "openai-completions"] },
+              baseUrl: { type: "string", minLength: 1 },
+              supportsStandaloneWebSearch: { type: "boolean" },
+            },
+          },
           channels: {
             type: "object",
             required: ["proxyUrl"],
@@ -3982,28 +3965,19 @@ export class KubernetesComputeDriver implements ComputeDriver {
           );
         }
         if (
-          options.runtime.codexModelBaseUrl !== undefined &&
-          (normalizeOpenAiBaseUrl(options.runtime.codexModelBaseUrl) === undefined ||
-            openAiBaseUrlRewritesIpv4(options.runtime.codexModelBaseUrl))
+          options.runtime.modelProvider?.baseUrl !== undefined &&
+          (normalizeOpenAiBaseUrl(options.runtime.modelProvider?.baseUrl) === undefined ||
+            openAiBaseUrlRewritesIpv4(options.runtime.modelProvider?.baseUrl))
         ) {
           throw configurationConstraintFailure(
             openAiBaseUrlSpellingMessage(
-              "Codex model endpoint",
-              options.runtime.codexModelBaseUrl,
+              "Model provider endpoint",
+              options.runtime.modelProvider?.baseUrl,
             ) ??
-              (openAiBaseUrlRewritesIpv4(options.runtime.codexModelBaseUrl)
+              (openAiBaseUrlRewritesIpv4(options.runtime.modelProvider?.baseUrl)
                 ? "Codex model endpoint IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address."
                 : "Codex model endpoint requires HTTPS, a nonzero port, and a path ending in /v1 without credentials, wildcards, query, or fragment."),
-            "/runtime/codexModelBaseUrl",
-          );
-        }
-        if (
-          options.runtime.codexModelSupportsStandaloneWebSearch === true &&
-          options.runtime.codexModelBaseUrl === undefined
-        ) {
-          throw configurationConstraintFailure(
-            "Standalone web search requires an explicit Codex model endpoint.",
-            "/runtime/codexModelSupportsStandaloneWebSearch",
+            "/runtime/modelProvider/baseUrl",
           );
         }
         if (options.runtime.codexSeccompProfile !== undefined) {
@@ -4288,11 +4262,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }));
     // A Codex model endpoint the generated model egress policy does not admit still starts: an
     // operator's own NetworkPolicy can open it (finding 2284). Startup validated the URL.
-    const codexModelBaseUrl = this.options.runtime?.codexModelBaseUrl;
+    const codexModelBaseUrl = this.options.runtime?.modelProvider?.baseUrl;
     const modelEgress =
       codexModelBaseUrl === undefined
         ? undefined
-        : modelEgressWarning("Codex model endpoint", normalizeOpenAiBaseUrl(codexModelBaseUrl)!);
+        : modelEgressWarning("Model provider endpoint", normalizeOpenAiBaseUrl(codexModelBaseUrl)!);
     if (modelEgress !== undefined) {
       warnings.push({ code: "KUBERNETES_MODEL_EGRESS_BLOCKED", message: modelEgress });
     }
@@ -4754,6 +4728,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
     const models = nativeOpenAiModelSelections(configuration)?.map(({ reference }) => reference);
     const authentication = harnessModelAuthentication(configuration, embedded);
+    configuration = modelProviderConfiguration(
+      configuration,
+      harness,
+      this.providerForHarness(harness, auth, configuration),
+    );
+
     // Every model selection (fallbacks, subagents, image, PDF, per-channel, ...) and every Agent
     // entry uses the primary model's provider, named by the setting (finding 1291). Dedicated
     // Codex qualifies model policy selectors, so it refuses every bare one, a little more than
@@ -6242,6 +6222,19 @@ export class KubernetesComputeDriver implements ComputeDriver {
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): void {
+    const provider = this.providerAdmission(revision);
+    const admission = revision.compute.admission;
+    if (admission?.startsWith("model-provider:v1:")) {
+      if (provider === undefined || !admission.startsWith(`model-provider:v1:${provider}:`)) {
+        throw new ConfigurationFailure(
+          "The Installation model provider changed; deploy a new Agent revision.",
+        );
+      }
+    } else if (provider !== undefined) {
+      throw new ConfigurationFailure(
+        "The Agent revision has no model provider admission; deploy a new Agent revision.",
+      );
+    }
     this.validateExecutionAdmission(revision, "stored");
     const plan = revision.egressPlan;
     if (!plan) {
@@ -6454,7 +6447,13 @@ export class KubernetesComputeDriver implements ComputeDriver {
       revision,
       this.gatewaySandboxConfiguration(
         revision,
-        this.kubernetesGatewayConfigurationDocument(nativeConfiguration),
+        this.kubernetesGatewayConfigurationDocument(
+          modelProviderConfiguration(
+            nativeConfiguration,
+            revision.harness,
+            this.providerForHarness(revision.harness, revision.harnessAuth, nativeConfiguration),
+          ),
+        ),
       ),
     );
     const admittedRevision = { ...revision, configuration: admittedNativeConfiguration };
@@ -6734,7 +6733,6 @@ export class KubernetesComputeDriver implements ComputeDriver {
         repositoryConsumer,
         repositoryMaterial,
       ),
-      harnessAuth.credentialSource?.config.base_url,
       repositoryMaterial?.bindings.map((binding) => binding.client.repository),
     );
     if (repositoryMaterial !== undefined) {
@@ -7761,7 +7759,13 @@ export class KubernetesComputeDriver implements ComputeDriver {
       revision,
       this.gatewaySandboxConfiguration(
         revision,
-        this.kubernetesGatewayConfigurationDocument(nativeConfiguration),
+        this.kubernetesGatewayConfigurationDocument(
+          modelProviderConfiguration(
+            nativeConfiguration,
+            revision.harness,
+            this.providerForHarness(revision.harness, revision.harnessAuth, nativeConfiguration),
+          ),
+        ),
       ),
     );
     const admittedRevision = { ...revision, configuration: admittedNativeConfiguration };
@@ -7837,7 +7841,6 @@ export class KubernetesComputeDriver implements ComputeDriver {
           repositoryConsumer,
           repositoryMaterial,
         ),
-        harnessAuth.credentialSource?.config.base_url,
       );
       if (
         currentRevisionId !== revision.id ||
@@ -7949,7 +7952,6 @@ export class KubernetesComputeDriver implements ComputeDriver {
         repositoryConsumer,
         repositoryMaterial,
       ),
-      harnessAuth.credentialSource?.config.base_url,
       repositoryMaterial?.bindings.map((binding) => binding.client.repository),
     );
     if (repositoryMaterial !== undefined) {
@@ -11393,6 +11395,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
     if (revision.harnessAuth.method !== "credential_source") {
       return [];
     }
+    if (source?.type === "openai") {
+      requireModelSourceDestination(source.config, this.options.runtime?.modelProvider);
+    }
     const sourceId = revision.harnessAuth.sourceId;
     const attachment = attachments.find((entry) => entry.sourceId === sourceId);
     // Protected sources belong to the Credential Proxy, never the legacy Gateway.
@@ -14494,7 +14499,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
   }
 
   private hasProtectedCodexAdmission(revision: AgentRevision): boolean {
-    if (revision.compute.admission !== PROTECTED_CODEX_NO_CONNECTION_RETRY) {
+    if (this.runtimeAdmission(revision) !== PROTECTED_CODEX_NO_CONNECTION_RETRY) {
       return false;
     }
     if (!this.protectedCodexInference(revision)) {
@@ -14503,26 +14508,80 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     return true;
   }
 
+  private providerForHarness(
+    harness: RevisionHarnessDescriptor,
+    auth: HarnessAuthSnapshot,
+    configuration: OpenClawConfigurationDocument,
+  ): ModelProviderConfiguration | undefined {
+    if (this.options.runtime?.modelProvider === undefined) {
+      return undefined;
+    }
+    if (
+      auth.method !== "api_key" &&
+      !(auth.method === "credential_source" && auth.loginMode === "api_key")
+    ) {
+      return undefined;
+    }
+    if (
+      harness.id === "openclaw" &&
+      harnessModelAuthentication(configuration, harness.mode === "embedded").providerId !== "openai"
+    ) {
+      return undefined;
+    }
+    return this.options.runtime?.modelProvider;
+  }
+
+  private providerAdmission(revision: Readonly<AgentRevision>): string | undefined {
+    const provider = this.providerForHarness(
+      revision.harness,
+      revision.harnessAuth,
+      revision.configuration,
+    );
+    return provider === undefined
+      ? undefined
+      : sha256Hex(
+          JSON.stringify([
+            provider.protocol,
+            modelProviderBaseUrl(provider),
+            provider.supportsStandaloneWebSearch === true,
+          ]),
+        );
+  }
+
+  private runtimeAdmission(revision: Readonly<AgentRevision>): string | undefined {
+    const admission = revision.compute.admission;
+    if (!admission?.startsWith("model-provider:v1:")) {
+      return admission;
+    }
+    // Cleanup and public-reader withdrawal must still read the saved launch facts after
+    // an Installation change. Execution compares the provider before any delivery.
+    const saved = /^model-provider:v1:[a-f0-9]{64}:(.*)$/.exec(admission);
+    if (saved === null) {
+      throw new ConfigurationFailure("AgentRevision Compute admission is invalid.");
+    }
+    return saved[1] || undefined;
+  }
+
   admitRevision(revision: Readonly<AgentRevision>): string | undefined {
     this.validateGatewayManagedMode(revision);
     const publicService = this.publicGithubReadService(revision);
+    // Runtime launch facts remain inside the selected model-provider admission.
+    let runtime: string | undefined;
     if (publicService) {
-      return this.publicGithubReadServiceAdmission(publicService);
+      runtime = this.publicGithubReadServiceAdmission(publicService);
+    } else if (this.protectedCodexInference(revision)) {
+      runtime = PROTECTED_CODEX_NO_CONNECTION_RETRY;
+    } else if (this.publicGithubReadCandidate(revision) !== undefined) {
+      runtime = this.publicGithubReadAdmission();
     }
-    // A launch fact, not an authorization grant. Never infer it for stored revisions:
-    // older workers must refuse the new command and older Sandboxes keep their exact command.
-    if (this.protectedCodexInference(revision)) {
-      return PROTECTED_CODEX_NO_CONNECTION_RETRY;
-    }
-    return this.publicGithubReadCandidate(revision) === undefined
-      ? undefined
-      : this.publicGithubReadAdmission();
+    const provider = this.providerAdmission(revision);
+    return provider === undefined ? runtime : `model-provider:v1:${provider}:${runtime ?? ""}`;
   }
 
   private publicGithubReadForRevision(revision: AgentRevision) {
     const service = this.publicGithubReadService(revision);
     if (service) {
-      if (revision.compute.admission !== this.publicGithubReadServiceAdmission(service)) {
+      if (this.runtimeAdmission(revision) !== this.publicGithubReadServiceAdmission(service)) {
         throw new ConfigurationFailure("The public reader service has no exact Compute admission.");
       }
       return {
@@ -14535,20 +14594,20 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       };
     }
     if (
-      revision.compute.admission !== undefined &&
+      this.runtimeAdmission(revision) !== undefined &&
       !this.hasProtectedCodexAdmission(revision) &&
       !this.hasPublicGithubReadAdmission(revision)
     ) {
       throw new ConfigurationFailure("AgentRevision Compute admission is invalid.");
     }
     const admission = this.publicGithubReadAdmission();
-    return admission !== undefined && revision.compute.admission === admission
+    return admission !== undefined && this.runtimeAdmission(revision) === admission
       ? this.publicGithubReadCandidate(revision)
       : undefined;
   }
 
   private hasPublicGithubReadAdmission(revision: AgentRevision): boolean {
-    return /^public-github-read:v1:[a-f0-9]{64}$/.test(revision.compute.admission ?? "");
+    return /^public-github-read:v1:[a-f0-9]{64}$/.test(this.runtimeAdmission(revision) ?? "");
   }
 
   private async revokeUnavailablePublicGithubRead(
@@ -14686,28 +14745,30 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
   private pluginRuntimeSnapshot(
     revision: AgentRevision,
     repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy,
-    openaiBaseUrl?: string,
     authenticatedRepositories: readonly string[] = [],
   ): PluginRuntimeSnapshot | undefined {
-    const standaloneWebSearch =
-      openaiBaseUrl === undefined &&
-      revision.harness.id === "codex" &&
-      revision.harness.mode === "dedicated" &&
-      revision.harnessAuth?.method === "api_key" &&
-      this.options.runtime?.codexModelSupportsStandaloneWebSearch === true;
+    const provider = this.providerForHarness(
+      revision.harness,
+      revision.harnessAuth,
+      revision.configuration,
+    );
+    let openaiBaseUrl: string | undefined;
     if (
-      openaiBaseUrl === undefined &&
+      provider !== undefined ||
+      (revision.harnessAuth.method === "credential_source" &&
+        revision.harnessAuth.loginMode === "api_key")
+    ) {
+      openaiBaseUrl = modelProviderBaseUrl(provider);
+    }
+    const standaloneWebSearch =
       revision.harness.id === "codex" &&
       revision.harness.mode === "dedicated" &&
-      revision.harnessAuth?.method === "api_key"
-    ) {
-      openaiBaseUrl = this.options.runtime?.codexModelBaseUrl;
-    }
+      provider?.supportsStandaloneWebSearch === true;
     if (openaiBaseUrl !== undefined) {
       const normalized = normalizeOpenAiBaseUrl(openaiBaseUrl);
       if (normalized === undefined || openAiBaseUrlRewritesIpv4(openaiBaseUrl)) {
         throw new ConfigurationFailure(
-          openAiBaseUrlSpellingMessage("Codex model endpoint", openaiBaseUrl) ??
+          openAiBaseUrlSpellingMessage("Model provider endpoint", openaiBaseUrl) ??
             (openAiBaseUrlRewritesIpv4(openaiBaseUrl)
               ? "Codex model endpoint IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address."
               : "Codex model endpoint requires a valid HTTPS /v1 URL with a nonzero port and no hostname wildcards."),
@@ -16530,20 +16591,26 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         });
       }
     }
-    // The native worker consumes only the image release digest. Its Sandbox needs no plugin files.
+    // The managed release is in the image. The two processes receive only its
+    // identity and the reviewed tool selection, never the account's bearer.
     if (dedicated && pluginRuntime?.runtime.kind === "openclaw") {
-      for (const install of managedInstalls) {
-        const selection = pluginRuntime.runtime.selections[install.id];
-        if (!selection) {
-          continue;
-        }
-        const prefix = `OPENCLAW_MANAGED_${install.runtimeName.toUpperCase()}`;
-        if (role === "gateway") {
-          variables.push({ name: prefix + "_PLUGIN_ID", value: install.id });
-        }
-        if (selection.enabled) {
-          variables.push({ name: prefix + "_RELEASE_SHA256", value: install.releaseSha256 });
-        }
+      const { selections } = pluginRuntime.runtime;
+      const install = managedInstalls.find(({ id }) => Object.hasOwn(selections, id));
+      if (install && (selections[install.id]?.enabled || role === "gateway")) {
+        const selection = selections[install.id]!;
+        const binding =
+          install.kind === "mcp" ? managedMcpCredentialBinding(selections, install) : undefined;
+        variables.push({
+          name: MANAGED_PLUGIN_ENVIRONMENT,
+          value: JSON.stringify({
+            kind: install.kind,
+            packageName: install.packageName,
+            slotId: Object.keys(install.credentials)[0],
+            ...(role === "gateway" && { id: install.id }),
+            ...(selection.enabled && { releaseSha256: install.releaseSha256 }),
+            ...(binding?.toolNames.length && { toolNames: binding.toolNames }),
+          }),
+        });
       }
     }
     const needsPluginRuntime =

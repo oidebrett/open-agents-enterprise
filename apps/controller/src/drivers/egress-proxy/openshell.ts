@@ -1,3 +1,4 @@
+import type { ModelProviderConfiguration } from "../compute/model-provider.ts";
 import { wirePolicy } from "./openshell-wire-policy.ts";
 import type { EgressAuthorityConfiguration } from "../../composition/egress-authority.ts";
 import { bindOpenShellExchange } from "./openshell-exchange-binding.ts";
@@ -39,7 +40,7 @@ import {
   advertisesOpenShellExecutionProfile,
   openShellExchangeCapabilities as capabilities,
 } from "./openshell-exchange-capabilities.ts";
-import { openAiStaticProvider } from "./openai-provider.ts";
+import { createOpenAiStaticProvider } from "./openai-provider.ts";
 import { openShellRevisionServiceRules } from "../sandbox/openshell-service-access.ts";
 import { openShellProtectedCodexArtifacts } from "../sandbox/openshell-codex-artifacts.ts";
 import { assertBoundedWorkspaceNodeRule } from "../sandbox/openshell-workspace-node-policy.ts";
@@ -343,6 +344,7 @@ export class OpenShellCredentialProxyDriver implements CredentialProxyDriver {
       readonly mandatoryEnforcement?: OpenShellGitRuntime["mandatoryEnforcement"];
       readonly previewEnforcement?: OpenShellGitRuntime["previewEnforcement"];
       readonly preparedProviders?: readonly CredentialProviderDefinition[];
+      readonly modelProvider?: ModelProviderConfiguration;
     },
   ) {
     requireConfiguration(OpenShellCredentialProxyDriver, options);
@@ -372,7 +374,7 @@ export class OpenShellCredentialProxyDriver implements CredentialProxyDriver {
       sender: { id: `${selection.backend.id}/supervisor`, generation: 1 },
       resolver: { id: `${selection.id}/resolver`, generation: 1 },
       providers: [
-        openAiStaticProvider,
+        createOpenAiStaticProvider(selection.modelProvider),
         credentialFreeMetadataProvider,
         ...(selection.preparedProviders ?? []),
       ],

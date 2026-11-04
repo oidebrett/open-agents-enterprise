@@ -67,6 +67,73 @@ test("QA Agent reads the selected Preset in its Namespace", async (t) => {
   });
 });
 
+test("QA preset preparation explicitly seeds defaults and reloads the selected Namespace", async (t) => {
+  const { prepareQaPreset, createQaAgent } = await import("../helpers/qa-installation.mjs");
+  for (const outcome of ["available", "missing", "foreign", "save denied"]) {
+    await t.test(outcome, async () => {
+      const calls = [];
+      const stopped = new Error("stop before credential reads");
+      const f = {
+        retained: false,
+        pendingRepositories: new Set(),
+        agents: [],
+        namespace: { id: "ns-selected" },
+        defaultNamespace: { id: "ns-default" },
+        presets: [],
+        configuration: { drivers: { plugin: { id: "codex-plugin", configuration: {} } } },
+        async saveInstallation(configuration) {
+          calls.push("save");
+          assert.equal(configuration.presets.includeDefaults, true);
+          if (outcome === "save denied") {
+            throw stopped;
+          }
+        },
+        async api(method, path) {
+          assert.equal(method, "GET", "bootstrap must not create Agents or Secrets");
+          calls.push(path);
+          if (path === "/namespaces/ns-selected/presets") {
+            return outcome === "missing"
+              ? []
+              : [
+                  {
+                    id: "pre-codex",
+                    name: "Standard Codex",
+                    namespaceId: outcome === "foreign" ? "ns-foreign" : "ns-selected",
+                  },
+                ];
+          }
+          throw stopped;
+        },
+      };
+      // The launcher left the catalog empty. Ordinary preparation must keep that
+      // opt-out; this scenario alone authorizes seeding through startup input.
+      await prepareQaPreset(f, "Codex");
+      assert.deepEqual(calls, []);
+      if (outcome === "save denied") {
+        await assert.rejects(
+          prepareQaPreset(f, "Codex", { includeDefaults: true }),
+          (error) => error === stopped,
+        );
+        assert.deepEqual(calls, ["save"]);
+        return;
+      }
+      await prepareQaPreset(f, "Codex", { includeDefaults: true });
+      assert.deepEqual(calls, ["save", "/namespaces/ns-selected/presets"]);
+      await assert.rejects(createQaAgent(f, "Codex"), (error) =>
+        outcome === "available"
+          ? error === stopped
+          : outcome === "missing"
+            ? /Standard Codex Preset must be available/.test(error.message)
+            : /Preset must belong to the QA Namespace/.test(error.message),
+      );
+      assert.deepEqual(
+        calls.slice(2),
+        outcome === "available" ? ["/namespaces/ns-selected/presets/pre-codex"] : [],
+      );
+    });
+  }
+});
+
 test("QA credentials require a private regular file and reject symlink substitution", async (t) => {
   const directory = await temporaryDirectory(t, "qa-credential-");
   const credential = join(directory, "credential");

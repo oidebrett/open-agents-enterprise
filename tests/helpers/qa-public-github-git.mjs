@@ -267,7 +267,7 @@ export async function verifyQaPublicGithubGit(context, artifacts) {
   });
   try {
     await verifyReaderSource(f);
-    await prepareQaPreset(f, "Codex");
+    await prepareQaPreset(f, "Codex", { includeDefaults: true });
     await f.apply({
       apiVersion: "v1",
       kind: "Namespace",
@@ -290,7 +290,10 @@ export async function verifyQaPublicGithubGit(context, artifacts) {
     f.afterSaveInstallation = () => routeReader(f, reader.peer.address);
     const compute = f.configuration.drivers.compute.configuration;
     compute.network.publicGithubRead = reader.peer;
-    compute.runtime.codexModelBaseUrl = process.env.OCC_TEST_QA_CODEX_MODEL_BASE_URL;
+    compute.runtime.modelProvider = {
+      protocol: "openai-responses",
+      baseUrl: process.env.OCC_TEST_QA_CODEX_MODEL_BASE_URL,
+    };
     // This public-only service scope admits no ambient artifact destinations.
     f.configuration.drivers.sandbox.configuration.policy.codexArtifactRuleNames = [];
     await f.saveInstallation(f.configuration);

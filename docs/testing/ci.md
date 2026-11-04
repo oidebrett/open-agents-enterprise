@@ -379,7 +379,11 @@ jobs because its explicit endpoint and API-key inputs differ from account-login 
 
 `public-github-git` is an exclusive selection on a separate Compose control plane
 with Kubernetes Compute and OpenShell. Select the `Codex` preset and `compose`
-installation. Supply the same protected API-key inputs as `codex-search-config`,
+installation. This scenario explicitly enables bundled presets in its Installation
+input and reloads the selected Namespace catalog before creating an Agent. Other
+OpenShell startup defaults remain unchanged. It selects the shared
+`runtime.modelProvider` with the `openai-responses` protocol.
+Supply the same protected API-key inputs as `codex-search-config`,
 plus an explicit model. `OCC_TEST_DEV_UP_CONTAINER_ENGINE=podman` selects Podman
 for local execution; this Compose topology also needs a `docker-compose` provider
 that accepts `--project-directory`. Rootful Podman on macOS also needs the exact
@@ -454,6 +458,34 @@ following [fixture conventions](fixtures-and-scenarios.md); register inputs in
 the manifest and workflow. Workers own Agents/cleanup; keep dependent steps
 sequential and installation-wide changes outside workers. Preserve failure,
 security and disposal assertions.
+
+### Local k3d quickstart on a fresh runner
+
+Dispatch the [k3d quickstart workflow](../../.github/workflows/k3d-quickstart-e2e.yml) on `main`:
+
+```sh
+gh workflow run k3d-quickstart-e2e.yml --ref main
+```
+
+The workflow creates a fresh local installation, onboards a model-only Agent in the
+Control UI, and reopens the original conversation. It enables Linear and reads
+a known team through the Agent. It then adds Git to the same Agent, pushes one
+empty commit to a unique test branch, verifies the remote commit, and restores
+read-only access. It verifies that the final deployment retains Linear and that
+the Agent recalls the preference from its original conversation.
+
+Configure these inputs at the **repository** level:
+
+| Input                                    | Purpose                                                                           |
+| ---------------------------------------- | --------------------------------------------------------------------------------- |
+| Secret `OCE_QUICKSTART_CODEX_PAT`        | Codex service account with the selected model and an authorized Linear connection |
+| Secret `OCE_TEST_GITHUB_APP_PRIVATE_KEY` | RSA key for the App installed on the test repository                              |
+| Variable `OCE_QUICKSTART_MODEL`          | Model available to the service account                                            |
+| Variable `OCC_TEST_LINEAR_TEAM_ID`       | ID of a team the connected account can read                                       |
+
+Use the workflow result and its sanitized receipt to check the push, read-only
+restoration, tool result and cleanup. If a run ends during a push, check the
+remote ref before retrying. Keep the private operator session on the runner.
 
 <a id="manual-full-integration-lanes"></a>
 

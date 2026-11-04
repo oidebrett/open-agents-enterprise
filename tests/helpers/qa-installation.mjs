@@ -935,7 +935,7 @@ export async function prepareQaConsoleTheme(f) {
   });
 }
 
-export async function prepareQaPreset(f, presetName) {
+export async function prepareQaPreset(f, presetName, { includeDefaults = false } = {}) {
   assert.ok(
     !f.retained && f.pendingRepositories.size === 0,
     "blocked by unresolved repository cleanup",
@@ -944,16 +944,28 @@ export async function prepareQaPreset(f, presetName) {
   const desiredPlugin = codex ? "codex-plugin" : "occ-plugin";
   // The launcher's Gateway resources match the production example, whose memory
   // limit covers the full native repository workload; only the plugin varies.
-  if (f.configuration.drivers.plugin?.id !== desiredPlugin) {
+  const changePlugin = f.configuration.drivers.plugin?.id !== desiredPlugin;
+  const seedDefaults = includeDefaults && f.configuration.presets?.includeDefaults !== true;
+  if (changePlugin || seedDefaults) {
     assert.ok(
       f.agents.every((agent) => agent.stopped),
       "stop the prior Agent before changing the installation runtime configuration",
     );
-    f.configuration.drivers.plugin = {
-      id: desiredPlugin,
-      configuration: codex ? { catalogSource: "openai-curated" } : {},
-    };
+    if (changePlugin) {
+      f.configuration.drivers.plugin = {
+        id: desiredPlugin,
+        configuration: codex ? { catalogSource: "openai-curated" } : {},
+      };
+    }
+    if (seedDefaults) {
+      f.configuration.presets = { ...f.configuration.presets, includeDefaults: true };
+    }
     await f.saveInstallation(f.configuration);
+  }
+  if (includeDefaults) {
+    // Startup may seed an existing Namespace. Use its actual catalog; a missing
+    // or foreign Preset still fails in createQaAgent before reading credentials.
+    f.presets = await f.api("GET", `/namespaces/${f.namespace.id}/presets`);
   }
 }
 
