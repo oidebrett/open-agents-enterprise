@@ -348,16 +348,17 @@ OCC_TEST_QA_MATRIX=1 node --env-file="$TEST_ENV_FILE" \
 
 #### Scenarios
 
-| Scenario                | In advisory | Presets         | Checks                                                                                                                                  |
-| ----------------------- | ----------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `model-ui`              | Yes (Codex) | OpenClaw, Codex | Real model turn and native browser response.                                                                                            |
-| `console-secrets`       | Yes (Codex) | OpenClaw, Codex | Console Secret lifecycle and Agent draft references; Namespace deletion refusal names the deployed Agent and scopes cleanup navigation. |
-| `git-write`             | No          | OpenClaw, Codex | Clone, edit, commit, push to the run's granted branch, dispose credentials.                                                             |
-| `git-push-denied`       | No          | Codex           | Reject a push to any other branch and dispose credentials.                                                                              |
-| `calendar`              | Yes (Codex) | Codex           | Successful Calendar read, approvals and tool restrictions.                                                                              |
-| `slack`                 | No          | Codex           | Threaded reply and new root message.                                                                                                    |
-| `openshell-linear-read` | No          | Codex           | Opt-in shipped OpenShell setup, Linear installation and verified native read.                                                           |
-| `codex-search-config`   | No          | Codex           | API-key Agent user configuration with omitted, false and true capability declarations; persistence after supported stop/deploy.         |
+| Scenario                | In advisory                  | Presets         | Checks                                                                                                                                          |
+| ----------------------- | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model-ui`              | Yes (Codex)                  | OpenClaw, Codex | Real model turn and native browser response.                                                                                                    |
+| `console-secrets`       | Yes (Codex)                  | OpenClaw, Codex | Console Secret lifecycle and Agent draft references; Namespace deletion refusal names the deployed Agent and scopes cleanup navigation.         |
+| `git-write`             | No                           | OpenClaw, Codex | Clone, edit, commit, push to the run's granted branch, dispose credentials.                                                                     |
+| `git-push-denied`       | No                           | Codex           | Reject a push to any other branch and dispose credentials.                                                                                      |
+| `calendar`              | Yes (Codex)                  | Codex           | Successful Calendar read, approvals and tool restrictions.                                                                                      |
+| `slack`                 | No                           | Codex           | Threaded reply and new root message.                                                                                                            |
+| `openshell-linear-read` | No                           | Codex           | Opt-in shipped OpenShell setup, Linear installation and verified native read.                                                                   |
+| `public-github-git`     | Yes (separate OpenShell job) | Codex           | Anonymous native Git clone/fetch, ceiling and Agent selection, denial, real model turn, replacement, controller recovery and scoped withdrawal. |
+| `codex-search-config`   | No                           | Codex           | API-key Agent user configuration with omitted, false and true capability declarations; persistence after supported stop/deploy.                 |
 
 `OCC_TEST_QA_INSTALLATION` accepts `all` (default), `compose`, `kubernetes`;
 `OCC_TEST_QA_PRESET` accepts `all` (default), `OpenClaw`, `Codex`.
@@ -375,6 +376,21 @@ private regular files and reject symlinks. Set `OCC_TEST_QA_CODEX_MODEL` to an
 available model. The scenario proves generated configuration and native startup;
 it does not prove live web-search results. It is excluded from `all` and advisory
 jobs because its explicit endpoint and API-key inputs differ from account-login QA.
+
+`public-github-git` is an exclusive selection on a separate Compose control plane
+with Kubernetes Compute and OpenShell. Select the `Codex` preset and `compose`
+installation. Supply the same protected API-key inputs as `codex-search-config`,
+plus an explicit model. `OCC_TEST_DEV_UP_CONTAINER_ENGINE=podman` selects Podman
+for local execution; this Compose topology also needs a `docker-compose` provider
+that accepts `--project-directory`. Rootful Podman on macOS also needs the exact
+selected VM gateway `/32` in `OCC_DEVELOPMENT_TRUSTED_FORWARDER_CIDR`; this is the
+existing development forwarding setting. The scenario uses live anonymous `github.com` reads, a
+shallow clone and an unshallow fetch with additional commit objects. It appends
+its disposable reader CA to a stock supervisor image's system roots and records
+that image distinction. Installed workflow qualification remains pending.
+Known-private denial, protected fork read/write coexistence, and ten-minute
+expiry isolation require separate proof; an unavailable URL does not prove
+private repository isolation. No GitHub App credential is required.
 
 All combinations check startup and authenticated console login. Git alone starts
 the broker. Linear reads use the explicit `openshell-linear-read` scenario,

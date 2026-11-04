@@ -325,6 +325,7 @@ process.exit(r.error ? 0 : r.status);`;
         "tests/helpers/available-port.mjs",
         "tests/helpers/reuse-port-preload.mjs",
         "apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts",
+        "apps/controller/src/drivers/repo/github/public-read/transport.mjs",
         "apps/controller/src/drivers/compute/kubernetes/codex-plugin-stdio.ts",
         "apps/controller/plugins/oce-google-workspace/ai.openclaw.oce/release.json",
         "apps/controller/src/drivers/compute/embedded-gateway-owner.ts",
