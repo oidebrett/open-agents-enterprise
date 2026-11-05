@@ -72,7 +72,7 @@ is in the [QA manifest](../../../scripts/ci/test-suites/qa-matrix.json).
 | `calendar`              | Yes (Codex)                  | Codex           | Successful Calendar read, approvals and tool restrictions.                                                                                                 |
 | `slack`                 | No                           | Codex           | Threaded reply and new root message.                                                                                                                       |
 | `openshell-linear-read` | No                           | Codex           | Opt-in shipped OpenShell setup, Linear installation and verified native read.                                                                              |
-| `public-github-git`     | Yes (separate OpenShell job) | Codex           | Anonymous native Git clone/fetch, ceiling and Agent selection, denial, real model turn, replacement, controller recovery and scoped withdrawal.            |
+| `public-github-git`     | Yes (separate OpenShell job) | Codex           | Ordinary OpenShell Git clone/fetch, reader scope, denial, real model turn, replacement, controller recovery and scoped withdrawal.                         |
 | `codex-search-config`   | No                           | Codex           | API-key Agent user configuration with omitted, false and true capability declarations; persistence after supported stop/deploy.                            |
 
 The [QA matrix test](../../../tests/integration/qa-matrix-real.test.mjs) implements
@@ -168,8 +168,12 @@ results. Its API-key setup differs from the scheduled account-login tests.
 Select `public-github-git` alone with the `Codex` preset and `compose`
 installation. It creates a separate Compose control plane with Kubernetes Compute
 and OpenShell, enables bundled presets in its Installation input, and reloads the
-Namespace catalog before creating an Agent. Other OpenShell startup defaults stay
-unchanged. It selects `runtime.modelProvider` with the `openai-responses` protocol.
+Namespace catalog before creating an Agent. It uses ordinary, unprotected execution
+and narrows the launcher's exact direct GitHub rule to no endpoints for this test.
+The outer OpenShell policy must then deny GitHub before Agent opt-in. Other
+OpenShell defaults and provider-selected native execution settings stay unchanged.
+It checks the revision's exact Compute service acknowledgement in the admitted
+Sandbox policy. It selects `runtime.modelProvider` with the `openai-responses` protocol.
 Supply the same protected API-key inputs as `codex-search-config`, plus an explicit
 model. No GitHub App credential is required.
 
@@ -180,9 +184,9 @@ gateway `/32` in the existing `OCC_DEVELOPMENT_TRUSTED_FORWARDER_CIDR` setting.
 The scenario uses live anonymous `github.com` reads, a shallow clone and an
 unshallow fetch with additional commit objects. It appends its disposable reader
 CA to a stock supervisor image's system roots and records that image distinction.
-Installed workflow qualification remains pending. Known-private denial, protected
-fork read/write coexistence, and ten-minute expiry isolation require separate
-proof; an unavailable URL does not prove private repository isolation.
+Installed ordinary workflow qualification remains pending. Paired protected
+execution, known-private denial, protected fork read/write coexistence, and
+ten-minute expiry isolation require separate proof; an unavailable URL does not prove private repository isolation.
 
 Ordinary matrix cells check startup and authenticated console login. Only the `git-write` and
 `git-push-denied` scenarios start the broker. `openshell-linear-read` instead starts its own
@@ -282,6 +286,6 @@ complete disposal, then recreate only this run's installation.
 - [Advisory workflow](../../../.github/workflows/qa-advisory.yml): eligibility, parallel OpenShell runners, and artifact names.
 - [QA manifest](../../../scripts/ci/test-suites/qa-matrix.json) and [OpenShell manifest](../../../scripts/ci/test-suites/openshell.json): exact files and requirements.
 - [QA matrix test](../../../tests/integration/qa-matrix-real.test.mjs): Agent scenarios.
-- [Public Git scenario](../../../tests/helpers/qa-public-github-git.mjs): installed protected Git workflow.
+- [Public Git scenario](../../../tests/helpers/qa-public-github-git.mjs): ordinary OpenShell public-reader workflow; protected coexistence requires separate proof.
 - [Scenario selection](../../../tests/helpers/qa-selection.mjs): presets, selectors, and required inputs.
 - [Hosted credentials](../../../scripts/ci/qa-matrix-credentials.mjs): environment preparation.
