@@ -13,7 +13,6 @@ import type {
   CredentialSourceInput,
   CredentialSourceStatus,
   CredentialSourceType,
-  CredentialSourceToken,
 } from "@openclaw-enterprise/contracts";
 import {
   configurationSettingMessage,
@@ -29,7 +28,7 @@ import { verifyManagedPluginRegistration } from "../sandbox/openshell-plugin-pol
 import { managedMcpProviderEndpoint } from "../sandbox/openshell-managed-mcp-policy.ts";
 import {
   managedCredentialBinding,
-  managedMcpCredentialBinding,
+  managedMcpCredentialBindings,
   managedMcpInstallForSourceConfig,
   managedMcpSlotAcceptsSource,
 } from "../plugin/managed-catalog.ts";
@@ -1135,27 +1134,6 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
     return { state: "ready" };
   }
 
-  async withSourceToken<T>(
-    context: CredentialSourceContext,
-    use: (token: CredentialSourceToken) => Promise<T>,
-  ): Promise<T> {
-    const provider = await this.codexProvider(context);
-    const account = codexAccountMetadata(provider.config);
-    // Only the operator channel can export credentials. OpenShell may refresh to
-    // satisfy its lifetime guarantee; the Driver never receives refresh material here.
-    const token = await this.credentialClient(context).getProviderCredential(
-      openShellWorkspaceName(context.namespace),
-      provider.name,
-      CODEX_ACCESS_TOKEN_ENV,
-      context.signal,
-    );
-    return use({
-      accessToken: token.value,
-      accountId: account.accountId,
-      ...(account.isFedramp === undefined ? {} : { isFedramp: account.isFedramp }),
-    });
-  }
-
   async sourceStatus(context: CredentialSourceContext): Promise<CredentialSourceStatus> {
     knownSourceType(context.source.type);
     const provider = await this.client(context).getProvider(
@@ -1201,13 +1179,19 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
   ): Promise<readonly CredentialSourceAttachment[]> {
     const workspace = openShellWorkspaceName(context.namespace);
     const client = this.client(context);
-    const binding = managedCredentialBinding(context.revision.plugins?.plugins);
-    const mcpBinding = managedMcpCredentialBinding(context.revision.plugins?.plugins);
-    const mcpSource = context.sources.find(({ id }) => id === mcpBinding?.sourceId);
-    if (mcpBinding && mcpSource && !managedMcpSlotAcceptsSource(mcpBinding.install, mcpSource)) {
-      throw new ScopeViolationError(
-        "The attached MCP account does not match the reviewed credential slot.",
-      );
+    const binding = managedCredentialBinding(
+      context.revision.plugins?.plugins,
+      managedGoogleInstall,
+    );
+    for (const { install, sourceId } of managedMcpCredentialBindings(
+      context.revision.plugins?.plugins,
+    )) {
+      const source = context.sources.find(({ id }) => id === sourceId);
+      if (source && !managedMcpSlotAcceptsSource(install, source)) {
+        throw new ScopeViolationError(
+          "The attached MCP account does not match the reviewed credential slot.",
+        );
+      }
     }
     for (const source of context.sources.filter(({ config }) => config.protocol === "mcp")) {
       const install = managedMcpInstallForSourceConfig(source.config);
@@ -1444,37 +1428,8 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
     return detached === undefined ? absent() : settle(detached.receiptId);
   }
 
-  private async codexProvider(
-    context: CredentialSourceContext,
-  ): Promise<OpenShellProviderResponse> {
-    if (
-      context.source.type !== CODEX_OAUTH_TYPE ||
-      context.source.driverId !== this.id ||
-      context.source.namespaceId !== context.namespace.id
-    ) {
-      throw new ScopeViolationError("The Codex OAuth source is not owned by this gateway.");
-    }
-    const provider = await this.client(context).getProvider(
-      openShellWorkspaceName(context.namespace),
-      openShellProviderName(context.source.id),
-      context.signal,
-    );
-    if (!provider || !ownedBy(provider, context.source.id)) {
-      throw new ScopeViolationError(
-        "The OpenShell provider is not owned by this Codex OAuth source.",
-      );
-    }
-    return provider;
-  }
-
   private client(context: CredentialGatewayContext & { readonly namespace: { name: string } }) {
     return this.backend.client.clientForNamespace(context.namespace.name);
-  }
-
-  private credentialClient(
-    context: CredentialGatewayContext & { readonly namespace: { name: string } },
-  ) {
-    return this.backend.client.credentialClientForNamespace(context.namespace.name);
   }
 
   private placement(

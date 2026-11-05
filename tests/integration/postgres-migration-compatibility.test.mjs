@@ -1854,6 +1854,7 @@ async function canonicalData(db) {
       "repository_access",
       "harness_auth_credential_source_id",
       "plugin_approvers",
+      "plugin_driver",
       "credential_sources",
       "sandbox_policy_editing",
       "gateway_managed_mode",
@@ -1996,7 +1997,9 @@ test(
       [63, "preGatewayManagedMode"],
       [64, "preSelectedRepositorySet"],
       [65, "preAgentDeployIntent"],
-      [66, "preComputeServiceAccess"],
+      [66, "preAgentCredentialSourceLimit"],
+      [67, "preAgentPluginDriver"],
+      [68, "preComputeServiceAccess"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });

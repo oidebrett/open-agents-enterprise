@@ -68,7 +68,7 @@ test("QA Agent reads the selected Preset in its Namespace", async (t) => {
 });
 
 test("QA preset preparation explicitly seeds defaults and reloads the selected Namespace", async (t) => {
-  const { prepareQaPreset, createQaAgent } = await import("../helpers/qa-installation.mjs");
+  const { prepareQaPluginCatalogs, createQaAgent } = await import("../helpers/qa-installation.mjs");
   for (const outcome of ["available", "missing", "foreign", "save denied"]) {
     await t.test(outcome, async () => {
       const calls = [];
@@ -80,15 +80,44 @@ test("QA preset preparation explicitly seeds defaults and reloads the selected N
         namespace: { id: "ns-selected" },
         defaultNamespace: { id: "ns-default" },
         presets: [],
-        configuration: { drivers: { plugin: { id: "codex-plugin", configuration: {} } } },
+        configuration: { drivers: { plugin: [{ id: "codex-plugin", configuration: {} }] } },
         async saveInstallation(configuration) {
           calls.push("save");
           assert.equal(configuration.presets.includeDefaults, true);
+          assert.deepEqual(
+            configuration.drivers.plugin.map(({ id }) => id),
+            ["occ-plugin", "codex-plugin"],
+          );
           if (outcome === "save denied") {
             throw stopped;
           }
         },
-        async api(method, path) {
+        async record() {},
+        async api(method, path, body) {
+          if (path === "/installation") {
+            assert.equal(method, "GET");
+            return {
+              capabilities: {
+                pluginCatalogs: [
+                  { harnessId: "openclaw", pluginPolicies: { driver: { id: "occ-plugin" } } },
+                  { harnessId: "codex", pluginPolicies: { driver: { id: "codex-plugin" } } },
+                ],
+              },
+            };
+          }
+          if (path === "/namespaces/ns-selected/agents/plugins") {
+            assert.equal(method, "POST");
+            return {
+              plugins: [
+                {
+                  id:
+                    body.harnessId === "codex"
+                      ? "codex-plugin:linear@openai-curated-remote"
+                      : "occ-plugin:google@1.0.0",
+                },
+              ],
+            };
+          }
           assert.equal(method, "GET", "bootstrap must not create Agents or Secrets");
           calls.push(path);
           if (path === "/namespaces/ns-selected/presets") {
@@ -105,19 +134,15 @@ test("QA preset preparation explicitly seeds defaults and reloads the selected N
           throw stopped;
         },
       };
-      // The launcher left the catalog empty. Ordinary preparation must keep that
-      // opt-out; this scenario alone authorizes seeding through startup input.
-      await prepareQaPreset(f, "Codex");
-      assert.deepEqual(calls, []);
       if (outcome === "save denied") {
         await assert.rejects(
-          prepareQaPreset(f, "Codex", { includeDefaults: true }),
+          prepareQaPluginCatalogs(f, { includeDefaults: true }),
           (error) => error === stopped,
         );
         assert.deepEqual(calls, ["save"]);
         return;
       }
-      await prepareQaPreset(f, "Codex", { includeDefaults: true });
+      await prepareQaPluginCatalogs(f, { includeDefaults: true });
       assert.deepEqual(calls, ["save", "/namespaces/ns-selected/presets"]);
       await assert.rejects(createQaAgent(f, "Codex"), (error) =>
         outcome === "available"
@@ -293,6 +318,7 @@ test("QA selection keeps prerequisite credentials and reports omitted coverage",
   assert.deepEqual(selected.cells[0].notApplicable, [
     "codex-search-config",
     "calendar",
+    "git-write",
     "git-push-denied",
     "slack",
   ]);
@@ -313,7 +339,25 @@ test("QA selection keeps prerequisite credentials and reports omitted coverage",
   assert.ok(!calendar.requiredEnv.includes("OCC_TEST_QA_OPENAI_KEY_FILE"));
   assert.deepEqual(calendar.cells[0].scenarios, []);
   const openclaw = selectQaMatrix({ OCC_TEST_QA_PRESET: "OpenClaw" });
-  assert.deepEqual(openclaw.cells[0].scenarios, ["model-ui", "console-secrets", "git-write"]);
+  assert.deepEqual(openclaw.cells[0].scenarios, ["model-ui", "console-secrets"]);
+  assert.equal(openclaw.repository, false);
+  assert.ok(!openclaw.requiredEnv.some((name) => /REPOSITORY|GITHUB_OBSERVER/.test(name)));
+  assert.throws(
+    () => selectQaMatrix({ OCC_TEST_QA_SCENARIOS: "git-write", OCC_TEST_QA_PRESET: "OpenClaw" }),
+    /not applicable/,
+  );
+  const git = selectQaMatrix({ OCC_TEST_QA_SCENARIOS: "git-write,git-push-denied" });
+  assert.deepEqual(
+    git.cells.map(({ cell, scenarios }) => ({ cell, scenarios })),
+    [
+      { cell: "compose/OpenClaw", scenarios: [] },
+      { cell: "compose/Codex", scenarios: ["git-write", "git-push-denied"] },
+      { cell: "kubernetes/OpenClaw", scenarios: [] },
+      { cell: "kubernetes/Codex", scenarios: ["git-write", "git-push-denied"] },
+    ],
+  );
+  assert.ok(git.repository);
+  assert.ok(!git.requiredEnv.includes("OCC_TEST_QA_OPENAI_KEY_FILE"));
   assert.ok(!openclaw.requiredEnv.some((name) => /CODEX|SLACK|CALENDAR/.test(name)));
   const secrets = selectQaMatrix({
     OCC_TEST_QA_SCENARIOS: "console-secrets",
@@ -461,7 +505,7 @@ test("hosted QA materializes only selected credentials and rejects missing selec
   await assert.rejects(readFile(githubEnv), { code: "ENOENT" });
 });
 
-test("QA command diagnostics retain the error while hiding generated and environment secrets", async () => {
+test("QA command diagnostics retain the error while hiding generated and environment secrets", async (t) => {
   const { qaCommandFailureDetail, registerQaSecret } = await import("../helpers/qa-secrets.mjs");
   registerQaSecret("generated-private-value");
   const output = qaCommandFailureDetail(
@@ -474,6 +518,58 @@ test("QA command diagnostics retain the error while hiding generated and environ
   assert.doesNotMatch(
     output,
     /generated-private-value|process-private-value|example-private-value/,
+  );
+  await t.test(
+    "native failure metadata keeps fixed classes without echoing response or log values",
+    async () => {
+      const { nativeTaskFailureSummary } = await import("../helpers/normal-agent-tools.mjs");
+      const summary = nativeTaskFailureSummary(
+        "thread/start: Codex did not grant the requested permission profile. Authorization: Bearer native-private-value",
+      );
+      assert.deepEqual(summary, {
+        classes: ["profile-grant-mismatch"],
+        nativeMethod: "thread/start",
+      });
+      assert.doesNotMatch(
+        JSON.stringify(summary),
+        /native-private-value|Authorization|Codex did not/,
+      );
+      assert.deepEqual(nativeTaskFailureSummary("unrecognized private-native-message"), {
+        classes: ["unclassified"],
+        nativeMethod: "unknown",
+      });
+    },
+  );
+  await t.test(
+    "native requirements distinguish missing experimental fields from an explicit allowlist",
+    async () => {
+      const { nativePolicyRequirementsSummary } = await import("../helpers/normal-agent-tools.mjs");
+      assert.deepEqual(nativePolicyRequirementsSummary({}), { available: false });
+      assert.equal(
+        nativePolicyRequirementsSummary({ requirements: {} }).profileAllowlistPresent,
+        "unknown",
+      );
+      const expected = "openclaw-network-0123456789abcdef";
+      const summary = nativePolicyRequirementsSummary({
+        requirements: {
+          allowedPermissionProfiles: {
+            ":workspace": true,
+            ":read-only": true,
+            [expected]: false,
+          },
+          defaultPermissions: ":workspace",
+          modelProviders: { privateProvider: { apiKey: "native-private-value" } },
+        },
+      });
+      assert.equal(summary.profileAllowlistPresent, true);
+      assert.equal(summary.workspaceAllowed, true);
+      assert.equal(summary.generatedNetworkProfilesAllowed, 0);
+      assert.equal(summary.defaultProfileKind, "builtin-workspace");
+      assert.doesNotMatch(
+        JSON.stringify(summary),
+        /0123456789abcdef|native-private-value|privateProvider|modelProviders/,
+      );
+    },
   );
 });
 
@@ -713,13 +809,13 @@ test(
         requestQaApi(f, "POST", path, { requestOnly: "request-body-must-not-be-captured" }),
         (error) => {
           assert.equal(error.code, "ERR_ASSERTION");
-          assert.equal(error.message, `OCC POST ${path}: HTTP 409`);
+          assert.equal(
+            error.message,
+            `OCC POST ${path}: HTTP 409 (${path === "/refused" ? "FIXTURE_REFUSAL" : "unknown"})`,
+          );
           assert.equal(error.actual, false);
           assert.equal(error.expected, true);
-          assert.doesNotMatch(
-            error.stack,
-            /FIXTURE_REFUSAL|registered-private|environment-private|token-private/,
-          );
+          assert.doesNotMatch(error.stack, /registered-private|environment-private|token-private/);
           return true;
         },
       );

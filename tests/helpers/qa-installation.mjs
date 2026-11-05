@@ -198,11 +198,17 @@ async function captureQaApiRefusal(f, response) {
       return;
     }
     let text = Buffer.concat(chunks).toString("utf8");
+    let code = "unknown";
     if (!truncated) {
       try {
         // Separate envelope fields before line redaction so a credential on
         // one compact JSON line cannot hide an unrelated refusal code/path.
-        text = JSON.stringify(JSON.parse(text), null, 2);
+        const envelope = JSON.parse(text);
+        const candidate = envelope.error?.code;
+        if (typeof candidate === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(candidate)) {
+          code = redactedQaTail(candidate, f.env, { lines: 1, lineChars: 80 }).join("");
+        }
+        text = JSON.stringify(envelope, null, 2);
       } catch {
         // Plain text and malformed JSON still receive the same redaction.
       }
@@ -224,9 +230,10 @@ async function captureQaApiRefusal(f, response) {
         `HTTP ${response.status}\n${truncated ? "[response truncated at 64 KiB]\n" : ""}${redacted}\n`,
       );
     }
+    return code;
   };
   try {
-    await Promise.race([
+    return await Promise.race([
       capture().catch(() => {}),
       new Promise((resolve) => {
         timer = setTimeout(() => {
@@ -252,11 +259,9 @@ export async function requestQaApi(f, method, path, body) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(30_000),
   });
-  try {
-    assert.ok(response.ok, `OCC ${method} ${path}: HTTP ${response.status}`);
-  } catch (error) {
-    await captureQaApiRefusal(f, response).catch(() => {});
-    throw error;
+  if (!response.ok) {
+    const code = (await captureQaApiRefusal(f, response).catch(() => {})) ?? "unknown";
+    assert.ok(response.ok, `OCC ${method} ${path}: HTTP ${response.status} (${code})`);
   }
   const text = await response.text();
   return text ? JSON.parse(text).data : undefined;
@@ -964,6 +969,7 @@ export async function createQaInstallation(
       throw error;
     }
     await f.run(join(repository, "scripts/dev-down"), [], { timeout: 300_000 });
+    await f.cleanupRepositoryInputs?.();
   });
   await f.record("ownership", {
     cluster,
@@ -1158,38 +1164,49 @@ export async function prepareQaConsoleTheme(f) {
   });
 }
 
-export async function prepareQaPreset(f, presetName, { includeDefaults = false } = {}) {
+export async function prepareQaPluginCatalogs(f, { includeDefaults = false } = {}) {
   assert.ok(
     !f.retained && f.pendingRepositories.size === 0,
     "blocked by unresolved repository cleanup",
   );
-  const codex = presetName === "Codex";
-  const desiredPlugin = codex ? "codex-plugin" : "occ-plugin";
-  // The launcher's Gateway resources match the production example, whose memory
-  // limit covers the full native repository workload; only the plugin varies.
-  const changePlugin = f.configuration.drivers.plugin?.id !== desiredPlugin;
-  const seedDefaults = includeDefaults && f.configuration.presets?.includeDefaults !== true;
-  if (changePlugin || seedDefaults) {
-    assert.ok(
-      f.agents.every((agent) => agent.stopped),
-      "stop the prior Agent before changing the installation runtime configuration",
-    );
-    if (changePlugin) {
-      f.configuration.drivers.plugin = {
-        id: desiredPlugin,
-        configuration: codex ? { catalogSource: "openai-curated" } : {},
-      };
-    }
-    if (seedDefaults) {
-      f.configuration.presets = { ...f.configuration.presets, includeDefaults: true };
-    }
-    await f.saveInstallation(f.configuration);
-  }
+  assert.ok(
+    f.agents.every((agent) => agent.stopped),
+    "stop the prior Agent before changing the installation runtime configuration",
+  );
+  f.configuration.drivers.plugin = [
+    { id: "occ-plugin", configuration: {} },
+    { id: "codex-plugin", configuration: { catalogSource: "openai-curated" } },
+  ];
   if (includeDefaults) {
-    // Startup may seed an existing Namespace. Use its actual catalog; a missing
-    // or foreign Preset still fails in createQaAgent before reading credentials.
+    f.configuration.presets = { ...f.configuration.presets, includeDefaults: true };
+  }
+  await f.saveInstallation(f.configuration);
+  if (includeDefaults) {
+    // Startup seeds the selected Namespace; use its actual post-save catalog.
     f.presets = await f.api("GET", `/namespaces/${f.namespace.id}/presets`);
   }
+  const { capabilities } = await f.api("GET", "/installation");
+  const catalogs = Object.fromEntries(
+    capabilities.pluginCatalogs.map(({ harnessId, pluginPolicies }) => [
+      harnessId,
+      pluginPolicies.driver.id,
+    ]),
+  );
+  assert.deepEqual(catalogs, { openclaw: "occ-plugin", codex: "codex-plugin" });
+  for (const [harnessId, q, expectedId] of [
+    ["openclaw", "Google Workspace", "occ-plugin:google@1.0.0"],
+    ["codex", "Linear", "codex-plugin:linear@openai-curated-remote"],
+  ]) {
+    const { plugins } = await f.api("POST", `/namespaces/${f.namespace.id}/agents/plugins`, {
+      harnessId,
+      q,
+    });
+    assert.ok(
+      plugins.some(({ id }) => id === expectedId),
+      `missing ${expectedId} in the ${harnessId} catalog`,
+    );
+  }
+  await f.record("plugin-catalogs", catalogs);
 }
 
 export async function createQaAgent(
@@ -1223,9 +1240,9 @@ export async function createQaAgent(
     modelSecret: "provided-through-secret-api",
   });
   const values = rendered.configuration.values;
-  assert.equal(
-    f.configuration.drivers.plugin?.id,
-    codex ? "codex-plugin" : "occ-plugin",
+  const pluginDriverId = codex ? "codex-plugin" : "occ-plugin";
+  assert.ok(
+    f.configuration.drivers.plugin?.some(({ id }) => id === pluginDriverId),
     "prepare the preset before starting parallel Agent scenarios",
   );
   values.gateway.http = { endpoints: { chatCompletions: { enabled: true } } };
@@ -1356,9 +1373,12 @@ export async function createQaAgent(
         deviceAutoApprove: { enabled: true, scopes: ["operator.admin"] },
       },
     };
-    await f.api("PATCH", `/namespaces/${f.namespace.id}/configurations/${configuration.id}`, {
-      values,
-    });
+    // Later provider changes must start from the admitted native-admin configuration.
+    agent.configuration = await f.api(
+      "PATCH",
+      `/namespaces/${f.namespace.id}/configurations/${configuration.id}`,
+      { values },
+    );
   }
   if (!provisionNativeAdmin) {
     if (credentialSource) {

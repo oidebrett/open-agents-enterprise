@@ -1,7 +1,7 @@
 ---
 created: "2026-10-15"
 updated: "2026-11-05"
-last_updated_session: authoring-run/01a19cef-6046-7960-88eb-e30de1c96e9e
+last_updated_session: authoring-run/147833b4-6d46-4ba7-8b0f-bd7df3bd09da
 ---
 
 # Public GitHub read flow
@@ -107,11 +107,15 @@ the exact trusted supervisor peer; a protected workload receives no direct grant
 `apps/controller/src/drivers/compute/kubernetes/index.ts:pluginRuntimeSnapshot`
 selects Harness ownership before the public-reader launcher. Compute-owned Codex
 launches compose public material setup over the initialize-RPC readiness entrypoint;
-provider-owned launches retain their immutable commands and provider readiness.
+provider-owned launches retain their matching commands and provider readiness.
 Both ordinary and protected selections carry the matching workspace-node wrapper.
 The Deployment renderer mounts the revision capability Secret only for
 Compute-owned Harnesses; provider-owned Harnesses retain provider material delivery.
 
+Compute ConfigMaps and OpenShell provider files deliver the exact nonsecret
+transport source. The launcher reads at most 64 KiB from a regular file and checks
+its baked-in SHA-256 before copying or executing it. Missing, stale or altered
+source fails closed; the three-field public material contract is unchanged.
 The admitted launcher places helper source, combined public CA, transport config
 and Git wrappers below `$HOME/.oce-public-git`, in private generated children.
 It rejects symlinked, foreign-owned or nonprivate material parents. The Gateway's
@@ -261,6 +265,8 @@ that the owning runtime has stopped.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-11-05 14:10: Verify projected transport source before launch and preserve upstream workspace/provider composition (accompanying integration; authoring-run/147833b4-6d46-4ba7-8b0f-bd7df3bd09da - 35d51ed96a505420fa7e7d7c141be5223e5794c9)
 
 - 2026-11-05 11:28: Deliver API trust as in-memory bytes through the built-in Node HTTPS client (accompanying correction; authoring-run/01a19cef-6046-7960-88eb-e30de1c96e9e - 572595236e9d0455e1655a8434374be5083d4210)
 

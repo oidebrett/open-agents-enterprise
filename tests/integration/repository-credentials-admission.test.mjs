@@ -1312,7 +1312,7 @@ test("Agent save and deployment refuse a Codex network proxy that blocks the rep
   assert.equal(unbound.status, 202, JSON.stringify(unbound));
 });
 
-test("Embedded OpenClaw refuses a broker-blocking Codex proxy only with the Codex Plugin Driver", async (t) => {
+test("Embedded OpenClaw skips the Codex broker proxy and refuses Codex plugin selections", async (t) => {
   const f = await fixture(t);
   const configuration = await f.request("POST", `/namespaces/${f.namespace.id}/configurations`, {
     kind: "agent",
@@ -1329,15 +1329,13 @@ test("Embedded OpenClaw refuses a broker-blocking Codex proxy only with the Code
   // Without plugins no Plugin Driver runs Codex in the Gateway, so nothing reads the proxy.
   const plain = await create();
   assert.equal(plain.status, 201, JSON.stringify(plain));
-  // With the Codex Plugin Driver, the Gateway's Codex carries the broker traffic.
+  // Enabling the Codex catalog does not install a Codex bridge on an OpenClaw Harness.
   const driver = new CodexPluginDriver();
   f.controller.registerDriver(driver);
   f.controller.selectDriver("plugin", driver.id);
-  assertBrokerProxyRefused(
-    await create({ "codex-plugin:linear@openai-curated-remote": { enabled: true } }),
-    BROKER_PROXY_DISABLED,
-    "embedded Codex plugins",
-  );
+  const refused = await create({ "codex-plugin:linear@openai-curated-remote": { enabled: true } });
+  assert.equal(refused.status, 400, JSON.stringify(refused));
+  assert.match(refused.error.message, /Plugin Driver.*openclaw Harness/i);
 });
 
 test("Provisioning refuses a Codex network proxy that blocks the repository broker before queueing", async (t) => {
@@ -2417,15 +2415,20 @@ for (const protectedExecution of [false, true]) {
     } else {
       assert.equal(revision.sandboxPolicy, undefined);
     }
+    // OCC admission uses the fixture's cluster-free Compute. Rendering also
+    // needs the selected Sandbox, as in the production constructor composition.
+    const runtimeCompute = protectedExecution
+      ? new compute.constructor(compute.options, { nodeEnrollment: {}, sandboxDriver: f.sandbox })
+      : compute;
     assert.equal(
-      compute.pluginRuntimeSnapshot(revision).runtime.publicGithubRead.endpoint,
+      runtimeCompute.pluginRuntimeSnapshot(revision).runtime.publicGithubRead.endpoint,
       "https://10.96.0.55:8080",
     );
     // Persisted identity is covered by the exact admission fingerprint even without a Sandbox.
     const changed = structuredClone(revision);
     changed.compute.serviceAccess[0].configuration.installationId = "ins_other";
     assert.throws(
-      () => compute.pluginRuntimeSnapshot(changed),
+      () => runtimeCompute.pluginRuntimeSnapshot(changed),
       /exact Compute admission|not acknowledged/,
     );
     delete changed.compute.serviceAccess[0].configuration.installationId;

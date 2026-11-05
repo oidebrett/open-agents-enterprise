@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir, writeFile, rm, chmod } from "node:fs/promises";
 import { join } from "node:path";
-import { createQaInstallation, prepareQaPreset, createQaAgent } from "./qa-installation.mjs";
+import {
+  createQaInstallation,
+  prepareQaPluginCatalogs,
+  createQaAgent,
+} from "./qa-installation.mjs";
 import { installPublicGithubReadFixture } from "./public-github-read-k3d.mjs";
 import { assertGatewayModelTurn } from "./kubernetes-real.mjs";
 import { stopQaAgent } from "./qa-repository.mjs";
@@ -268,7 +272,7 @@ export async function verifyQaPublicGithubGit(context, artifacts) {
   });
   try {
     await verifyReaderSource(f);
-    await prepareQaPreset(f, "Codex", { includeDefaults: true });
+    await prepareQaPluginCatalogs(f, { includeDefaults: true });
     await f.apply({
       apiVersion: "v1",
       kind: "Namespace",

@@ -1,3 +1,8 @@
+import {
+  PUBLIC_GITHUB_READ_TRANSPORT_FILE,
+  PUBLIC_GITHUB_READ_TRANSPORT_ENV,
+  PUBLIC_GITHUB_READ_TRANSPORT_SOURCE,
+} from "../../apps/controller/src/drivers/repo/github/public-read/runtime-source.ts";
 import { DEDICATED_OPENCLAW_SUPPORT } from "../helpers/sandbox-driver.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -880,7 +885,7 @@ test("Dedicated credential refresh preserves its enrolled workspace node", async
       };
     },
     async observeSetup() {
-      return { deviceId: "workspace-node", connected: true };
+      return { deviceId: "workspace-node", connected: true, delivery: "confirmed" };
     },
     async isConnected() {
       return true;
@@ -1011,7 +1016,7 @@ for (const mode of ["embedded", "dedicated"]) {
               };
             },
             async observeSetup() {
-              return { deviceId: "plugin-node", connected: true };
+              return { deviceId: "plugin-node", connected: true, delivery: "confirmed" };
             },
             async isConnected() {
               return true;
@@ -2353,27 +2358,17 @@ test("Embedded OpenClaw plugin runtime does not receive Codex broker policy", as
   assert.equal(manifest.repositoryBrokerNetworkPolicy, undefined);
 });
 
-test("Embedded Codex plugin runtime receives broker network policy centrally", async () => {
-  const address = "10.43.0.19";
-  const f = await fixture("embedded", undefined, {
-    publicGithubRead: { namespace: "control", podLabels: { app: "read-public-github" }, address },
-  });
+test("An embedded OpenClaw revision pinned to Codex cannot mount the repository broker bridge", async () => {
+  const f = await fixture("embedded");
   f.revision.plugins = codexPluginState();
-  const networkProxy = { enabled: true, domains: { [address]: "allow" } };
-  f.revision.configuration.plugins = {
-    entries: { codex: { config: { appServer: { networkProxy } } } },
-  };
-  await f.driver.prepareRevision(f.revision, f.context([runtimeBinding()]));
-  const manifest = preparedCodexManifest(f);
-  assert.equal(
-    manifest.publicGithubRead,
-    undefined,
-    "the public reader is scoped to ordinary dedicated Codex",
+  await assert.rejects(
+    f.driver.prepareRevision(f.revision, f.context([runtimeBinding()])),
+    /dedicated Codex Harness/,
   );
-  assert.deepEqual(manifest.repositoryBrokerNetworkPolicy, {
-    host: "git.credentials.svc.cluster.local",
-    domains: { [address]: "allow" },
-  });
+  assert.equal(
+    [...f.objects.values()].some((resource) => resource.kind === "Deployment"),
+    false,
+  );
 });
 
 // Both consumer shapes must trust the projected CA without disabling TLS verification.
@@ -3126,10 +3121,14 @@ test("admitted public Git runtime carries only nonsecret configuration and a dis
   const paths = native.plugins.entries.codex.config.appServer.networkProxy.readOnlyPaths;
   assert.ok(paths.includes("/home/node/.oce-public-git"));
   assert.ok(!paths.includes("/tmp") && !paths.includes("/home/node"));
+  const source = files.find(({ name }) => name === PUBLIC_GITHUB_READ_TRANSPORT_FILE);
+  assert.equal(source.content, PUBLIC_GITHUB_READ_TRANSPORT_SOURCE);
+  // The static helper names its capability input; only its exact reviewed source
+  // is allowed alongside the data projections, which carry no credential.
   assert.equal(
-    JSON.stringify(files).includes("capability"),
+    JSON.stringify(files.filter((file) => file !== source)).includes("capability"),
     false,
-    "the public runtime projection must contain no service credential",
+    "the public runtime data projection must contain no service credential",
   );
   // Persisted JSON documents preserve values, not object property insertion order.
   const rehydrated = JSON.parse(JSON.stringify(f.revision), (_key, value) =>
@@ -3397,6 +3396,16 @@ test("public Git Harness ownership preserves material delivery and Codex initial
           const material = files.find(({ name }) => name === "public-github-read.json");
           const materialPath = join(directory, material.name);
           await writeFile(materialPath, material.content);
+          const source = files.find(({ name }) => name === PUBLIC_GITHUB_READ_TRANSPORT_FILE);
+          const sourcePath = join(directory, source.name);
+          await writeFile(sourcePath, source.content);
+          assert.equal(
+            environment[PUBLIC_GITHUB_READ_TRANSPORT_ENV],
+            "/etc/openclaw/plugin-runtime/" + source.name,
+          );
+          const projected = spec.volumes.find(({ name }) => name === "openclaw-plugin-runtime")
+            .configMap.items;
+          assert.ok(projected.some(({ key, path }) => key === source.name && path === source.name));
           const capability = providerOwned
             ? "openshell:resolve:env:s" + "a".repeat(64) + "_OCE_PUBLIC_GITHUB_READ_CAPABILITY"
             : "revision-test." + Buffer.alloc(32, 4).toString("base64url");
@@ -3427,6 +3436,16 @@ test("public Git Harness ownership preserves material delivery and Codex initial
               "utf8",
             );
           };
+          const commandBudget = (kind) => {
+            const command = [...container.command, ...container.args];
+            const bytes = Buffer.byteLength(JSON.stringify(command));
+            assert.ok(bytes <= 65_536, `rendered ${kind} command is ${bytes} bytes`);
+            assert.ok(command.every((argument) => Buffer.byteLength(argument) < 131072));
+            t.diagnostic(
+              `${providerOwned ? "provider" : "Compute"} ${protectedReader ? "protected" : "ordinary"} ${kind}: ${bytes} bytes`,
+            );
+          };
+          commandBudget("standalone");
           const plain = program();
           f.driver.addWorkspaceNode(
             deployment,
@@ -3437,6 +3456,7 @@ test("public Git Harness ownership preserves material delivery and Codex initial
             undefined,
             snapshot.workspaceEntrypoint,
           );
+          commandBudget("workspace");
           const workspace = program();
           const codexArgs = JSON.parse(workspace.match(/name: "Codex",\s+args: (\[[^\n]*\])/)[1]);
           assert.ok(codexArgs.every((argument) => Buffer.byteLength(argument) < 131072));
@@ -3481,6 +3501,7 @@ agentRuntimeReady().then((ready) => console.log(JSON.stringify({
                   APP_SERVER_PORT: String(port),
                   OPENCLAW_PLUGIN_RUNTIME_JSON: JSON.stringify({ manifest: snapshot.runtime }),
                   OCE_PUBLIC_GITHUB_READ_MATERIAL_FILE: materialPath,
+                  [PUBLIC_GITHUB_READ_TRANSPORT_ENV]: sourcePath,
                   ...(providerOwned
                     ? { OCE_PUBLIC_GITHUB_READ_CAPABILITY: capability }
                     : { OCE_PUBLIC_GITHUB_READ_CAPABILITY_FILE: capabilityPath }),
