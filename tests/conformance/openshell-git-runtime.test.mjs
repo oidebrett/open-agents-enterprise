@@ -2839,6 +2839,7 @@ test("public-reader dispatch preserves Repo-resolved authenticated names without
     f.sandbox.workspace,
     f.sandbox.name,
     AbortSignal.timeout(2_000),
+    "/sandbox/enterprise",
     ["openai"],
   );
   const routing = prepared.environment.find(
@@ -2883,6 +2884,7 @@ test("public-reader dispatch preserves Repo-resolved authenticated names without
       empty.sandbox.workspace,
       empty.sandbox.name,
       AbortSignal.timeout(2_000),
+      "/sandbox/enterprise",
       ["openai"],
     ),
     (error) => {
