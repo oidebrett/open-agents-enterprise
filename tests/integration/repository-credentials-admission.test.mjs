@@ -1808,7 +1808,7 @@ async function protectedOpenShellComposition(
   const git =
     installationAccess &&
     new OpenShellGitRuntime(
-      { protectedExecution: true },
+      {},
       createGitHubRepositoryDeliveryResolver(
         validateGitHubRepositoryRegistry(f.registry, backendId),
       ),
