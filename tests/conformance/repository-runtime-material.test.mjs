@@ -2,7 +2,16 @@ import { DEDICATED_OPENCLAW_SUPPORT } from "../helpers/sandbox-driver.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { isDeepStrictEqual } from "node:util";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { isDeepStrictEqual, promisify } from "node:util";
+import { inflateRawSync } from "node:zlib";
+import { createServer } from "node:http";
+import { listen } from "../helpers/listen.mjs";
+import { temporaryDirectory } from "../helpers/temporary-directory.mjs";
+import { publicReaderTls } from "../helpers/public-github-read-fixture.mjs";
 import {
   KubernetesComputeDriver,
   kubernetesNamespaceName,
@@ -3260,4 +3269,243 @@ test("reader service maintenance enforces the frozen runtime identity at registr
     f.calls.filter(({ operation, kind }) => operation === "write" && kind === "ConfigMap").length,
     0,
   );
+});
+
+// A public-reader wrapper must not restore transport-open readiness on a Compute
+// Pod. Run the selected rendered program through real material installation and
+// its resident readiness callback; the peer substitutes only Codex's RPC server.
+// This does not run native Codex, a model, or a Kubernetes workload.
+test("public Git Harness ownership preserves material delivery and Codex initialization readiness", async (t) => {
+  const execute = promisify(execFile);
+  const controllerRequire = createRequire(
+    new URL("../../apps/controller/package.json", import.meta.url),
+  );
+  const socketRequire = createRequire(controllerRequire.resolve("@kubernetes/client-node"));
+  const { WebSocketServer } = socketRequire("ws");
+  const tls = await publicReaderTls("127.0.0.1");
+  for (const providerOwned of [false, true]) {
+    for (const protectedReader of [false, true]) {
+      await t.test(
+        `${providerOwned ? "provider" : "Compute"} ${protectedReader ? "protected" : "ordinary"}`,
+        async (t) => {
+          const sandboxDriver = providerOwned
+            ? {
+                id: "public-reader-provider",
+                provisionHarness() {
+                  throw new Error("This rendering check must not provision a Sandbox.");
+                },
+              }
+            : undefined;
+          const f = await fixture("dedicated", undefined, {
+            publicGithubRead: {
+              ...publicReader,
+              authorizationConfigMapName: "public-github-authorizations",
+              caBundle: tls.ca,
+            },
+            sandboxDriver,
+          });
+          delete f.revision.repositoryCredentials;
+          if (providerOwned) {
+            f.revision.sandboxDriverId = sandboxDriver.id;
+          }
+          if (protectedReader) {
+            const { owner } = protectedRepositoryGitRelease(() =>
+              assert.fail("Rendering public material must not request repository credentials"),
+            );
+            f.revision.executionAdmission = { version: 3, mode: "protected" };
+            f.revision.egressPlan = {
+              id: "public-reader-plan",
+              generation: 1,
+              driver: owner.ref,
+              sandboxDriverId: owner.ref.id,
+              egressDriverId: owner.ref.id,
+              execution: {
+                installationId: "installation-test",
+                namespaceId: f.revision.namespaceId,
+                agentId: f.revision.agentId,
+                servicePrincipalId: f.revision.servicePrincipalId,
+                revisionId: f.revision.id,
+                executionId: "public-reader-execution",
+              },
+              routes: [],
+            };
+          }
+          f.revision.configuration.plugins.entries.codex.config.publicGithubRead = { mode: "all" };
+          f.revision.compute.serviceAccess = f.driver.admitServiceAccess({
+            installationId: "installation-test",
+            configuration: f.revision.configuration,
+            harness: f.revision.harness,
+          });
+          if (protectedReader) {
+            f.revision.sandboxPolicy = {
+              ...f.revision.sandboxPolicy,
+              serviceAccess: structuredClone(f.revision.compute.serviceAccess),
+            };
+          }
+          f.revision.compute.admission = f.driver.admitRevision(f.revision);
+          const snapshot = f.driver.pluginRuntimeSnapshot(f.revision);
+          const ownership = f.driver.pluginRuntimeOwnership(f.revision);
+          const deployment = f.driver.deployment(
+            "public-reader-harness",
+            ownership,
+            { name: f.namespace, plane: "execution" },
+            "agent:local",
+            "agent",
+            "agent",
+            {},
+            "info",
+            undefined,
+            false,
+            undefined,
+            f.driver.harnessAuthForRevision(f.revision, f.context(), {
+              name: f.namespace,
+              plane: "execution",
+            }),
+            [],
+            [],
+            snapshot,
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            providerOwned,
+          );
+          const spec = deployment.spec.template.spec;
+          const container = spec.containers[0];
+          const capabilityVolume = spec.volumes.find(
+            ({ name }) => name === "public-github-capability",
+          );
+          assert.equal(Boolean(capabilityVolume), !providerOwned);
+          const environment = Object.fromEntries(
+            container.env.map(({ name, value }) => [name, value]),
+          );
+          assert.equal(
+            environment.OCE_PUBLIC_GITHUB_READ_CAPABILITY_FILE,
+            providerOwned ? undefined : "/run/oce/public-github-read/capability",
+          );
+          if (capabilityVolume) {
+            assert.equal(
+              capabilityVolume.secret.secretName,
+              "public-github-read-" +
+                createHash("sha256").update(f.revision.id).digest("hex").slice(0, 24),
+            );
+            assert.equal(capabilityVolume.secret.optional, false);
+          }
+          const directory = await temporaryDirectory(t, "public-read-readiness-");
+          const files = f.driver.sandboxWorkloadFiles(snapshot);
+          const material = files.find(({ name }) => name === "public-github-read.json");
+          const materialPath = join(directory, material.name);
+          await writeFile(materialPath, material.content);
+          const capability = providerOwned
+            ? "openshell:resolve:env:s" + "a".repeat(64) + "_OCE_PUBLIC_GITHUB_READ_CAPABILITY"
+            : "revision-test." + Buffer.alloc(32, 4).toString("base64url");
+          const capabilityPath = join(directory, "capability");
+          await writeFile(capabilityPath, capability, { mode: 0o600 });
+          const server = createServer();
+          const peer = new WebSocketServer({ server });
+          t.after(() => peer.close());
+          const port = await listen(t, server);
+          let accepted = false;
+          const requests = [];
+          peer.on("connection", (socket) => {
+            socket.on("message", (data) => {
+              const request = JSON.parse(data.toString());
+              requests.push(request.method);
+              socket.send(
+                JSON.stringify(
+                  accepted
+                    ? { id: request.id, result: { userAgent: "controlled-codex/1" } }
+                    : { id: request.id, error: { code: -32600, message: "private-error-canary" } },
+                ),
+              );
+            });
+          });
+          const program = () => {
+            assert.ok(container.args.every((argument) => Buffer.byteLength(argument) < 131072));
+            return inflateRawSync(Buffer.from(container.args.slice(1).join(""), "base64")).toString(
+              "utf8",
+            );
+          };
+          const plain = program();
+          f.driver.addWorkspaceNode(
+            deployment,
+            "workspace-node",
+            undefined,
+            f.revision,
+            true,
+            undefined,
+            snapshot.workspaceEntrypoint,
+          );
+          const workspace = program();
+          const codexArgs = JSON.parse(workspace.match(/name: "Codex",\s+args: (\[[^\n]*\])/)[1]);
+          assert.ok(codexArgs.every((argument) => Buffer.byteLength(argument) < 131072));
+          const workspaceChild = inflateRawSync(
+            Buffer.from(codexArgs.slice(2).join(""), "base64"),
+          ).toString("utf8");
+          for (const [kind, selected] of [
+            ["plain", plain],
+            ["workspace", workspaceChild],
+          ]) {
+            const insertion = selected.indexOf('const pluginRuntime = readPluginRuntime("codex");');
+            assert.ok(insertion >= 0);
+            const end = selected.indexOf("if (pluginRuntime !== undefined) {", insertion);
+            assert.ok(end > insertion);
+            // Stop before login/model/plugin execution, retaining the selected
+            // launcher's actual authentication validation and public material setup.
+            const component =
+              selected.slice(0, end) +
+              `
+agentRuntimeReady().then((ready) => console.log(JSON.stringify({
+  ready,
+  configuration: process.env.OCE_PUBLIC_GITHUB_READ_CONFIG,
+  capability: process.env.OCE_PUBLIC_GITHUB_READ_CAPABILITY,
+}))).catch(() => process.exit(1));`;
+            const componentPath = join(directory, kind + ".cjs");
+            await writeFile(componentPath, component);
+            for (accepted of [false, true]) {
+              requests.length = 0;
+              const home = join(directory, kind + "-" + accepted);
+              await mkdir(home, { mode: 0o700 });
+              const result = await execute(process.execPath, [componentPath], {
+                timeout: 5000,
+                maxBuffer: 65536,
+                env: {
+                  PATH: process.env.PATH,
+                  NODE_PATH: dirname(dirname(socketRequire.resolve("ws"))),
+                  HOME: home,
+                  CODEX_HOME: join(home, ".codex"),
+                  CODEX_LOGIN_MODE: "api_key",
+                  OPENAI_API_KEY: "synthetic-model-key",
+                  APP_SERVER_TOKEN: "synthetic-transport-token",
+                  APP_SERVER_PORT: String(port),
+                  OPENCLAW_PLUGIN_RUNTIME_JSON: JSON.stringify({ manifest: snapshot.runtime }),
+                  OCE_PUBLIC_GITHUB_READ_MATERIAL_FILE: materialPath,
+                  ...(providerOwned
+                    ? { OCE_PUBLIC_GITHUB_READ_CAPABILITY: capability }
+                    : { OCE_PUBLIC_GITHUB_READ_CAPABILITY_FILE: capabilityPath }),
+                },
+              });
+              const observed = JSON.parse(result.stdout);
+              assert.equal(
+                observed.ready,
+                providerOwned || accepted,
+                kind + ": initialize rejection must withhold Compute readiness",
+              );
+              assert.deepEqual(requests, providerOwned ? [] : ["initialize"]);
+              assert.equal(observed.capability, capability);
+              assert.ok(observed.configuration.startsWith(join(home, ".oce-public-git") + "/"));
+              const configured = await readFile(observed.configuration, "utf8");
+              assert.equal(JSON.parse(configured).endpoint, JSON.parse(material.content).endpoint);
+              assert.ok(!configured.includes(capability));
+              assert.ok(
+                !result.stdout.includes("private-error-canary") &&
+                  !result.stderr.includes("private-error-canary"),
+              );
+            }
+          }
+        },
+      );
+    }
+  }
 });

@@ -1,7 +1,7 @@
 ---
 created: "2026-10-15"
 updated: "2026-11-04"
-last_updated_session: authoring-run/93407fe4-b349-48fd-b3c0-c2d9b3534e5b
+last_updated_session: authoring-run/d4e614d9-3bbe-4909-b408-51d492dd2c46
 ---
 
 # Public GitHub read flow
@@ -103,6 +103,14 @@ Kubernetes OpenShell needs a qualified trust-image layer or operator admission
 injection for a private issuer; Harness trust alone does not configure it.
 Compute's NetworkPolicy grants reader egress to the selected ordinary Harness or
 the exact trusted supervisor peer; a protected workload receives no direct grant.
+
+`apps/controller/src/drivers/compute/kubernetes/index.ts:pluginRuntimeSnapshot`
+selects Harness ownership before the public-reader launcher. Compute-owned Codex
+launches compose public material setup over the initialize-RPC readiness entrypoint;
+provider-owned launches retain their immutable commands and provider readiness.
+Both ordinary and protected selections carry the matching workspace-node wrapper.
+The Deployment renderer mounts the revision capability Secret only for
+Compute-owned Harnesses; provider-owned Harnesses retain provider material delivery.
 
 The admitted launcher places helper source, combined public CA, transport config
 and Git wrappers below `$HOME/.oce-public-git`, in private generated children.
@@ -247,6 +255,8 @@ that the owning runtime has stopped.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-11-04 19:19: Preserve ownership-specific readiness while composing public material launchers (accompanying merge; authoring-run/d4e614d9-3bbe-4909-b408-51d492dd2c46 - ecc2835dd214203bd4896328bd1104a44557268c)
 
 - 2026-11-04 18:32: Deliver Linux API trust through a sealed memory file under read-only profiles (accompanying correction; authoring-run/93407fe4-b349-48fd-b3c0-c2d9b3534e5b - 95b6c02bb86f72841f30ee9da14bc9d4ebbc26ff)
 

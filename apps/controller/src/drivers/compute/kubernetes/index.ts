@@ -273,11 +273,19 @@ import {
 } from "../embedded-gateway-owner.ts";
 import {
   AGENT_RUNTIME_ENTRYPOINT,
+  COMPUTE_AGENT_RUNTIME_ENTRYPOINT,
+  COMPUTE_PROTECTED_CODEX_RUNTIME_ENTRYPOINT,
+  COMPUTE_AGENT_WITH_NODE_ENTRYPOINT,
+  COMPUTE_PROTECTED_CODEX_WITH_NODE_ENTRYPOINT,
   AGENT_WITH_NODE_ENTRYPOINT,
   PUBLIC_GITHUB_READ_AGENT_ENTRYPOINT,
   PUBLIC_GITHUB_READ_PROTECTED_AGENT_ENTRYPOINT,
   PUBLIC_GITHUB_READ_WITH_NODE_ENTRYPOINT,
   PUBLIC_GITHUB_READ_PROTECTED_WITH_NODE_ENTRYPOINT,
+  COMPUTE_PUBLIC_GITHUB_READ_AGENT_ENTRYPOINT,
+  COMPUTE_PUBLIC_GITHUB_READ_PROTECTED_AGENT_ENTRYPOINT,
+  COMPUTE_PUBLIC_GITHUB_READ_WITH_NODE_ENTRYPOINT,
+  COMPUTE_PUBLIC_GITHUB_READ_PROTECTED_WITH_NODE_ENTRYPOINT,
   PROTECTED_CODEX_RUNTIME_ENTRYPOINT,
   PROTECTED_CODEX_WITH_NODE_ENTRYPOINT,
   GATEWAY_STOP_TIMEOUT_MS,
@@ -12150,7 +12158,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
     revision: AgentRevision,
     setupFile: boolean,
     workspaceSetup: WorkspaceSetup | undefined,
-    workspaceEntrypoint = AGENT_WITH_NODE_ENTRYPOINT,
+    workspaceEntrypoint = this.sandboxDriverForRevision(revision)?.provisionHarness === undefined
+      ? COMPUTE_AGENT_WITH_NODE_ENTRYPOINT
+      : AGENT_WITH_NODE_ENTRYPOINT,
   ): void {
     const { container, variables } = this.addNodeEnrollmentState(deployment, name, ca, setupFile);
     const defaults = asRecord(asRecord(revision.configuration.agents)?.defaults);
@@ -14809,25 +14819,47 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       return undefined;
     }
     const protectedCodex = this.hasProtectedCodexAdmission(revision);
+    const providerOwned = this.sandboxDriverForRevision(revision)?.provisionHarness !== undefined;
+    const entrypoints = providerOwned
+      ? {
+          agent: AGENT_RUNTIME_ENTRYPOINT,
+          protected: PROTECTED_CODEX_RUNTIME_ENTRYPOINT,
+          workspace: AGENT_WITH_NODE_ENTRYPOINT,
+          protectedWorkspace: PROTECTED_CODEX_WITH_NODE_ENTRYPOINT,
+          public: PUBLIC_GITHUB_READ_AGENT_ENTRYPOINT,
+          publicProtected: PUBLIC_GITHUB_READ_PROTECTED_AGENT_ENTRYPOINT,
+          publicWorkspace: PUBLIC_GITHUB_READ_WITH_NODE_ENTRYPOINT,
+          publicProtectedWorkspace: PUBLIC_GITHUB_READ_PROTECTED_WITH_NODE_ENTRYPOINT,
+        }
+      : {
+          agent: COMPUTE_AGENT_RUNTIME_ENTRYPOINT,
+          protected: COMPUTE_PROTECTED_CODEX_RUNTIME_ENTRYPOINT,
+          workspace: COMPUTE_AGENT_WITH_NODE_ENTRYPOINT,
+          protectedWorkspace: COMPUTE_PROTECTED_CODEX_WITH_NODE_ENTRYPOINT,
+          public: COMPUTE_PUBLIC_GITHUB_READ_AGENT_ENTRYPOINT,
+          publicProtected: COMPUTE_PUBLIC_GITHUB_READ_PROTECTED_AGENT_ENTRYPOINT,
+          publicWorkspace: COMPUTE_PUBLIC_GITHUB_READ_WITH_NODE_ENTRYPOINT,
+          publicProtectedWorkspace: COMPUTE_PUBLIC_GITHUB_READ_PROTECTED_WITH_NODE_ENTRYPOINT,
+        };
     return {
       name: `plugin-runtime-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
       runtime,
       entrypoint:
         runtime.kind === "codex" && runtime.publicGithubRead?.endpoint
           ? revision.executionAdmission.mode === "protected"
-            ? PUBLIC_GITHUB_READ_PROTECTED_AGENT_ENTRYPOINT
-            : PUBLIC_GITHUB_READ_AGENT_ENTRYPOINT
+            ? entrypoints.publicProtected
+            : entrypoints.public
           : protectedCodex
-            ? PROTECTED_CODEX_RUNTIME_ENTRYPOINT
-            : AGENT_RUNTIME_ENTRYPOINT,
+            ? entrypoints.protected
+            : entrypoints.agent,
       workspaceEntrypoint:
         runtime.kind === "codex" && runtime.publicGithubRead?.endpoint
           ? revision.executionAdmission.mode === "protected"
-            ? PUBLIC_GITHUB_READ_PROTECTED_WITH_NODE_ENTRYPOINT
-            : PUBLIC_GITHUB_READ_WITH_NODE_ENTRYPOINT
+            ? entrypoints.publicProtectedWorkspace
+            : entrypoints.publicWorkspace
           : protectedCodex
-            ? PROTECTED_CODEX_WITH_NODE_ENTRYPOINT
-            : AGENT_WITH_NODE_ENTRYPOINT,
+            ? entrypoints.protectedWorkspace
+            : entrypoints.workspace,
     };
   }
 
@@ -16378,9 +16410,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     repositoryMaterial?: ResolvedRepositoryMaterialSpec,
     nativeRuntime?: NativeRuntimeSnapshot,
     providerEndpoint?: SandboxHarnessEndpoint,
-    useRuntimeWorkspace = false,
+    providerOwnsHarness = false,
   ): ManagedKubernetesObject {
-    const harnessSetupWorkspace = useRuntimeWorkspace
+    const harnessSetupWorkspace = providerOwnsHarness
       ? { environment: "OPENCLAW_WORKSPACE_DIR" as const }
       : "/home/node/workspace";
     if (nativeRuntime !== undefined && (embedded || role !== "agent")) {
@@ -16464,7 +16496,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         name: "OCE_PUBLIC_GITHUB_READ_MATERIAL_FILE",
         value: `${PLUGIN_RUNTIME_DIRECTORY}/public-github-read.json`,
       });
-      if (!useRuntimeWorkspace) {
+      if (!providerOwnsHarness) {
         if (!ownership.revisionId) {
           throw new ConfigurationFailure("Public reader material requires revision ownership.");
         }
@@ -16934,7 +16966,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
             name: "OPENCLAW_NATIVE_INFERENCE_CONFIG",
             value: nativeRuntime.configuration,
           });
-          if (useRuntimeWorkspace) {
+          if (providerOwnsHarness) {
             // A provider-owned worker serves a held model-check failure on this
             // port, through the provider's bearer-passthrough exposure, as the
             // provider-owned Codex Harness does (finding 1642).
@@ -17100,7 +17132,8 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       } else {
         runtimeEntrypoint =
           nativeRuntime === undefined
-            ? (pluginRuntime?.entrypoint ?? AGENT_RUNTIME_ENTRYPOINT)
+            ? (pluginRuntime?.entrypoint ??
+              (providerOwnsHarness ? AGENT_RUNTIME_ENTRYPOINT : COMPUTE_AGENT_RUNTIME_ENTRYPOINT))
             : NATIVE_WORKER_ENTRYPOINT;
       }
     }
