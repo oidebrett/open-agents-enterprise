@@ -258,6 +258,11 @@ export interface OpenShellSandboxDriverSelection {
 }
 
 class OpenShellSandboxConfigurationFailure extends Error {}
+// Worker logs retain error classes, never these errors' private contextual text.
+class OpenShellRuntimeMaterialFailure extends OpenShellSandboxConfigurationFailure {}
+class OpenShellRuntimeProviderMismatch extends OpenShellSandboxConfigurationFailure {}
+class OpenShellSandboxOwnershipMismatch extends OpenShellSandboxConfigurationFailure {}
+class OpenShellWorkspaceInitializationFailure extends OpenShellSandboxConfigurationFailure {}
 
 const GRPC_NOT_FOUND = 5;
 const GRPC_PERMISSION_DENIED = 7;
@@ -868,7 +873,7 @@ function harnessRuntimeFiles(
       ) ||
       (plan !== undefined && manifest.providerTools !== "none")
     ) {
-      throw new OpenShellSandboxConfigurationFailure(
+      throw new OpenShellRuntimeMaterialFailure(
         "Protected Harness startup must match the admitted egress plan.",
       );
     }
@@ -902,12 +907,12 @@ function harnessRuntimeFiles(
             !/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?\/(?!\.{1,2}$)[a-z\d._-]{1,100}$/.test(repository),
         )
       ) {
-        throw new OpenShellSandboxConfigurationFailure(
+        throw new OpenShellRuntimeMaterialFailure(
           "OpenShell requires exact public-reader runtime files.",
         );
       }
     } else if (metadata?.endpoint !== undefined) {
-      throw new OpenShellSandboxConfigurationFailure(
+      throw new OpenShellRuntimeMaterialFailure(
         "OpenShell public-reader runtime files require frozen service admission.",
       );
     }
@@ -2884,7 +2889,7 @@ function verifyRuntimeProvider(
     !exactStringMap(provider.labels, expectedLabels) ||
     (expectedConfig !== undefined && !exactStringMap(provider.config, expectedConfig))
   ) {
-    throw new OpenShellSandboxConfigurationFailure(
+    throw new OpenShellRuntimeProviderMismatch(
       `Refusing OpenShell provider ${name} without exact AgentRevision ownership and content.`,
     );
   }
@@ -2957,7 +2962,7 @@ function runtimeProviderSetupUpdate(
     expectedSetup.expiresAtMs <= now ||
     expectedSetup.expiresAtMs <= actualSetup.expiresAtMs
   ) {
-    throw new OpenShellSandboxConfigurationFailure(
+    throw new OpenShellRuntimeProviderMismatch(
       `Refusing OpenShell provider ${name} without exact AgentRevision ownership and content.`,
     );
   }
@@ -2981,7 +2986,7 @@ function verifyExistingSandbox(
     ) ||
     !isDeepStrictEqual(canonicalSandboxSpec(existing.spec), canonicalSandboxSpec(request.spec))
   ) {
-    throw new OpenShellSandboxConfigurationFailure(
+    throw new OpenShellSandboxOwnershipMismatch(
       `Refusing OpenShell Sandbox ${request.name} without exact AgentRevision ownership and content.`,
     );
   }
@@ -4145,7 +4150,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         grpcStatus <= 16
           ? ` (gRPC status ${grpcStatus})`
           : "";
-      throw new OpenShellSandboxConfigurationFailure(
+      throw new OpenShellWorkspaceInitializationFailure(
         `OpenShell workspace initialization failed${detail}.`,
       );
     }
@@ -4161,7 +4166,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       } else if (exit === WORKSPACE_SETUP_NATIVE_TIMEOUT_EXIT_STATUS) {
         detail = `native setup timed out; ${detail}`;
       }
-      throw new OpenShellSandboxConfigurationFailure(
+      throw new OpenShellWorkspaceInitializationFailure(
         `OpenShell workspace initialization failed (${detail}).`,
       );
     }

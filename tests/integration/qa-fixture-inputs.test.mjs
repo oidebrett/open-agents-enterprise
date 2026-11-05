@@ -4051,6 +4051,60 @@ test("public Git QA discovers its managed skill beneath native HOME or state dir
   }
 });
 
+test("public Git provisioning evidence retains only fixed categories for the failed revision", async (t) => {
+  const { recordPublicGithubProvisionFailure } =
+    await import("../helpers/qa-public-github-git.mjs");
+  assert.equal(typeof recordPublicGithubProvisionFailure, "function");
+  const directory = await temporaryDirectory(t, "qa-public-git-failure-");
+  const artifact = join(directory, "failure.json");
+  const secret = `unregistered-private-text-${randomUUID()}`;
+  const row = {
+    event: "worker.completed",
+    revisionId: "revision-one",
+    cause: "OpenShellWorkspaceInitializationFailure",
+    code: "DEPENDENCY_UNAVAILABLE",
+    message: secret,
+    private: { token: secret },
+  };
+  const f = {
+    cluster: "qa-owned",
+    stateDirectory: directory,
+    agents: [{ revision: { id: "revision-one" } }],
+    async run() {
+      return [
+        secret,
+        ...Array.from({ length: 30 }, () => "worker | " + JSON.stringify(row)),
+        JSON.stringify({ ...row, revisionId: "other-revision", cause: secret }),
+        JSON.stringify({ ...row, cause: secret, code: secret }),
+      ].join("\n");
+    },
+    async record(_name, value) {
+      await writeFile(artifact, JSON.stringify(value));
+    },
+  };
+  await recordPublicGithubProvisionFailure(f);
+  const bytes = await readFile(artifact, "utf8");
+  const evidence = JSON.parse(bytes);
+  assert.equal(
+    bytes.includes(secret),
+    false,
+    "unregistered private text must never reach evidence",
+  );
+  assert.equal(evidence.failures.length, 20);
+  assert.deepEqual(evidence.failures.at(-1), {
+    event: "worker.completed",
+    cause: "other",
+    code: "other",
+  });
+  assert.ok(
+    evidence.failures.some(({ cause }) => cause === "OpenShellWorkspaceInitializationFailure"),
+  );
+  f.run = async () => {
+    throw new Error(secret);
+  };
+  await recordPublicGithubProvisionFailure(f);
+});
+
 test("QA model failure evidence preserves the failure and its admitted revision", async () => {
   const { createNativePluginAssertions } = await import("../helpers/plugin-driver-real.mjs");
   const secret = `qa-log-secret-${randomUUID()}`;

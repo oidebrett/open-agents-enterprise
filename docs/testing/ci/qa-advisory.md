@@ -275,6 +275,13 @@ to pass. The separate `QA advisory (public Git OpenShell)` job runs the
 `qa-matrix` lane with an exclusive selector; it is not part of that ten-file
 OpenShell manifest.
 
+On a public Git failure, `compose-public-git-provision-failure.json` retains at
+most 20 worker records for the scenario's Agent revisions. It includes only fixed
+event, error-category, code and preparation-step values. It distinguishes runtime
+material, provider ownership, Sandbox ownership and workspace initialization
+failures without retaining exception text or configuration. Missing diagnostics
+do not replace the original failure; a failed deployment provides no clone/fetch proof.
+
 In `matrix.json`, `scope: full` means both installations and presets with the
 `all` scenarios; advisory QA has narrower coverage. See
 [Select scenarios](#select-scenarios) for the exclusions from `all`.
