@@ -3,6 +3,8 @@ import {
   PUBLIC_GITHUB_READ_TRANSPORT_ENV,
   PUBLIC_GITHUB_READ_TRANSPORT_SOURCE,
 } from "../../apps/controller/src/drivers/repo/github/public-read/runtime-source.ts";
+import { KubernetesPublicGithubReadAuthorizationStore } from "../../apps/controller/src/drivers/compute/kubernetes/public-github-read-authorizations.ts";
+import { createPublicGithubReadServer } from "../../apps/controller/src/drivers/repo/github/public-read/server.ts";
 import { DEDICATED_OPENCLAW_SUPPORT } from "../helpers/sandbox-driver.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -452,7 +454,11 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
         if (!object) {
           throw failure(404);
         }
-        if (body?.preconditions?.uid && body.preconditions.uid !== object.metadata.uid) {
+        if (
+          (body?.preconditions?.uid && body.preconditions.uid !== object.metadata.uid) ||
+          (body?.preconditions?.resourceVersion &&
+            body.preconditions.resourceVersion !== object.metadata.resourceVersion)
+        ) {
           throw failure(409);
         }
         calls.push({ operation: "delete", kind, name });
@@ -3291,6 +3297,238 @@ test("reader service maintenance enforces the frozen runtime identity at registr
     0,
   );
 });
+
+test("capability retirement refuses foreign or concurrently changed Secrets and never creates one", async (t) => {
+  const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+  const installationId = "installation-test";
+  f.save({
+    apiVersion: "v1",
+    kind: "ConfigMap",
+    metadata: {
+      name: "authorizations",
+      namespace: publicReader.namespace,
+      resourceVersion: "1",
+      labels: {
+        "openclaw.dev/public-read-installation": createHash("sha256")
+          .update(installationId)
+          .digest("hex")
+          .slice(0, 32),
+      },
+    },
+    data: { "authorizations.json": "{}\n" },
+  });
+  const store = new KubernetesPublicGithubReadAuthorizationStore({
+    core: f.clients.core,
+    namespace: publicReader.namespace,
+    configMapName: "authorizations",
+    installationId,
+    driverId: f.driver.id,
+  });
+  await store.prepare(f.revision, f.namespace, { mode: "all" });
+  const key = `Secret:${f.namespace}:${store.secretName(f.revision)}`;
+  const original = structuredClone(f.objects.get(key));
+  await store.withdraw(f.revision);
+  for (const [label, corrupt] of [
+    [
+      "managed owner",
+      (s) => {
+        s.metadata.labels["app.kubernetes.io/managed-by"] = "foreign";
+      },
+    ],
+    ...["namespace", "agent", "revision", "public-read-driver"].map((field) => [
+      field,
+      (s) => {
+        s.metadata.labels[`openclaw.dev/${field}`] = "foreign";
+      },
+    ]),
+    [
+      "UID",
+      (s) => {
+        delete s.metadata.uid;
+      },
+    ],
+    [
+      "version",
+      (s) => {
+        delete s.metadata.resourceVersion;
+      },
+    ],
+    [
+      "deleting",
+      (s) => {
+        s.metadata.deletionTimestamp = new Date().toISOString();
+      },
+    ],
+    [
+      "mutable",
+      (s) => {
+        s.immutable = false;
+      },
+    ],
+    [
+      "type",
+      (s) => {
+        s.type = "kubernetes.io/tls";
+      },
+    ],
+    [
+      "extra material",
+      (s) => {
+        s.data.other = "Zm9yZWlnbg==";
+      },
+    ],
+    [
+      "foreign capability",
+      (s) => {
+        s.data.capability = Buffer.from(
+          "foreign." + Buffer.alloc(32, 1).toString("base64url"),
+        ).toString("base64");
+      },
+    ],
+    [
+      "malformed capability",
+      (s) => {
+        s.data.capability += "=";
+      },
+    ],
+  ]) {
+    await t.test(label, async () => {
+      const changed = structuredClone(original);
+      corrupt(changed);
+      f.objects.set(key, changed);
+      await assert.rejects(store.retireCapability(f.revision, f.namespace), /capability.*invalid/);
+      assert.deepEqual(f.objects.get(key), changed);
+    });
+  }
+  f.objects.set(key, structuredClone(original));
+  const remove = f.clients.core.deleteNamespacedSecret;
+  f.clients.core.deleteNamespacedSecret = async (request) => {
+    assert.deepEqual(request.body.preconditions, {
+      uid: original.metadata.uid,
+      resourceVersion: original.metadata.resourceVersion,
+    });
+    f.objects.get(key).metadata.resourceVersion = "concurrent-version";
+    return remove(request);
+  };
+  await assert.rejects(store.retireCapability(f.revision, f.namespace), /409/);
+  assert.ok(f.objects.has(key), "a changed Secret must survive stale deletion");
+  f.clients.core.deleteNamespacedSecret = remove;
+  await store.retireCapability(f.revision, f.namespace);
+  const writes = f.calls.filter((call) => call.operation === "write").length;
+  await store.retireCapability(f.revision, f.namespace);
+  assert.equal(f.objects.has(key), false);
+  assert.equal(
+    f.calls.filter((call) => call.operation === "write").length,
+    writes,
+    "missing capability retirement must not create or publish material",
+  );
+});
+
+// Real Compute and reader/store lifecycle. Only Kubernetes transport is controlled;
+// the selected reader uses its fixed production port and a trusted loopback leaf.
+test(
+  "permanent reader retirement removes its capability only after workload fencing and reader acknowledgement",
+  { timeout: 30_000 },
+  async (t) => {
+    const tls = await publicReaderTls("127.0.0.1");
+    const reader = {
+      ...publicReader,
+      address: "127.0.0.1",
+      authorizationConfigMapName: "authorizations",
+      caBundle: tls.ca,
+    };
+    const f = await fixture("dedicated", undefined, { publicGithubRead: reader });
+    delete f.revision.repositoryCredentials;
+    f.revision.configuration.plugins.entries.codex.config.publicGithubRead = { mode: "all" };
+    f.revision.compute.serviceAccess = f.driver.admitServiceAccess({
+      installationId: "installation-test",
+      configuration: f.revision.configuration,
+      harness: f.revision.harness,
+    });
+    assert.equal(f.revision.compute.serviceAccess.length, 1);
+    f.revision.compute.admission = f.driver.admitRevision(f.revision);
+    f.save({
+      apiVersion: "v1",
+      kind: "ConfigMap",
+      metadata: {
+        name: "authorizations",
+        namespace: reader.namespace,
+        resourceVersion: "1",
+        labels: {
+          "openclaw.dev/public-read-installation": createHash("sha256")
+            .update("installation-test")
+            .digest("hex")
+            .slice(0, 32),
+        },
+      },
+      data: { "authorizations.json": "{}\n" },
+    });
+    const registry = () =>
+      JSON.parse(
+        f.objects.get(`ConfigMap:${reader.namespace}:authorizations`).data["authorizations.json"],
+      );
+    let heldProjection;
+    const server = createPublicGithubReadServer({
+      tls: { cert: tls.cert, key: tls.key },
+      policy: { mode: "all" },
+      loadAuthorizations: () => heldProjection ?? registry(),
+    });
+    await listen(t, server, "127.0.0.1", { port: 8080 });
+    const store = new KubernetesPublicGithubReadAuthorizationStore({
+      core: f.clients.core,
+      namespace: reader.namespace,
+      configMapName: "authorizations",
+      installationId: "installation-test",
+      driverId: f.driver.id,
+    });
+    const secretKey = `Secret:${f.namespace}:${store.secretName(f.revision)}`;
+    await f.driver.prepareRevision(f.revision, f.context());
+    assert.equal(publicReaderPolicies(f).length, 1);
+    const original = structuredClone(f.objects.get(secretKey));
+    assert.ok(original?.metadata.uid);
+    // Stop suspends the same immutable capability so ordinary resume remains possible.
+    await f.driver.stopRevision(f.revision);
+    assert.deepEqual(f.objects.get(secretKey), original);
+    await f.driver.prepareRevision(f.revision, f.context());
+    assert.deepEqual(f.objects.get(secretKey), original);
+    assert.ok(f.deployments().some((d) => d.metadata.name.startsWith("agent-")));
+    heldProjection = registry();
+    let observedWithdrawal;
+    const observed = new Promise((resolve) => {
+      observedWithdrawal = resolve;
+    });
+    server.on("request", (request) => {
+      const current = registry()[f.revision.id];
+      if (
+        request.url.startsWith("/healthz?revision=") &&
+        (current === undefined || current.withdrawn)
+      ) {
+        observedWithdrawal();
+      }
+    });
+    const retired = f.driver.retireRevision(f.revision);
+    await Promise.race([
+      observed,
+      retired.then(() => assert.fail("retirement completed before acknowledgement")),
+    ]);
+    assert.equal(f.deployments().filter((d) => d.metadata.name.startsWith("agent-")).length, 0);
+    assert.equal(publicReaderPolicies(f).length, 0);
+    assert.deepEqual(
+      f.objects.get(secretKey),
+      original,
+      "an unacknowledged registry projection cannot delete the capability",
+    );
+    heldProjection = undefined;
+    await retired;
+    assert.equal(
+      f.objects.has(secretKey),
+      false,
+      "permanent retirement must remove its capability Secret",
+    );
+    await f.driver.retireRevision(f.revision);
+    assert.equal(f.objects.has(secretKey), false, "retirement retry must not create a capability");
+  },
+);
 
 // A public-reader wrapper must not restore transport-open readiness on a Compute
 // Pod. Run the selected rendered program through real material installation and
