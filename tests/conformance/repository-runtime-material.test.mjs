@@ -3156,7 +3156,13 @@ for (const operation of ["stopRevision", "retireRevision"]) {
   test(`${operation} fences the owned runtime even when the public authorization registry is unavailable`, async () => {
     const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
     delete f.revision.repositoryCredentials;
+    f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+      enabled: true,
+      domains: { [publicReader.address]: "allow" },
+    };
+    f.revision.compute.admission = f.driver.admitRevision(f.revision);
     await f.driver.prepareRevision(f.revision, f.context());
+    assert.equal(publicReaderPolicies(f).length, 1);
     assert.ok(f.deployments().some((deployment) => deployment.metadata.name.startsWith("agent-")));
     // Resume the owned runtime with its service admission, after its external
     // authorization registry has disappeared. Shutdown must still fence it.
@@ -3176,13 +3182,24 @@ for (const operation of ["stopRevision", "retireRevision"]) {
       f.deployments().filter((deployment) => deployment.metadata.name.startsWith("agent-")).length,
       0,
     );
+    assert.equal(
+      publicReaderPolicies(f).length,
+      0,
+      "fenced service must retire its owned reader policy",
+    );
   });
 }
 
 test("service maintenance fences the owned runtime when its admitted reader peer changes", async () => {
   const f = await fixture("dedicated", undefined, { publicGithubRead: { ...publicReader } });
   delete f.revision.repositoryCredentials;
+  f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  f.revision.compute.admission = f.driver.admitRevision(f.revision);
   await f.driver.prepareRevision(f.revision, f.context());
+  assert.equal(publicReaderPolicies(f).length, 1);
   Object.assign(f.driver.options.network.publicGithubRead, {
     authorizationConfigMapName: "unavailable-authorizations",
     caBundle: "public-ca",
@@ -3202,6 +3219,11 @@ test("service maintenance fences the owned runtime when its admitted reader peer
   assert.equal(
     f.deployments().filter((deployment) => deployment.metadata.name.startsWith("agent-")).length,
     0,
+  );
+  assert.equal(
+    publicReaderPolicies(f).length,
+    0,
+    "withdrawn peer must retire its owned reader policy",
   );
 });
 

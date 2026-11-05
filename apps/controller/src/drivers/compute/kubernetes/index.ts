@@ -8758,6 +8758,16 @@ export class KubernetesComputeDriver implements ComputeDriver {
     if (!admittedReader && !computeOwnsWorkload) {
       await this.waitForRevisionPodsToTerminate(revision, namespace, "agent");
     }
+    if (revision.compute.serviceAccess?.some(({ id }) => id === "public-github-read")) {
+      // The saved service descriptor owns this policy even after its peer or
+      // registry disappears. Remove it only after the owning Harness is stopped.
+      await this.deleteOwnedNamespacedResource(
+        "NetworkPolicy",
+        this.publicGithubReadNetworkPolicyName(revision),
+        this.pluginRuntimeOwnership(revision),
+        namespace,
+      );
+    }
   }
 
   /** Deletes the revision's Gateway and, unless `waitForPods` is false, waits for its Pods. */
@@ -8999,7 +9009,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
     unknownPredecessor = false,
   ): Promise<void> {
     const gatewayNamespace = this.gatewayNamespace(revision, namespace);
-    if (unknownPredecessor || this.hasPublicGithubReadAdmission(revision)) {
+    if (
+      unknownPredecessor ||
+      this.hasPublicGithubReadAdmission(revision) ||
+      revision.compute.serviceAccess?.some(({ id }) => id === "public-github-read")
+    ) {
       await this.deleteOwnedNamespacedResource(
         "NetworkPolicy",
         this.publicGithubReadNetworkPolicyName(revision),

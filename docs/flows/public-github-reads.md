@@ -1,7 +1,7 @@
 ---
 created: "2026-10-15"
 updated: "2026-11-05"
-last_updated_session: authoring-run/01a19cef-6046-7960-88eb-e30de1c96e9e
+last_updated_session: authoring-run/f37e6ffb-bbb0-4112-ad9b-6066fa0e261b
 ---
 
 # Public GitHub read flow
@@ -245,6 +245,11 @@ same immutable capability. Retirement and an observed peer change permanently
 withdraw the saved authorization; it cannot be restored by preparing that revision.
 An expired or unreadable row denies future reads even if maintenance is unavailable.
 
+For service-access revisions, `shutdownRevisionRuntime` deletes the owned reader
+NetworkPolicy after Compute or Sandbox shutdown and Pod termination. Retirement
+cleanup uses the saved descriptor despite peer/registry loss. Exact ownership
+checks protect foreign policies; failed shutdown prevents withdrawal completion.
+
 For legacy `v1` reader revisions, `revokeUnavailablePublicGithubRead` removes the
 revision policy, foreground-deletes the owned Compute Deployment and waits for
 its Pods before reporting withdrawal. Policy deletion alone does not close
@@ -270,6 +275,8 @@ that the owning runtime has stopped.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-11-05 17:08: Retire service-owned reader policies after Harness shutdown (accompanying correction; authoring-run/f37e6ffb-bbb0-4112-ad9b-6066fa0e261b - 3dadfff895a2c4b4145f47670d6d113ff0e79a0c)
 
 - 2026-11-05 15:19: Resolve bare native Node through a fixed child-only executable path and report closed spawn errors (authoring-run/01a19cef-6046-7960-88eb-e30de1c96e9e - 9567489ec7121311b9fc938afc31f22bb777ed54)
 
