@@ -14,7 +14,7 @@ Status: ⬜ not started · 🟨 in progress · ✅ done
 - Fork rules, sync procedure and Actions policy in [`OAE.md`](../../OAE.md).
 - Done when: the fork exists, upstream workflows are dormant, this plan is on `oae`.
 
-## ⬜ Strike 1 — OAE as a manidae-cloud package (no product changes)
+## ✅ Strike 1 — OAE as a manidae-cloud package (no product changes)
 
 Goal: deploy OAE exactly as manidae-cloud deploys OCE today, from the fork.
 
@@ -26,6 +26,24 @@ Goal: deploy OAE exactly as manidae-cloud deploys OCE today, from the fork.
   strike 4 the fork changes no image contents.
 - Done when: the BYOVPS script installs OAE on Oracle unattended, the console signs
   in, and an Agent answers.
+
+Result (2026-11-06): manidae-cloud branch `oae/strike-1-package` (`14a5b168`):
+`EnterpriseSource` per package in `oce.py`, package `OpenAgentsEnterprise` on the
+same code path as OCE (tests `backend/tests/test_oae_package.py`). On Oracle the
+install block ran unattended in ~3 minutes from `oae@bb04e33`; console at
+`https://oae.ag-6a4baf8a.nemoclaw.dpdns.org/console/` (Let's Encrypt), password
+sign-in through the public URL, Agent `oae-test` (NVIDIA Nemotron via
+`oce-nvidia-agent`) answered.
+
+Finding — co-hosted host Traefik: the install's console route targets
+`http://127.0.0.1:18480`, which assumes a host-network Traefik (manidae's own boxes).
+Oracle's Traefik shares Pangolin's Gerbil network namespace on the `agentgateway`
+bridge, so it got 502. Fixed on the box only: `oae-console-forward.service`
+(socat `172.20.0.1:18480` → `127.0.0.1:18480`) and the route URL repointed. The
+per-Agent routes written by `oce-agent-routes` have the same assumption. Before a
+BYOVPS customer with an existing Pangolin stack can use the package, the install
+must detect the Traefik container's network and route through its gateway (to do,
+with strike 2's edge, which needs the same plumbing).
 
 ## ⬜ Strike 2 — Email sign-in and per-Agent access (reuse OCE)
 
