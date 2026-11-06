@@ -5,7 +5,7 @@
 // a signed-in person granted the Agent gets 200 with the two headers the Agent's gateway trusts
 // (x-occ-identity, x-openclaw-scopes); anyone else gets 403. Traefik copies only those two headers
 // to the upstream request, after stripping any client-supplied copies.
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import * as oidc from "openid-client";
@@ -23,6 +23,10 @@ const AUTH_HOST = env("OAE_EDGE_AUTH_HOST", `auth.${AGENTS_DOMAIN}`).toLowerCase
 const IDENTITY_PREFIX = env("OAE_EDGE_IDENTITY_PREFIX"); // issuer-qualified identities: <prefix>:<sub>
 const SESSION_KEY = Buffer.from(env("OAE_EDGE_SESSION_KEY"), "hex");
 const ACL_FILE = env("OAE_EDGE_ACL_FILE", "/acl/acl.json");
+// Device tokens (mobile/desktop apps that cannot do a browser sign-in): { "<sha256 hex>": { "sub" } },
+// written by oae-edge-sync from `oae-user device add`. The token rides in the URL path
+// (wss://agent-…/d/oaed_<token>), which OpenClaw's apps keep as the gateway context path.
+const DEVICES_FILE = env("OAE_EDGE_DEVICES_FILE", "/devices/devices.json");
 const SESSION_SECONDS = Number(env("OAE_EDGE_SESSION_SECONDS", String(8 * 3600)));
 const PORT = Number(env("PORT", "8080"));
 if (SESSION_KEY.length < 32) throw new Error("OAE_EDGE_SESSION_KEY must be at least 32 bytes of hex");
@@ -84,6 +88,23 @@ function grants() {
   return acl;
 }
 
+let devices = {};
+let devicesMtime = 0;
+function deviceRecord(token) {
+  try {
+    const m = statSync(DEVICES_FILE).mtimeMs;
+    if (m !== devicesMtime) {
+      devices = JSON.parse(readFileSync(DEVICES_FILE, "utf8"));
+      devicesMtime = m;
+    }
+  } catch {
+    devices = {}; // no file yet: no devices (fail closed)
+  }
+  const hash = createHash("sha256").update(token).digest("hex");
+  return Object.hasOwn(devices, hash) ? devices[hash] : null;
+}
+const DEVICE_PATH = /^\/d\/(oaed_[A-Za-z0-9_-]{32,64})(?:[/?#]|$)/;
+
 // --- helpers --------------------------------------------------------------------------------
 const isAgentHost = (host) =>
   typeof host === "string" && host !== AUTH_HOST && /^[a-z0-9-]+$/.test(host.slice(0, -(AGENTS_DOMAIN.length + 1))) &&
@@ -111,9 +132,25 @@ async function oidcConfig() {
 }
 
 // --- handlers -------------------------------------------------------------------------------
+function grant(res, host, sub, via) {
+  const scopes = SCOPES[grants()[host]?.[sub]];
+  if (!scopes) {
+    log("check.denied", { host, sub, via });
+    return null;
+  }
+  return send(res, 200, { "x-occ-identity": `${IDENTITY_PREFIX}:${sub}`, "x-openclaw-scopes": scopes });
+}
+
 function check(req, res) {
   const host = String(req.headers["x-forwarded-host"] ?? "").toLowerCase().split(":")[0];
   if (!isAgentHost(host)) return send(res, 403, {}, "unknown host");
+  // An app's device token in the path: never a redirect, only allowed or refused.
+  const device = DEVICE_PATH.exec(String(req.headers["x-forwarded-uri"] ?? ""));
+  if (device) {
+    const record = deviceRecord(device[1]);
+    if (!record?.sub) return send(res, 401, {}, "unknown device token");
+    return grant(res, host, record.sub, "device") ?? send(res, 403, {}, "no access to this Agent");
+  }
   const session = unseal(cookies(req)[SESSION_COOKIE]);
   if (!session) {
     const uri = String(req.headers["x-forwarded-uri"] ?? "/");
@@ -123,14 +160,9 @@ function check(req, res) {
     const rd = encodeURIComponent(`https://${host}${uri.startsWith("/") ? uri : "/"}`);
     return send(res, 302, { location: `https://${AUTH_HOST}/login?rd=${rd}` });
   }
-  const level = grants()[host]?.[session.sub];
-  const scopes = SCOPES[level];
-  if (!scopes) {
-    log("check.denied", { host, sub: session.sub });
-    return send(res, 403, { "content-type": "text/html; charset=utf-8" },
+  return grant(res, host, session.sub, "session") ??
+    send(res, 403, { "content-type": "text/html; charset=utf-8" },
       page("No access", `You are signed in as ${session.email ?? session.sub}, but you have not been given access to this Agent. Ask an administrator.`));
-  }
-  return send(res, 200, { "x-occ-identity": `${IDENTITY_PREFIX}:${session.sub}`, "x-openclaw-scopes": scopes });
 }
 
 async function login(req, res, url) {
