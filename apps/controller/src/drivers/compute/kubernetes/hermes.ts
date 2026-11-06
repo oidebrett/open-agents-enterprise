@@ -117,7 +117,11 @@ export function hermesPublicUrl(installationId: string | undefined, revision: Ag
 }
 
 class HermesWorkloads {
-  constructor(private readonly driver: DriverInternals) {}
+  private readonly driver: DriverInternals;
+
+  constructor(driver: DriverInternals) {
+    this.driver = driver;
+  }
 
   private async target(revision: AgentRevision) {
     const namespace = (await this.driver.resolveNamespace(revision.namespaceId)).name;
