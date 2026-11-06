@@ -1,0 +1,50 @@
+# Central SSO for OAE: Keycloak (the version OCE verifies in CI) in production mode with its
+# own PostgreSQL. Published on loopback only; a reverse proxy or tunnel (Pangolin + newt today)
+# provides the public HTTPS name. See README.md.
+#
+#   docker compose --env-file ~/.config/oae-sso/keycloak.env up -d
+name: oae-sso
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${OAE_SSO_DB_PASSWORD:?set in the env file}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  keycloak:
+    # Pinned to the digest in tests/fixtures/keycloak/image.json (the only version OCE's CI exercises).
+    image: quay.io/keycloak/keycloak:26.7.5@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85
+    command: ["start"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${OAE_SSO_DB_PASSWORD:?set in the env file}
+      # Fixed public origin: issuer and every front-channel URL use it, whatever proxy is in front.
+      KC_HOSTNAME: ${OAE_SSO_PUBLIC_URL:?set in the env file}
+      # TLS ends at the proxy; Keycloak serves plain HTTP on loopback only.
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${OAE_SSO_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${OAE_SSO_ADMIN_PASSWORD:?set in the env file}
+    ports:
+      - "127.0.0.1:${OAE_SSO_HTTP_PORT:-9080}:8080"   # proxied to the public name
+      - "127.0.0.1:${OAE_SSO_MGMT_PORT:-9081}:9000"   # /health/ready, local only
+
+volumes:
+  postgres:

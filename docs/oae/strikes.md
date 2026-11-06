@@ -45,7 +45,7 @@ BYOVPS customer with an existing Pangolin stack can use the package, the install
 must detect the Traefik container's network and route through its gateway (to do,
 with strike 2's edge, which needs the same plumbing).
 
-## ⬜ Strike 2 — Email sign-in and per-Agent access (reuse OCE)
+## 🟨 Strike 2 — Email sign-in and per-Agent access (reuse OCE)
 
 Goal: people sign in with their email identity and reach only their Agents.
 
@@ -60,6 +60,25 @@ Goal: people sign in with their email identity and reach only their Agents.
   `trustedProxies` = the edge only.
 - Done when: a non-admin email user signs in, sees only their granted Agents and
   chats in an Agent's own UI; an ungranted user is refused.
+
+Progress (2026-11-06):
+
+- ✅ **Central Keycloak** ([`deploy/oae/central-sso/`](../../deploy/oae/central-sso/README.md)):
+  Keycloak 26.7.5 (OCE's CI version, `start` mode) + PostgreSQL, published as
+  `https://keycloak.mcpgateway.online` through Pangolin/newt. One realm and confidential client per
+  installation (`oae-realm.sh`), configured as `oidc-keycloak.md` requires. Chosen over a Keycloak
+  per VPS: same code path as a customer's own IdP, lighter VPSs, one place for demo users.
+- ✅ **Oracle OAE on OIDC**: realm `oae-oracle`; profile re-rendered with `controlPlane.oidc` +
+  `recoveryUserId` (native admin turned off, as OCE requires); `occ-oidc-login` Secret; `helm
+  upgrade`. Browser test: console → Keycloak → callback → signed in as `oae-demo@…`, who sees no
+  Namespaces (no grants yet). Password sign-in for the recovery admin still works.
+- ⬜ Grants: give a person access to one Agent (RFC 0010 sharing) and check they see only it.
+- ⬜ `oae-user` helper: create the OAE account and attach the Keycloak `sub` in one step.
+- ⬜ Installer: OIDC inputs in manidae `oce.py` (issuer, endpoints, client Secret, recovery user;
+  Keycloak or a customer IdP, not surfaced in the UI yet); co-hosted Traefik detection (strike 1
+  finding); button label "SSO" (the console prefixes "Continue with").
+- ⬜ Edge for Agent UIs (replaces native admin): forward-auth on the OAE session + Agent grant,
+  sets `x-occ-identity` for the gateway's trusted-proxy auth.
 
 ## ⬜ Strike 3 — Remote clients for OpenClaw Agents (mobile app)
 
