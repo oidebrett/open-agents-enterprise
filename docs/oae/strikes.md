@@ -83,10 +83,16 @@ Progress (2026-11-06):
   Known gaps: grants must be re-run after each deploy (new revision); `operator` still needs
   `operate` on the Agent's Secrets from an administrator; OCE has no account list, so `oae-user`
   keeps `/opt/oce/prod/oae-users.json`.
-- ⬜ Installer: OIDC inputs in manidae `oce.py` (issuer, endpoints, client Secret, recovery user;
-  Keycloak or a customer IdP, not surfaced in the UI yet); co-hosted Traefik detection (strike 1
-  finding); button label "SSO" (the console prefixes "Continue with"); install `oae-user`;
-  `oce-nvidia-agent` must skip `oce-admin-ui` when native admin is off (OIDC installs).
+- ✅ Installer (manidae-cloud branch `oae/strike-2-installer`, `f3693d84` + `05d5f8e6`): SSO via
+  `EnterpriseOidc` (hidden `oae_oidc_*` package fields; Keycloak endpoints derived; customer IdPs
+  take explicit URLs), activated in OCE's order (Secret → recovery admin ID from a real session →
+  re-render → helm upgrade); native-admin helpers stand down under SSO; `oae-user` installed from
+  the checkout; button "Continue with SSO"; co-hosted Traefik detected (by image, following a
+  shared network namespace) and forwarded; BYOVPS reuses an existing :443 proxy. Fresh unattended
+  install on Oracle with SSO: 0 warnings, then `oce-nvidia-agent` + `oae-user add/grant` + browser
+  SSO sign-in showed exactly the granted Agent. The run exposed a detection bug (`grep -q` under
+  pipefail), fixed and re-verified on the box. Not yet automated: creating the Keycloak realm/client
+  from the manidae backend at deploy time (done by hand with `oae-realm.sh`).
 - ⬜ Edge for Agent UIs (replaces native admin): forward-auth on the OAE session + Agent grant,
   sets `x-occ-identity` for the gateway's trusted-proxy auth.
 
