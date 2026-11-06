@@ -75,9 +75,9 @@ const names = (agentId: string) => {
 
 /** Model settings for Hermes from the Agent's OCE Configuration (its primary model). */
 export function hermesModelSettings(configuration: Readonly<OpenClawConfigurationDocument>): {
-  readonly provider: "nvidia" | "anthropic";
+  readonly provider: "nvidia" | "anthropic" | "openai-api";
   readonly model: string;
-  readonly keyEnvironment: "NVIDIA_API_KEY" | "ANTHROPIC_API_KEY";
+  readonly keyEnvironment: "NVIDIA_API_KEY" | "ANTHROPIC_API_KEY" | "OPENAI_API_KEY";
 } {
   const agents = configuration.agents as { defaults?: { model?: unknown } } | undefined;
   const selected = agents?.defaults?.model;
@@ -97,8 +97,12 @@ export function hermesModelSettings(configuration: Readonly<OpenClawConfiguratio
   if (/^https:\/\/integrate\.api\.nvidia\.com(\/|$)/.test(baseUrl)) {
     return { provider: "nvidia", model, keyEnvironment: "NVIDIA_API_KEY" };
   }
+  // The console's OpenAI choice (provider "openai" at api.openai.com) is Hermes's "openai-api".
+  if (providerId === "openai" && /^https:\/\/api\.openai\.com(\/|$)/.test(baseUrl)) {
+    return { provider: "openai-api", model, keyEnvironment: "OPENAI_API_KEY" };
+  }
   throw new HermesConfigurationError(
-    "Hermes Agents support NVIDIA (baseUrl https://integrate.api.nvidia.com/v1) or Anthropic models so far.",
+    "Hermes Agents support OpenAI, Anthropic and NVIDIA (baseUrl https://integrate.api.nvidia.com/v1) models so far.",
   );
 }
 
