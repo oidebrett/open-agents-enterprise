@@ -253,6 +253,10 @@ cmd_sync() {
     for h in $AUTH_HOST $routes; do
       r=$(echo "$h" | cut -d. -f1)
       printf '    oae-edge-%s:\n      entryPoints: [websecure]\n      rule: "Host(`%s`)"\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h"
+      [ "$h" = "$AUTH_HOST" ] && continue
+      # App device tokens ride in the path (/d/oaed_…): keep those requests out of the access log
+      # (Traefik >= 3.1 per-router observability); browser traffic stays logged (e.g. CrowdSec).
+      printf '    oae-edge-%s-app:\n      entryPoints: [websecure]\n      rule: "Host(`%s`) && PathPrefix(`/d/`)"\n      priority: 10000\n      observability: { accessLogs: false }\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h"
     done
   } > "$tmp"
   if cmp -s "$tmp" "$rules/oae-edge.yml"; then rm -f "$tmp"; else install -m 644 "$tmp" "$rules/oae-edge.yml"; rm -f "$tmp"; fi

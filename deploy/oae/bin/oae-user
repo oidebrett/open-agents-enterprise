@@ -14,6 +14,9 @@
 #                                                 its wss:// URL and a pairing QR / setup code
 #   oae-user device list   [EMAIL]              app tokens (never the tokens themselves)
 #   oae-user device revoke EMAIL ID|all         stop an app token (within ~2 minutes)
+#   oae-user device nodes        AGENT          phones/computers asking for (or given) node access
+#   oae-user device approve-node AGENT REQUEST  let the Agent use that device (shows what, then asks)
+#   oae-user device remove-node  AGENT NODE     take node access away again
 #
 # Options (env): OAE_NAMESPACE (name or ns_ ID, default "default").
 set -euo pipefail
@@ -31,7 +34,7 @@ ROLE_USER="OAE Agent user"
 ROLE_OPERATOR="OAE Agent operator"
 
 die() { echo "oae-user: $*" >&2; exit 1; }
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 [ -n "$URL" ] && [ -n "$ADMIN" ] || die "cannot read the console URL and admin email from $ACCESS"
 [ -f "$REGISTRY" ] || { umask 077; echo '{}' > "$REGISTRY"; }
 
@@ -219,7 +222,8 @@ cmd_device() {
           set -- $pod
           echo; echo "Pairing QR / setup code (works for ~10 minutes; usable within ~2 minutes, once the edge has the token):"
           # The gateway logs as JSON lines; print the human message (QR + setup code) as text.
-          KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl -n "$1" exec "$2" -c gateway -- openclaw qr --url "$url" 2>&1 |
+          # --limited: the pairing never carries operator.admin (the edge caps every connection anyway).
+          KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl -n "$1" exec "$2" -c gateway -- openclaw qr --limited --url "$url" 2>&1 |
             jq -Rr '(fromjson? // .) | if type == "object" then (.message // tostring) else . end' || true
         fi
       fi ;;
@@ -236,6 +240,39 @@ cmd_device() {
       devices_put 'with_entries(select((.value.email == $e and ($i == "all" or .value.id == $i)) | not))' --arg e "$email" --arg i "$id"
       edge_resync
       echo "Revoked $n app token(s) for $email; the edge refuses them within ~2 minutes." ;;
+    nodes|approve-node|remove-node)
+      local agent ns a aid pod; agent=${1:-}; [ -n "$agent" ] || usage
+      ns=$(namespace_id); a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent"
+      aid=$(jq -r .id <<<"$a")
+      pod=$(KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl get pods -A -l "openclaw.dev/agent=$aid,openclaw.dev/workload-role=gateway" \
+        -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}')
+      [ -n "$pod" ] || die "Agent $agent has no running gateway"
+      gw() { set -- $pod "$@"; local n=$1 p=$2; shift 2; KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl -n "$n" exec "$p" -c gateway -- openclaw "$@"; }
+      case $sub in
+        nodes)
+          echo "Waiting for approval:"
+          gw nodes pending --json 2>/dev/null | jq -r '.[]? | "  \(.requestId)  \(.displayName // "?") (\(.platform // "?"))  wants: \((.commands // []) | join(", "))"'
+          echo "Approved:"
+          gw nodes status --json 2>/dev/null | jq -r '(.nodes // .)[]? | "  \(.displayName // .name // .nodeId)  connected=\(.connected)  commands=\((.commands // []) | length)"' ;;
+        approve-node)
+          local req=${2:-} yes=${3:-} r
+          [ -n "$req" ] || usage
+          r=$(gw nodes pending --json 2>/dev/null | jq -c --arg r "$req" '[.[]? | select(.requestId == $r)][0] // empty')
+          [ -n "$r" ] || die "no pending node request $req on $agent (see: oae-user device nodes $agent)"
+          jq -r '"\(.displayName) (\(.platform), \(.modelIdentifier // "?")) asks to let the Agent use:",
+                 "  commands:    \((.commands // []) | join(", "))",
+                 "  permissions: \((.permissions // {}) | to_entries | map(select(.value == true) | .key) | join(", "))"' <<<"$r"
+          if [ "$yes" != "--yes" ]; then
+            read -rp "Approve? The Agent can then use these on that device. [y/N] " ans
+            [[ $ans =~ ^[Yy]$ ]] || { echo "Not approved."; return 0; }
+          fi
+          gw nodes approve "$req" >/dev/null 2>&1 || die "approval failed"
+          echo "Approved. Undo with: oae-user device remove-node $agent \"$(jq -r .displayName <<<"$r")\"" ;;
+        remove-node)
+          local node=${2:-}; [ -n "$node" ] || usage
+          gw nodes remove --node "$node" >/dev/null 2>&1 || die "could not remove node $node"
+          echo "Removed $node from $agent: the Agent can no longer use it." ;;
+      esac ;;
     *) usage ;;
   esac
 }
