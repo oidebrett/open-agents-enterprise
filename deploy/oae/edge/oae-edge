@@ -105,19 +105,19 @@ YAML
 # Per-tenant-namespace middlewares: strip client identity headers, then ask oae-edge-authz.
 # tenant_middlewares NS [hermes]: Hermes routes also replace Authorization with the agent's token.
 tenant_middlewares() {
-  local strip='x-occ-identity: "", x-openclaw-scopes: "", x-forwarded-user: ""' authh='[x-occ-identity, x-openclaw-scopes]'
-  if [ "${2:-}" = hermes ]; then strip="$strip, Authorization: \"\""; authh='[Authorization]'; fi
+  local strip='x-occ-identity: "", x-openclaw-scopes: "", x-forwarded-user: ""' authh='[x-occ-identity, x-openclaw-scopes]' mw=oae-edge
+  if [ "${2:-}" = hermes ]; then strip="$strip, Authorization: \"\""; authh='[Authorization]'; mw=oae-edge-hermes; fi
   kubectl apply -f - >/dev/null <<YAML
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
-metadata: { name: oae-edge-strip, namespace: $1 }
+metadata: { name: $mw-strip, namespace: $1 }
 spec:
   headers:
     customRequestHeaders: { $strip }
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
-metadata: { name: oae-edge-auth, namespace: $1 }
+metadata: { name: $mw-auth, namespace: $1 }
 spec:
   forwardAuth:
     address: http://oae-edge-authz.$EDGE_NS.svc.cluster.local:8080/check
@@ -134,7 +134,8 @@ spec:
 YAML
 }
 
-agent_route() {  # agent_route TENANT_NS SHORT SERVICE PORT HOST AGENT_ID
+agent_route() {  # agent_route TENANT_NS SHORT SERVICE PORT HOST AGENT_ID [MIDDLEWARE_PREFIX]
+  local mw=${7:-oae-edge}
   kubectl apply -f - >/dev/null <<YAML
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -143,7 +144,7 @@ metadata:
   namespace: $1
   labels: { app.kubernetes.io/managed-by: oae-edge }
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: "$1-oae-edge-strip@kubernetescrd,$1-oae-edge-auth@kubernetescrd,$1-oae-edge-device-path@kubernetescrd"
+    traefik.ingress.kubernetes.io/router.middlewares: "$1-$mw-strip@kubernetescrd,$1-$mw-auth@kubernetescrd,$1-oae-edge-device-path@kubernetescrd"
 spec:
   ingressClassName: traefik
   rules:
@@ -216,16 +217,30 @@ cmd_sync() {
         | map({sub: $sub[.subjectId], level: (if $rname[.roleId] == $op then "operator" else "user" end)})
         | reduce .[] as $e ({}; .[$e.sub] = (if .[$e.sub] == "operator" or $e.level == "operator" then "operator" else "user" end))' <<<"$bindings")
       acl=$(jq -c --arg h "$host" --argjson p "$people" '.[$h] = $p' <<<"$acl")
-      svc=$(kubectl get svc -A -l "openclaw.dev/agent=$aid" -o json | jq -c '[.items[] | select(.metadata.name | startswith("gateway-"))][0] // empty')
+      svc=$(kubectl get svc -A -l "openclaw.dev/agent=$aid" -o json | jq -c '[.items[] | select((.metadata.name | startswith("gateway-")) or .metadata.labels["oae.dev/runtime"] == "hermes")][0] // empty')
       [ -n "$svc" ] || continue
       tns=$(jq -r .metadata.namespace <<<"$svc"); sname=$(jq -r .metadata.name <<<"$svc")
       sport=$(jq -r '[.spec.ports[] | select(.name == "http")][0].port // .spec.ports[0].port' <<<"$svc")
-      tenant_middlewares "$tns"
-      agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid"
+      ish=""
+      if [ "$(jq -r '.metadata.labels["oae.dev/runtime"] // ""' <<<"$svc")" = hermes ]; then
+        ish=1
+        # OCE-native Hermes Agent (strike 5b): the edge presents its session token; no OpenClaw
+        # gateway identities to manage.
+        local htok
+        htok=$(kubectl -n "$tns" get secret "$sname-env" -o jsonpath='{.data.HERMES_DASHBOARD_SESSION_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true)
+        [ -n "$htok" ] && hermes_tokens=$(jq -c --arg h "$host" --arg t "$htok" '.[$h] = $t' <<<"$hermes_tokens")
+        tenant_middlewares "$tns" hermes
+        agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid" oae-edge-hermes
+      else
+        tenant_middlewares "$tns"
+        agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid"
+      fi
       routes+="$host"$'\n'
       # Agents never shared stay untouched; when the last person goes, their identities leave the
       # gateway too (the route stays, so the edge answers "No access" instead of 404).
-      if [ "$people" = "{}" ] && ! $OCC configuration get "$cfgid" --namespace "$ns" --output json |
+      if [ -n "$ish" ]; then
+        :   # Hermes: access is the edge's ACL + session token; no gateway identities.
+      elif [ "$people" = "{}" ] && ! $OCC configuration get "$cfgid" --namespace "$ns" --output json |
           jq -e '(.values.gateway.auth.trustedProxy.allowUsers // []) | any(. != "occ-workspace-files")' >/dev/null; then
         :
       elif gateway_identities "$ns" "$aid" "$cfgid" "https://$host" "$people"; then
