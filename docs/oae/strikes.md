@@ -111,8 +111,18 @@ Progress (2026-11-06):
 - Verified on Oracle: an OpenClaw WebSocket client (`openclaw gateway health --url wss://…/d/…`)
   connected through the edge as the person; a wrong token → 401; `device revoke` → 401 within
   ~30 s. Token activation takes up to ~2 min (Secret propagation to the edge Pod).
-- Not yet: a real phone scan (needs a device); tokens in URL paths reach proxy access logs
-  (revocable; consider log redaction).
+- ✅ Real phone (2026-11-06): Pixel 9a, OpenClaw Android 2026.10.90, scanned the QR on a fresh
+  manidae install. Both app connections (operator/chat and node) authenticated as
+  `oae-oracle:<sub>` via the edge (`auth=trusted-proxy`); chat works.
+- Node access is an admin decision: the app's node pairing request (notifications, contacts
+  search, calendar read, motion, push-to-talk; `contacts.add`/`calendar.add` withheld) needs
+  `operator.pairing`, which a `user` grant lacks, so the phone waits until an administrator runs
+  `openclaw nodes approve` on the gateway. To do: `oae-user device approve-node` showing exactly
+  what is requested.
+- To do: the setup code is generated as "Access: full", so the pairing record carries
+  `operator.admin` (each connection is still capped by the edge's `x-openclaw-scopes`); generate
+  it with the person's scopes instead. Tokens in URL paths reach proxy access logs (revocable;
+  consider log redaction).
 
 ## ⬜ Strike 4 — OAE images and the Claude harness for OpenClaw
 
