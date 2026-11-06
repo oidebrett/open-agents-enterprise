@@ -153,7 +153,11 @@ gateway_identities() {  # gateway_identities NS AGENT_ID CONFIG_ID ORIGIN PEOPLE
     | $v
     | .gateway.auth.trustedProxy.allowUsers = (["occ-workspace-files"] + ($p | map(.id)) | unique)
     | .gateway.auth.identityScopes = ({"occ-workspace-files": ["operator.admin"]} + ($p | map({(.id): .scopes}) | add // {}))
-    | .gateway.controlUi.allowedOrigins = (((.gateway.controlUi.allowedOrigins // []) + [$o]) | unique)' <<<"$cfg")
+    | .gateway.controlUi.allowedOrigins = (((.gateway.controlUi.allowedOrigins // []) + [$o]) | unique)
+    # A new browser pairs without a host-side approval, as in OCE native admin. Never operator.admin
+    # (OCE refuses it with humans); each WebSocket is still capped by the edge x-openclaw-scopes.
+    | .gateway.auth.trustedProxy.deviceAutoApprove = {enabled: true, scopes: ["operator.read","operator.write"]}
+    | .gateway.publicOrigin = $o' <<<"$cfg")
   if [ "$(jq -cS . <<<"$want")" = "$(jq -cS .values <<<"$cfg")" ]; then return 1; fi
   local f; f=$(mktemp); jq -c '{values: .}' <<<"$want" > "$f"
   $OCC configuration update "$3" --namespace "$1" --file "$f" --output json >/dev/null; rm -f "$f"
