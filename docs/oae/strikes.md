@@ -142,18 +142,32 @@ Progress (2026-11-06):
 - Done when: an OpenClaw Agent's turns run in Claude Code in its own Pod, with
   approvals coming back to the gateway.
 
-## ⬜ Strike 5 — Hermes as an Agent kind (embedded)
+## 🟨 Strike 5 — Hermes as an Agent kind
 
-- `CONFIGURATION_KINDS` gains `hermes`; Hermes configuration type and validators
-  in new files; Kubernetes Compute dispatches to a new Hermes workload module;
-  pinned Hermes runtime image.
-- Gateway auth: Hermes behind the edge's trusted identity (sidecar or upstream
-  trusted-header mode — to be designed; Hermes ≥0.18 refuses unauthenticated
-  network binds).
-- v1 limits: no OCE plugins for Hermes; workspace-file editor off.
-- Hermes Desktop through the edge (port of `HERMES_REMOTE_DESKTOP.md`).
-- Done when: a Hermes Agent is created in the console, answers on a channel and in
-  its dashboard, and Hermes Desktop connects remotely.
+Phased (user decision 2026-11-06): **5a** proves the Hermes workload next to OCE with a thin
+harness; **5b** makes `hermes` a native OCE Agent kind (the goal: Hermes inside OCE, with per-Agent
+grants, revisions, audit and the console).
+
+### 🟨 5a — Hermes next to OCE (branch `strike/5a-hermes`)
+
+- `deploy/oae/hermes/oae-hermes create|list|delete`: official `nousresearch/hermes-agent:v0.23.0`
+  (by digest), one container per agent in namespace `oae-hermes` (`gateway run` with
+  `HERMES_DASHBOARD=1`, dashboard on 9119; two containers left the dashboard blind to the
+  gateway), seeded `config.yaml` (provider `nvidia`, `trusted_proxies`, `public_url`), model key and
+  dashboard session token in a Secret, NetworkPolicy admitting only k3s Traefik.
+- Access is OCE IAM: a Namespace Role per Hermes agent (`OAE Hermes user|operator: NAME`, via
+  `oae-user grant|revoke`); 5b replaces it with per-Agent bindings.
+- Edge: `hermes-<hash>.agents.<host>`; for granted people `oae-edge-authz` injects
+  `Authorization: Bearer <session token>` (Hermes's own deployment-token gate: web UI and API).
+- ✅ Browser end to end on Oracle as the SSO demo user: dashboard authenticated "via session-token",
+  chat over WebSocket answered (NVIDIA Nemotron).
+- ⬜ Hermes Desktop through `oae-user device add EMAIL HERMES` (needs the user's Desktop app).
+
+### ⬜ 5b — native `hermes` Agent kind in OCE
+
+- `CONFIGURATION_KINDS` gains `hermes`; Hermes configuration type and validators in new files;
+  Kubernetes Compute dispatches `hermes` revisions to a Hermes workload module (the 5a manifest);
+  per-Agent grants replace the Namespace Role; console create flow.
 
 ## ⬜ Strike 6 — Hermes on the Codex and Claude harness Pods
 
