@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Create (or check) a Keycloak realm and the confidential OIDC client one OAE installation signs
-# in with, configured as docs/guides/deploy/oidc-keycloak.md requires. Idempotent.
+# Create (or check) a Keycloak realm and the confidential OIDC clients of one OAE installation
+# (oae-console: OAE sign-in; oae-edge: the human ingress), configured as
+# docs/guides/deploy/oidc-keycloak.md requires. Idempotent.
 #
 #   oae-realm.sh <realm> <oae-base-url>      e.g. oae-realm.sh oae-oracle https://oae.example.com
 #
@@ -28,49 +29,40 @@ if ! kc get "realms/$REALM" >/dev/null 2>&1; then
   echo "realm $REALM created"
 fi
 
-client_id() { kc get clients -r "$REALM" -q clientId=oae-console --fields id --format csv --noquotes | head -1; }
-CID=$(client_id)
-if [ -z "$CID" ]; then
-  kc create clients -r "$REALM" -f - >/dev/null <<JSON
-{
-  "clientId": "oae-console",
-  "name": "Open Agents Enterprise console",
-  "protocol": "openid-connect",
-  "enabled": true,
-  "publicClient": false,
-  "clientAuthenticatorType": "client-secret",
-  "standardFlowEnabled": true,
-  "directAccessGrantsEnabled": false,
-  "implicitFlowEnabled": false,
-  "serviceAccountsEnabled": false,
-  "frontchannelLogout": false,
-  "redirectUris": ["$OAE/api/auth/providers/oidc/callback"],
-  "webOrigins": []
+# ensure_client CLIENT_ID REDIRECT_URI OUT_FILE: one confidential client, configured as
+# oidc-keycloak.md requires, its credentials written to OUT_FILE (mode 600).
+ensure_client() {
+  local client=$1 redirect=$2 out=$3 cid secret
+  cid=$(kc get clients -r "$REALM" -q "clientId=$client" --fields id --format csv --noquotes | head -1)
+  if [ -z "$cid" ]; then
+    kc create clients -r "$REALM" -s "clientId=$client" -s protocol=openid-connect -s enabled=true \
+      -s publicClient=false -s clientAuthenticatorType=client-secret -s standardFlowEnabled=true >/dev/null
+    cid=$(kc get clients -r "$REALM" -q "clientId=$client" --fields id --format csv --noquotes | head -1)
+    echo "client $client created"
+  fi
+  # Applied on every run: Keycloak 26.7 ignores some of these on create (backchannel logout stays on).
+  kc update "clients/$cid" -r "$REALM" \
+    -s "redirectUris=[\"$redirect\"]" -s 'webOrigins=[]' \
+    -s frontchannelLogout=false -s directAccessGrantsEnabled=false -s implicitFlowEnabled=false \
+    -s serviceAccountsEnabled=false \
+    -s 'attributes."pkce.code.challenge.method"=S256' \
+    -s 'attributes."backchannel.logout.session.required"=false' \
+    -s 'attributes."backchannel.logout.url"=' \
+    -s 'attributes."standard.token.exchange.enabled"=false' \
+    -s 'attributes."oauth2.device.authorization.grant.enabled"=false' \
+    -s 'attributes."oidc.ciba.grant.enabled"=false' \
+    -s 'attributes."id.token.signed.response.alg"=RS256'
+  secret=$(kc get "clients/$cid/client-secret" -r "$REALM" | sed -nE 's/.*"value" *: *"([^"]+)".*/\1/p')
+  [ -n "$secret" ] || { echo "could not read the $client secret" >&2; exit 1; }
+  printf '{"realm":"%s","clientId":"%s","clientSecret":"%s","issuer":"%s"}\n' \
+    "$REALM" "$client" "$secret" "$ISSUER" > "$out"
+  echo "client:  $client (secret in $out)"
 }
-JSON
-  CID=$(client_id)
-  echo "client oae-console created"
-fi
 
-# Applied on every run: Keycloak 26.7 ignores some of these on create (backchannel logout stays on).
-kc update "clients/$CID" -r "$REALM" \
-  -s "redirectUris=[\"$OAE/api/auth/providers/oidc/callback\"]" -s 'webOrigins=[]' \
-  -s frontchannelLogout=false -s directAccessGrantsEnabled=false -s implicitFlowEnabled=false \
-  -s serviceAccountsEnabled=false \
-  -s 'attributes."pkce.code.challenge.method"=S256' \
-  -s 'attributes."backchannel.logout.session.required"=false' \
-  -s 'attributes."backchannel.logout.url"=' \
-  -s 'attributes."standard.token.exchange.enabled"=false' \
-  -s 'attributes."oauth2.device.authorization.grant.enabled"=false' \
-  -s 'attributes."oidc.ciba.grant.enabled"=false' \
-  -s 'attributes."id.token.signed.response.alg"=RS256'
-
-SECRET=$(kc get "clients/$CID/client-secret" -r "$REALM" | sed -nE 's/.*"value" *: *"([^"]+)".*/\1/p')
-[ -n "$SECRET" ] || { echo "could not read the client secret" >&2; exit 1; }
 ISSUER="$OAE_SSO_PUBLIC_URL/realms/$REALM"
 umask 077
 mkdir -p "$HOME/.config/oae-sso"
-printf '{"realm":"%s","clientId":"oae-console","clientSecret":"%s","issuer":"%s"}\n' \
-  "$REALM" "$SECRET" "$ISSUER" > "$HOME/.config/oae-sso/$REALM-client.json"
+# OAE's own sign-in (OCE OIDC) and the human ingress (oae-edge, docs/oae/edge-design.md).
+ensure_client oae-console "$OAE/api/auth/providers/oidc/callback" "$HOME/.config/oae-sso/$REALM-client.json"
+ensure_client oae-edge "https://auth.agents.${OAE#https://}/callback" "$HOME/.config/oae-sso/$REALM-edge-client.json"
 echo "issuer:  $ISSUER"
-echo "client:  oae-console (secret in ~/.config/oae-sso/$REALM-client.json)"

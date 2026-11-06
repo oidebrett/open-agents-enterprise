@@ -93,8 +93,11 @@ Progress (2026-11-06):
   SSO sign-in showed exactly the granted Agent. The run exposed a detection bug (`grep -q` under
   pipefail), fixed and re-verified on the box. Not yet automated: creating the Keycloak realm/client
   from the manidae backend at deploy time (done by hand with `oae-realm.sh`).
-- ⬜ Edge for Agent UIs (replaces native admin): forward-auth on the OAE session + Agent grant,
-  sets `x-occ-identity` for the gateway's trusted-proxy auth.
+- ✅ Edge for Agent UIs: OCE's human ingress (upstream #3049 cherry-picked; our controller image on
+  Docker Hub) + `oae-edge` (sign-in/authz service, per-Agent routes, exact-peer NetworkPolicy,
+  gateway identities). Verified in a browser on Oracle: SSO → Agent UI connected as the person →
+  chat answered; revoke → No access. Details: [`edge-design.md`](edge-design.md). Remaining:
+  manidae installer wiring for the edge.
 
 ## ⬜ Strike 3 — Remote clients for OpenClaw Agents (mobile app)
 
