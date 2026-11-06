@@ -27,6 +27,9 @@ const ACL_FILE = env("OAE_EDGE_ACL_FILE", "/acl/acl.json");
 // written by oae-edge-sync from `oae-user device add`. The token rides in the URL path
 // (wss://agent-…/d/oaed_<token>), which OpenClaw's apps keep as the gateway context path.
 const DEVICES_FILE = env("OAE_EDGE_DEVICES_FILE", "/devices/devices.json");
+// Hermes agents (single-owner, no proxy identity): { "<host>": "<dashboard session token>" }. For a
+// granted person the edge presents the agent's session token, as Hermes Desktop would.
+const HERMES_FILE = env("OAE_EDGE_HERMES_FILE", "/hermes/hermes.json");
 const SESSION_SECONDS = Number(env("OAE_EDGE_SESSION_SECONDS", String(8 * 3600)));
 const PORT = Number(env("PORT", "8080"));
 if (SESSION_KEY.length < 32) throw new Error("OAE_EDGE_SESSION_KEY must be at least 32 bytes of hex");
@@ -103,6 +106,20 @@ function deviceRecord(token) {
   const hash = createHash("sha256").update(token).digest("hex");
   return Object.hasOwn(devices, hash) ? devices[hash] : null;
 }
+let hermes = {};
+let hermesMtime = 0;
+function hermesToken(host) {
+  try {
+    const m = statSync(HERMES_FILE).mtimeMs;
+    if (m !== hermesMtime) {
+      hermes = JSON.parse(readFileSync(HERMES_FILE, "utf8"));
+      hermesMtime = m;
+    }
+  } catch {
+    hermes = {};
+  }
+  return Object.hasOwn(hermes, host) ? hermes[host] : null;
+}
 const DEVICE_PATH = /^\/d\/(oaed_[A-Za-z0-9_-]{32,64})(?:[/?#]|$)/;
 
 // --- helpers --------------------------------------------------------------------------------
@@ -138,7 +155,10 @@ function grant(res, host, sub, via) {
     log("check.denied", { host, sub, via });
     return null;
   }
-  return send(res, 200, { "x-occ-identity": `${IDENTITY_PREFIX}:${sub}`, "x-openclaw-scopes": scopes });
+  const headers = { "x-occ-identity": `${IDENTITY_PREFIX}:${sub}`, "x-openclaw-scopes": scopes };
+  const token = hermesToken(host);
+  if (token) headers.authorization = `Bearer ${token}`;
+  return send(res, 200, headers);
 }
 
 function check(req, res) {

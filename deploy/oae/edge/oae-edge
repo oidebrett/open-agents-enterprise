@@ -22,6 +22,8 @@ AUTH_HOST="auth.$AGENTS"
 EDGE_NS=oae-edge
 REGISTRY=$PROD/oae-users.json
 DEVICES=$PROD/oae-devices.json   # app device tokens (hashes only), written by `oae-user device`
+HERMES=$PROD/oae-hermes.json     # Hermes agents next to OCE (strike 5a), written by `oae-hermes`
+HERMES_NS=oae-hermes
 STATE=$PROD/edge-state.json
 ROLE_OPERATOR="OAE Agent operator"
 log() { echo "oae-edge: $*"; }
@@ -38,6 +40,8 @@ cmd_install() {
     kubectl -n $EDGE_NS create cm oae-edge-acl --from-literal=acl.json='{}' >/dev/null
   kubectl -n $EDGE_NS get secret oae-edge-devices >/dev/null 2>&1 ||
     kubectl -n $EDGE_NS create secret generic oae-edge-devices --from-literal=devices.json='{}' >/dev/null
+  kubectl -n $EDGE_NS get secret oae-edge-hermes >/dev/null 2>&1 ||
+    kubectl -n $EDGE_NS create secret generic oae-edge-hermes --from-literal=hermes.json='{}' >/dev/null
   kubectl apply -f - >/dev/null <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -62,16 +66,19 @@ spec:
         - { name: OAE_EDGE_IDENTITY_PREFIX, value: "$OAE_EDGE_IDENTITY_PREFIX" }
         - { name: OAE_EDGE_ACL_FILE, value: /acl/acl.json }
         - { name: OAE_EDGE_DEVICES_FILE, value: /devices/devices.json }
+        - { name: OAE_EDGE_HERMES_FILE, value: /hermes/hermes.json }
         envFrom: [{ secretRef: { name: oae-edge-authz } }]
         volumeMounts:
         - { name: acl, mountPath: /acl, readOnly: true }
         - { name: devices, mountPath: /devices, readOnly: true }
+        - { name: hermes, mountPath: /hermes, readOnly: true }
         readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
         resources: { requests: { cpu: 20m, memory: 64Mi }, limits: { memory: 192Mi } }
         securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
       volumes:
       - { name: acl, configMap: { name: oae-edge-acl } }
       - { name: devices, secret: { secretName: oae-edge-devices } }
+      - { name: hermes, secret: { secretName: oae-edge-hermes } }
 ---
 apiVersion: v1
 kind: Service
@@ -96,14 +103,17 @@ YAML
 }
 
 # Per-tenant-namespace middlewares: strip client identity headers, then ask oae-edge-authz.
+# tenant_middlewares NS [hermes]: Hermes routes also replace Authorization with the agent's token.
 tenant_middlewares() {
+  local strip='x-occ-identity: "", x-openclaw-scopes: "", x-forwarded-user: ""' authh='[x-occ-identity, x-openclaw-scopes]'
+  if [ "${2:-}" = hermes ]; then strip="$strip, Authorization: \"\""; authh='[Authorization]'; fi
   kubectl apply -f - >/dev/null <<YAML
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata: { name: oae-edge-strip, namespace: $1 }
 spec:
   headers:
-    customRequestHeaders: { x-occ-identity: "", x-openclaw-scopes: "", x-forwarded-user: "" }
+    customRequestHeaders: { $strip }
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -112,7 +122,7 @@ spec:
   forwardAuth:
     address: http://oae-edge-authz.$EDGE_NS.svc.cluster.local:8080/check
     trustForwardHeader: true
-    authResponseHeaders: [x-occ-identity, x-openclaw-scopes]
+    authResponseHeaders: $authh
 ---
 # Apps reach the gateway at wss://agent-…/d/oaed_<token>: after the check, drop that prefix.
 apiVersion: traefik.io/v1alpha1
@@ -187,7 +197,7 @@ cmd_sync() {
   [ -f "$REGISTRY" ] || echo '{}' > "$REGISTRY"
   [ -f "$STATE" ] || echo '{}' > "$STATE"
   state=$(cat "$STATE")
-  acl='{}'; routes=""
+  acl='{}'; routes=""; hermes_tokens='{}'
   for ns in $($OCC namespace list --output json | jq -r '.[] | select(.status == "ready") | .id'); do
     roles=$($OCC iam role list --namespace "$ns" --output json)
     bindings=$($OCC iam access-binding list --namespace "$ns" --output json)
@@ -232,6 +242,41 @@ cmd_sync() {
         state=$(jq -c --arg a "$aid" --arg r "$rev" '.[$a] = $r' <<<"$state")
       fi
     done < <(jq -c '.[]' <<<"$agents")
+    # Hermes agents of this OCE Namespace: access = the Namespace Role "OAE Hermes user|operator: NAME".
+    [ -f "$HERMES" ] || continue
+    while read -r hname; do
+      [ -n "$hname" ] || continue
+      local hhost hpeople htoken
+      hhost=$(jq -r --arg n "$hname" '.[$n].host' "$HERMES")
+      hpeople=$(jq -c --arg n "$hname" --arg ns "$ns" --argjson roles "$roles" --slurpfile reg "$REGISTRY" '
+        ($reg[0] | to_entries | map(select(.value.subject and .value.principalId) | {(.value.principalId): .value.subject}) | add // {}) as $sub
+        | ($roles | map({(.id): .name}) | add // {}) as $rname
+        | map(select(.resourceKind == "namespace" and .resourceId == $ns and $sub[.subjectId]
+                     and ($rname[.roleId] == "OAE Hermes user: \($n)" or $rname[.roleId] == "OAE Hermes operator: \($n)")))
+        | map({sub: $sub[.subjectId], level: (if ($rname[.roleId] | startswith("OAE Hermes operator")) then "operator" else "user" end)})
+        | reduce .[] as $e ({}; .[$e.sub] = (if .[$e.sub] == "operator" or $e.level == "operator" then "operator" else "user" end))' <<<"$bindings")
+      acl=$(jq -c --arg h "$hhost" --argjson p "$hpeople" '.[$h] = $p' <<<"$acl")
+      htoken=$(kubectl -n $HERMES_NS get secret "hermes-$hname" -o jsonpath='{.data.HERMES_DASHBOARD_SESSION_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true)
+      [ -n "$htoken" ] || continue
+      hermes_tokens=$(jq -c --arg h "$hhost" --arg t "$htoken" '.[$h] = $t' <<<"$hermes_tokens")
+      tenant_middlewares "$HERMES_NS" hermes
+      kubectl apply -f - >/dev/null <<YAML
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hermes-$hname-edge
+  namespace: $HERMES_NS
+  labels: { app.kubernetes.io/managed-by: oae-edge, oae.dev/hermes: "$hname" }
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: "$HERMES_NS-oae-edge-strip@kubernetescrd,$HERMES_NS-oae-edge-auth@kubernetescrd,$HERMES_NS-oae-edge-device-path@kubernetescrd"
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: "$hhost"
+    http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: hermes-$hname, port: { number: 9119 } } } }] }
+YAML
+      routes+="$hhost"$'\n'
+    done < <(jq -r --arg ns "$ns" 'to_entries[] | select(.value.namespaceId == $ns) | .key' "$HERMES")
   done
   printf '%s' "$state" > "$STATE"
   # ACL for oae-edge-authz (mounted ConfigMap; picked up within the kubelet's sync period).
@@ -242,6 +287,8 @@ cmd_sync() {
     ($reg[0] | with_entries(select(.value.subject)) | map_values(.subject)) as $sub
     | with_entries(select($sub[.value.email]) | .value = {sub: $sub[.value.email]})' "${DEVICES:-/dev/null}" 2>/dev/null || echo '{}')
   kubectl -n $EDGE_NS create secret generic oae-edge-devices --from-literal=devices.json="$devs" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl -n $EDGE_NS create secret generic oae-edge-hermes --from-literal=hermes.json="$hermes_tokens" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   # Host Traefik: the auth host and every Agent host with people, each with its own certificate.
   local rules tmp
