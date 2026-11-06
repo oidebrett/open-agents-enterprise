@@ -163,11 +163,50 @@ grants, revisions, audit and the console).
   chat over WebSocket answered (NVIDIA Nemotron).
 - ⬜ Hermes Desktop through `oae-user device add EMAIL HERMES` (needs the user's Desktop app).
 
-### ⬜ 5b — native `hermes` Agent kind in OCE
+### 🟨 5b — Hermes as a native OCE Agent runtime (branch `strike/5b-hermes-kind`)
 
-- `CONFIGURATION_KINDS` gains `hermes`; Hermes configuration type and validators in new files;
-  Kubernetes Compute dispatches `hermes` revisions to a Hermes workload module (the 5a manifest);
-  per-Agent grants replace the Namespace Role; console create flow.
+Design change from the plan: Hermes is an Agent **runtime** (`agentRuntime.id: "hermes"`, embedded),
+not a configuration kind. Migration 0006 pins `CHECK(kind='agent')` and OCE's migration history is
+strictly linear (receipts must equal the canonical history), so a fork migration would block every
+later upstream sync. A runtime needs no schema change.
+
+- Upstream files touched (3, small): `packages/occ/src/configured-harness.ts` (allowlist
+  `hermes`), `apps/controller/src/composition/production-harness.ts` (descriptor `hermes@1.0.0`,
+  embedded), `apps/controller/src/composition/installation-config.ts` (wraps the Kubernetes driver).
+- New `apps/controller/src/drivers/compute/kubernetes/hermes.ts`: `withHermesRuntime(driver)`
+  sends `hermes` revisions to `HermesWorkloads`; everything else reaches the stock driver unchanged.
+  Per Agent, in its tenant namespace: Secret `hermes-<h>-env` (model key copied, uid-checked, from
+  the revision's Harness authentication Secret; stable dashboard session token), ConfigMap
+  `-seed`, PVC `-data`, Deployment, Service :9119, NetworkPolicy (ingress only from k3s Traefik;
+  egress DNS + public 443). Model: NVIDIA (`baseUrl https://integrate.api.nvidia.com/v1`) or
+  Anthropic.
+- Fits OCE's guard rails as they are:
+  - The worker Role may create/replace Secrets but not patch them, so the Secret is not
+    server-side applied.
+  - Tenant namespaces enforce Pod Security `restricted`. Hermes runs as uid 10000 with no
+    privilege escalation, all capabilities dropped and RuntimeDefault seccomp. s6-overlay gets an
+    in-memory `/run` (`S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES=1`).
+  - Hermes wants a home it owns with mode 0700, and local-path ignores `fsGroup`. The init
+    container makes `home/` on the volume and mounts it at `/opt/data` via subPath. The image has
+    no PyYAML, so the seed merge uses Hermes's ruamel.
+- Edge: a Service labelled `oae.dev/runtime=hermes` gets Hermes middlewares and its token from
+  `<svc>-env`. Access is the Agent's own OCE grants (`oae-user grant EMAIL AGENT`, same as
+  OpenClaw). `oae-user device add` prints the Hermes Desktop URL.
+- Checks:
+  - Typecheck passes.
+  - The six suspect conformance files pass.
+  - ✅ On Oracle (controller `sha256:b6738bd2…`, Agent `hermes-native`), revisions deploy
+    `succeeded` and in-pod `hermes chat` answers.
+  - ✅ Browser as the SSO demo user: Keycloak → edge → dashboard "via session-token" → chat
+    answered (NVIDIA Nemotron).
+- ⬜ Console runtime choice (today: `occ configuration create` with `agentRuntime.id: "hermes"`).
+- ⬜ Full conformance rerun on the final commit; merge into `oae`; manidae pins.
+- ⬜ Hermes Desktop (user).
+- Known:
+  - `dashboard.public_url` is only set when the controller has `OAE_INSTALLATION_ID` and
+    `OAE_EDGE_AGENTS_DOMAIN`. Hermes otherwise trusts Traefik's X-Forwarded headers, which works.
+  - `s6-applyuidgid: unable to set supplementary group list` at start is harmless (nothing to
+    drop).
 
 ## ⬜ Strike 6 — Hermes on the Codex and Claude harness Pods
 
