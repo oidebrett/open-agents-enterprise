@@ -247,22 +247,25 @@ class HermesWorkloads {
                 command: [
                   "sh",
                   "-c",
+                  // Hermes wants a home it owns with mode 0700; volume roots need not be (local-path
+                  // ignores fsGroup), so the home is a directory on the volume, made by this user.
                   // Hermes' own YAML library (ruamel, round-trip: the Agent's comments survive).
-                  "if [ -f /opt/data/config.yaml ]; then /opt/hermes/.venv/bin/python - <<'PY'\n" +
+                  "mkdir -p /volume/home && chmod 700 /volume/home && " +
+                    "if [ -f /volume/home/config.yaml ]; then /opt/hermes/.venv/bin/python - <<'PY'\n" +
                     "from ruamel.yaml import YAML\n" +
                     "y = YAML()\n" +
                     "seed = y.load(open('/seed/config.yaml'))\n" +
-                    "cur = y.load(open('/opt/data/config.yaml')) or {}\n" +
+                    "cur = y.load(open('/volume/home/config.yaml')) or {}\n" +
                     "for section in ('model', 'dashboard'):\n" +
                     "    cur.setdefault(section, {})\n" +
                     "    cur[section] = cur[section] or {}\n" +
                     "    cur[section].update(seed[section])\n" +
-                    "y.dump(cur, open('/opt/data/config.yaml', 'w'))\n" +
-                    "PY\nelse cp /seed/config.yaml /opt/data/config.yaml; fi",
+                    "y.dump(cur, open('/volume/home/config.yaml', 'w'))\n" +
+                    "PY\nelse cp /seed/config.yaml /volume/home/config.yaml; fi",
                 ],
                 securityContext: CONTAINER_SECURITY,
                 volumeMounts: [
-                  { name: "data", mountPath: "/opt/data" },
+                  { name: "data", mountPath: "/volume" },
                   { name: "seed", mountPath: "/seed" },
                 ],
               },
@@ -283,7 +286,7 @@ class HermesWorkloads {
                 readinessProbe: { httpGet: { path: "/api/status", port: "http" }, periodSeconds: 10 },
                 securityContext: CONTAINER_SECURITY,
                 volumeMounts: [
-                  { name: "data", mountPath: "/opt/data" },
+                  { name: "data", mountPath: "/opt/data", subPath: "home" },
                   { name: "run", mountPath: "/run" },
                 ],
                 resources: { requests: { cpu: "100m", memory: "768Mi" }, limits: { memory: "4Gi" } },
