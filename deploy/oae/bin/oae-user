@@ -248,6 +248,13 @@ cmd_device() {
         aid=$(jq -r .id <<<"$a"); ins=$($OCC installation get --output json | jq -r .id)
         h=$(printf '%s\0%s\0%s' "$ins" "$ns" "$aid" | sha256sum | cut -c1-32)
         host="agent-$h.agents.$(sed -nE 's#^https://##p' <<<"$URL")"
+        if KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl get svc -A -l "openclaw.dev/agent=$aid,oae.dev/runtime=hermes" -o name 2>/dev/null | grep -q .; then
+          # OCE-native Hermes Agent (strike 5b): Hermes Desktop, not an OpenClaw pairing QR.
+          echo; echo "Hermes Desktop: Settings > Remote gateway URL:"
+          echo "  https://$host/d/$token"
+          echo "(Any session token the app asks for is replaced by the edge; the URL is the credential.)"
+          return 0
+        fi
         url="wss://$host/d/$token"
         echo; echo "Gateway URL for the OpenClaw app (Settings > Gateway, or scan below):"
         echo "  $url"
