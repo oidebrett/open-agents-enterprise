@@ -1,0 +1,234 @@
+#!/bin/bash
+# oae-edge — OAE's human ingress (docs/oae/edge-design.md): people open the Agents they are
+# granted at https://agent-<hash>.agents.<host>/ with their SSO identity. Run as root on the OAE
+# server (installed by manidae-cloud).
+#
+#   oae-edge install   create the oae-edge namespace, sign-in service and auth host
+#   oae-edge sync      grants -> ACL, per-Agent Ingress/NetworkPolicy, gateway identities, routes
+#                      (the oae-edge-sync timer runs this every minute)
+#
+# Settings: /opt/oce/prod/edge.env (OAE_EDGE_IMAGE, OAE_EDGE_ISSUER, OAE_EDGE_CLIENT_ID,
+# OAE_EDGE_IDENTITY_PREFIX, OAE_HOST); secrets in /opt/oce/prod/secure/edge-client-secret and
+# edge-session-key.
+set -euo pipefail
+. /opt/oce/env.sh
+export PATH=/opt/oce/tools/bin:$PATH KUBECONFIG=${KUBECONFIG:-/opt/oce/prod/kubeconfig}
+OCC=/opt/oce/src/bin/occ
+PROD=/opt/oce/prod
+SECURE=$PROD/secure
+. $PROD/edge.env
+AGENTS="agents.$OAE_HOST"
+AUTH_HOST="auth.$AGENTS"
+EDGE_NS=oae-edge
+REGISTRY=$PROD/oae-users.json
+STATE=$PROD/edge-state.json
+ROLE_OPERATOR="OAE Agent operator"
+log() { echo "oae-edge: $*"; }
+
+rules_dir() { ls -d /etc/komodo/stacks/*/config/traefik/rules 2>/dev/null | head -1; }
+
+cmd_install() {
+  kubectl get ns $EDGE_NS >/dev/null 2>&1 || kubectl create ns $EDGE_NS >/dev/null
+  kubectl -n $EDGE_NS create secret generic oae-edge-authz \
+    --from-file=OAE_EDGE_CLIENT_SECRET=$SECURE/edge-client-secret \
+    --from-file=OAE_EDGE_SESSION_KEY=$SECURE/edge-session-key \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl -n $EDGE_NS get cm oae-edge-acl >/dev/null 2>&1 ||
+    kubectl -n $EDGE_NS create cm oae-edge-acl --from-literal=acl.json='{}' >/dev/null
+  kubectl apply -f - >/dev/null <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: oae-edge-authz, namespace: $EDGE_NS, labels: { app.kubernetes.io/name: oae-edge-authz } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app.kubernetes.io/name: oae-edge-authz } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: oae-edge-authz } }
+    spec:
+      nodeSelector: { oce-role: control }
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+      - name: authz
+        image: $OAE_EDGE_IMAGE
+        ports: [{ name: http, containerPort: 8080 }]
+        env:
+        - { name: OAE_EDGE_ISSUER, value: "$OAE_EDGE_ISSUER" }
+        - { name: OAE_EDGE_CLIENT_ID, value: "$OAE_EDGE_CLIENT_ID" }
+        - { name: OAE_EDGE_AGENTS_DOMAIN, value: "$AGENTS" }
+        - { name: OAE_EDGE_IDENTITY_PREFIX, value: "$OAE_EDGE_IDENTITY_PREFIX" }
+        - { name: OAE_EDGE_ACL_FILE, value: /acl/acl.json }
+        envFrom: [{ secretRef: { name: oae-edge-authz } }]
+        volumeMounts: [{ name: acl, mountPath: /acl, readOnly: true }]
+        readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
+        resources: { requests: { cpu: 20m, memory: 64Mi }, limits: { memory: 192Mi } }
+        securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+      volumes: [{ name: acl, configMap: { name: oae-edge-acl } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: oae-edge-authz, namespace: $EDGE_NS }
+spec:
+  selector: { app.kubernetes.io/name: oae-edge-authz }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: oae-edge-auth, namespace: $EDGE_NS }
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: "$AUTH_HOST"
+    http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: oae-edge-authz, port: { number: 8080 } } } }] }
+YAML
+  kubectl -n $EDGE_NS rollout restart deploy/oae-edge-authz >/dev/null
+  kubectl -n $EDGE_NS rollout status deploy/oae-edge-authz --timeout=300s >/dev/null
+  log "sign-in service ready on https://$AUTH_HOST"
+  cmd_sync
+}
+
+# Per-tenant-namespace middlewares: strip client identity headers, then ask oae-edge-authz.
+tenant_middlewares() {
+  kubectl apply -f - >/dev/null <<YAML
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: { name: oae-edge-strip, namespace: $1 }
+spec:
+  headers:
+    customRequestHeaders: { x-occ-identity: "", x-openclaw-scopes: "", x-forwarded-user: "" }
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: { name: oae-edge-auth, namespace: $1 }
+spec:
+  forwardAuth:
+    address: http://oae-edge-authz.$EDGE_NS.svc.cluster.local:8080/check
+    trustForwardHeader: true
+    authResponseHeaders: [x-occ-identity, x-openclaw-scopes]
+YAML
+}
+
+agent_route() {  # agent_route TENANT_NS SHORT SERVICE PORT HOST AGENT_ID
+  kubectl apply -f - >/dev/null <<YAML
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oae-edge-$2
+  namespace: $1
+  labels: { app.kubernetes.io/managed-by: oae-edge }
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: "$1-oae-edge-strip@kubernetescrd,$1-oae-edge-auth@kubernetescrd"
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: "$5"
+    http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: $3, port: { number: $4 } } } }] }
+---
+# Exact peer: only k3s Traefik's Pods reach this Agent's gateway port (OCE human ingress).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: oae-edge-$2
+  namespace: $1
+  labels: { app.kubernetes.io/managed-by: oae-edge }
+spec:
+  podSelector: { matchLabels: { openclaw.dev/agent: "$6", openclaw.dev/workload-role: gateway } }
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      podSelector: { matchLabels: { app.kubernetes.io/name: traefik } }
+    ports: [{ protocol: TCP, port: $4 }]
+YAML
+}
+
+# Make the Agent's gateway admit exactly the granted people (+ the machine identity) and the
+# Agent UI origin. Redeploys only when that changes; OCE revisions are immutable.
+gateway_identities() {  # gateway_identities NS AGENT_ID CONFIG_ID ORIGIN PEOPLE_JSON
+  local cfg want
+  cfg=$($OCC configuration get "$3" --namespace "$1" --output json)
+  want=$(jq -c --arg o "$4" --argjson people "$5" --arg prefix "$OAE_EDGE_IDENTITY_PREFIX" '
+    .values as $v
+    | ($people | to_entries | map({id: "\($prefix):\(.key)", scopes: (if .value == "operator" then ["operator.read","operator.write","operator.approvals"] else ["operator.read","operator.write"] end)})) as $p
+    | $v
+    | .gateway.auth.trustedProxy.allowUsers = (["occ-workspace-files"] + ($p | map(.id)) | unique)
+    | .gateway.auth.identityScopes = ({"occ-workspace-files": ["operator.admin"]} + ($p | map({(.id): .scopes}) | add // {}))
+    | .gateway.controlUi.allowedOrigins = (((.gateway.controlUi.allowedOrigins // []) + [$o]) | unique)' <<<"$cfg")
+  if [ "$(jq -cS . <<<"$want")" = "$(jq -cS .values <<<"$cfg")" ]; then return 1; fi
+  local f; f=$(mktemp); jq -c '{values: .}' <<<"$want" > "$f"
+  $OCC configuration update "$3" --namespace "$1" --file "$f" --output json >/dev/null; rm -f "$f"
+  $OCC agent deploy "$2" --namespace "$1" --output json >/dev/null
+  return 0
+}
+
+cmd_sync() {
+  local ins acl routes ns roles bindings agents state
+  ins=$($OCC installation get --output json | jq -r .id)
+  [ -f "$REGISTRY" ] || echo '{}' > "$REGISTRY"
+  [ -f "$STATE" ] || echo '{}' > "$STATE"
+  state=$(cat "$STATE")
+  acl='{}'; routes=""
+  for ns in $($OCC namespace list --output json | jq -r '.[] | select(.status == "ready") | .id'); do
+    roles=$($OCC iam role list --namespace "$ns" --output json)
+    bindings=$($OCC iam access-binding list --namespace "$ns" --output json)
+    agents=$($OCC agent list --namespace "$ns" --output json)
+    while read -r agent; do
+      [ -n "$agent" ] || continue
+      local aid cfgid rev hash host people svc tns sname sport short
+      aid=$(jq -r .id <<<"$agent"); cfgid=$(jq -r .configurationId <<<"$agent"); rev=$(jq -r '.activeRevisionId // ""' <<<"$agent")
+      hash=$(printf '%s\0%s\0%s' "$ins" "$ns" "$aid" | sha256sum | cut -c1-32)
+      host="agent-$hash.$AGENTS"; short=${hash:0:12}
+      # People granted this Agent (OCE AccessBindings) who have an SSO subject (oae-user registry).
+      people=$(jq -c --arg a "$aid" --arg op "$ROLE_OPERATOR" --argjson roles "$roles" --slurpfile reg "$REGISTRY" '
+        ($reg[0] | to_entries | map(select(.value.subject and .value.principalId) | {(.value.principalId): .value.subject}) | add // {}) as $sub
+        | ($roles | map({(.id): .name}) | add // {}) as $rname
+        | map(select(.resourceKind == "agent" and .resourceId == $a and $sub[.subjectId]))
+        | map({sub: $sub[.subjectId], level: (if $rname[.roleId] == $op then "operator" else "user" end)})
+        | reduce .[] as $e ({}; .[$e.sub] = (if .[$e.sub] == "operator" or $e.level == "operator" then "operator" else "user" end))' <<<"$bindings")
+      acl=$(jq -c --arg h "$host" --argjson p "$people" '.[$h] = $p' <<<"$acl")
+      [ "$people" = "{}" ] && continue
+      svc=$(kubectl get svc -A -l "openclaw.dev/agent=$aid" -o json | jq -c '[.items[] | select(.metadata.name | startswith("gateway-"))][0] // empty')
+      [ -n "$svc" ] || continue
+      tns=$(jq -r .metadata.namespace <<<"$svc"); sname=$(jq -r .metadata.name <<<"$svc")
+      sport=$(jq -r '[.spec.ports[] | select(.name == "http")][0].port // .spec.ports[0].port' <<<"$svc")
+      tenant_middlewares "$tns"
+      agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid"
+      routes+="$host"$'\n'
+      if gateway_identities "$ns" "$aid" "$cfgid" "https://$host" "$people"; then
+        log "$(jq -r .name <<<"$agent"): gateway identities changed; redeploying"
+      fi
+      # New revisions: bind each person's Role to the active revision too (oae-user's known gap).
+      if [ -n "$rev" ] && [ "$(jq -r --arg a "$aid" '.[$a] // ""' <<<"$state")" != "$rev" ]; then
+        jq -c --arg a "$aid" --arg r "$rev" 'map(select(.resourceKind == "agent" and .resourceId == $a and .subjectKind == "identity" and (.subjectId | startswith("prn_"))))
+          | map({subjectKind, subjectId, roleId, resourceKind: "agent_revision", resourceId: $r})[]' <<<"$bindings" |
+        while read -r b; do
+          jq -e --argjson b "$b" 'any(.[]; .subjectId == $b.subjectId and .roleId == $b.roleId and .resourceKind == "agent_revision" and .resourceId == $b.resourceId)' <<<"$bindings" >/dev/null ||
+            { f=$(mktemp); echo "$b" > "$f"; $OCC iam access-binding create --namespace "$ns" --file "$f" --output json >/dev/null; rm -f "$f"; }
+        done
+        state=$(jq -c --arg a "$aid" --arg r "$rev" '.[$a] = $r' <<<"$state")
+      fi
+    done < <(jq -c '.[]' <<<"$agents")
+  done
+  printf '%s' "$state" > "$STATE"
+  # ACL for oae-edge-authz (mounted ConfigMap; picked up within the kubelet's sync period).
+  kubectl -n $EDGE_NS create cm oae-edge-acl --from-literal=acl.json="$acl" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # Host Traefik: the auth host and every Agent host with people, each with its own certificate.
+  local rules tmp
+  rules=$(rules_dir); [ -n "$rules" ] || { log "no Traefik rules directory"; return 0; }
+  tmp=$(mktemp)
+  {
+    echo "# OAE human ingress (written by oae-edge sync; docs/oae/edge-design.md)"
+    echo "http:"; echo "  routers:"
+    for h in $AUTH_HOST $routes; do
+      r=$(echo "$h" | cut -d. -f1)
+      printf '    oae-edge-%s:\n      entryPoints: [websecure]\n      rule: "Host(`%s`)"\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h"
+    done
+  } > "$tmp"
+  if cmp -s "$tmp" "$rules/oae-edge.yml"; then rm -f "$tmp"; else install -m 644 "$tmp" "$rules/oae-edge.yml"; rm -f "$tmp"; fi
+}
+
+case ${1:-} in
+  install) cmd_install ;;
+  sync) cmd_sync ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

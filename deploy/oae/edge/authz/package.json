@@ -1,0 +1,9 @@
+{
+  "name": "oae-edge-authz",
+  "private": true,
+  "type": "module",
+  "description": "Sign-in and per-Agent authorization for Open Agents Enterprise's human ingress",
+  "license": "MIT",
+  "engines": { "node": ">=24.22.1" },
+  "dependencies": { "openid-client": "6.8.9" }
+}
