@@ -8703,6 +8703,15 @@ async function publicReaderMaterialDelivery(t, protectedReader, workspaceNode) {
     `Public ${protectedReader ? "protected" : "ordinary"} ${workspaceNode ? "workspace" : "standalone"} command: ${commandBytes} bytes`,
   );
   const providerCreate = gateway.calls.find(([operation]) => operation === "createProvider")[1];
+  // OpenShell v0.1.6 validates CreateProvider config separately from profile files:
+  // each config value is limited to 8 KiB; a rendered provider file allows 64 KiB.
+  assert.ok(Object.keys(providerCreate.config).length <= 64);
+  for (const [key, value] of Object.entries(providerCreate.config)) {
+    assert.ok(
+      Buffer.byteLength(value, "utf8") <= 8_192,
+      `OpenShell provider config ${key} exceeds 8 KiB`,
+    );
+  }
   assert.deepEqual(providerCreate.credentials, {
     OCE_PUBLIC_GITHUB_READ_CAPABILITY: "synthetic-reader-capability",
   });
@@ -8721,6 +8730,24 @@ async function publicReaderMaterialDelivery(t, protectedReader, workspaceNode) {
     },
   ]);
   assert.equal(profile.files.length, 7);
+  const transportFile = profile.files.find(
+    ({ path }) => path === PUBLIC_GITHUB_READ_TRANSPORT_FILE,
+  );
+  assert.ok(Buffer.byteLength(transportFile.content, "utf8") <= 65_536);
+  assert.doesNotMatch(
+    transportFile.content.replace(/\{\{config\.[a-z_]+\}\}/g, ""),
+    /\{\{|\}\}/,
+    "OpenShell rejects unmatched file-template delimiters",
+  );
+  const deliveredTransport = transportFile.content.replace(
+    /\{\{config\.([a-z_]+)\}\}/g,
+    (_, key) => {
+      assert.equal(typeof providerCreate.config[key], "string");
+      return providerCreate.config[key];
+    },
+  );
+  assert.equal(deliveredTransport, PUBLIC_GITHUB_READ_TRANSPORT_SOURCE);
+
   if (protectedReader) {
     assert.deepEqual(Object.keys(created.spec.policy.network_policies).sort(), [
       "public-github-read",
