@@ -179,7 +179,7 @@ later upstream sync. A runtime needs no schema change.
   the revision's Harness authentication Secret; stable dashboard session token), ConfigMap
   `-seed`, PVC `-data`, Deployment, Service :9119, NetworkPolicy (ingress only from k3s Traefik;
   egress DNS + public 443). Model: NVIDIA (`baseUrl https://integrate.api.nvidia.com/v1`) or
-  Anthropic.
+  Anthropic, or OpenAI (`api.openai.com`, as Hermes's `openai-api`).
 - Fits OCE's guard rails as they are:
   - The worker Role may create/replace Secrets but not patch them, so the Secret is not
     server-side applied.
@@ -199,8 +199,14 @@ later upstream sync. A runtime needs no schema change.
     `succeeded` and in-pod `hermes chat` answers.
   - ✅ Browser as the SSO demo user: Keycloak → edge → dashboard "via session-token" → chat
     answered (NVIDIA Nemotron).
-- ⬜ Console runtime choice (today: `occ configuration create` with `agentRuntime.id: "hermes"`).
-- ⬜ Full conformance rerun on the final commit; merge into `oae`; manidae pins.
+- ✅ Console: the create form offers **Hermes** (always Embedded, API key for OpenAI or Anthropic).
+  Codex and OpenClaw paths are unchanged. Console browser tests: `console-agents` 31/31 and
+  `console-create-agent-provisioning-400` 53/53, the same as baseline. NVIDIA models are still
+  CLI-only, as they are for OpenClaw.
+- ✅ Full conformance on the final runtime commit: 3147 tests, 37 failures, all in the unmodified
+  baseline's set (SSH/`gh` environment); none only with 5b.
+- On Oracle: controller `sha256:5851316c…` (commit `a3d33210`).
+- ⬜ Merge into `oae`; manidae pins (`OAE_SOURCE`, controller image).
 - ⬜ Hermes Desktop (user).
 - Known:
   - `dashboard.public_url` is only set when the controller has `OAE_INSTALLATION_ID` and
