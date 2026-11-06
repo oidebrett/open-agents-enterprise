@@ -959,6 +959,8 @@ function renderAgentForm(
     { id: "agent-harness", "aria-describedby": "agent-harness-hint" },
     codexOption,
     element("option", { value: "openclaw" }, "OpenClaw"),
+    // OAE: Hermes runs embedded, with an API key for OpenAI or Anthropic.
+    element("option", { value: "hermes" }, "Hermes"),
   );
   const harnessHint = element("p", { id: "agent-harness-hint", className: "hint" });
   const nativeHarnessWarning = statusBlock(
@@ -1279,12 +1281,18 @@ function renderAgentForm(
     nativeProvider.value = "openai";
     harness.value = "codex";
     mode.value = "dedicated";
-  } else if (nativeProvider.value === "anthropic" || binding?.method === "runtime") {
+  } else if (
+    harness.value !== "hermes" &&
+    (nativeProvider.value === "anthropic" || binding?.method === "runtime")
+  ) {
     harness.value = "openclaw";
     mode.value = "embedded";
   }
   if (harness.value === "codex") {
     mode.value = "dedicated";
+  }
+  if (harness.value === "hermes") {
+    mode.value = "embedded";
   }
   const currentTemplate = () =>
     JSON.stringify(
@@ -1519,8 +1527,11 @@ function renderAgentForm(
   }
   nativeProvider.addEventListener("change", () => {
     // Operator-managed Presets retain the embedded harness required by their fixed binding.
-    harness.value =
-      nativeProvider.value === "anthropic" || binding?.method === "runtime" ? "openclaw" : "codex";
+    // Hermes takes either provider; it stays selected.
+    if (harness.value !== "hermes") {
+      harness.value =
+        nativeProvider.value === "anthropic" || binding?.method === "runtime" ? "openclaw" : "codex";
+    }
     mode.value = harness.value === "codex" ? "dedicated" : "embedded";
     // A provider change must not send the previous provider's key to a different service.
     clearModelCredential();
@@ -1540,12 +1551,17 @@ function renderAgentForm(
     // Embedded is OpenClaw's default because dedicated OpenClaw needs a provisioning
     // Sandbox Driver; operators opt into it through Execution mode. An Installation that
     // refuses Embedded preselects Dedicated when it accepts that (#2670).
-    mode.value = harness.value === "codex" ? "dedicated" : defaultOpenClawMode();
+    mode.value =
+      harness.value === "codex"
+        ? "dedicated"
+        : harness.value === "hermes"
+          ? "embedded"
+          : defaultOpenClawMode();
     modeDefaulted = true;
     // Service account tokens cannot authenticate OpenClaw; require a new API key.
     if (
       !binding &&
-      harness.value === "openclaw" &&
+      harness.value !== "codex" &&
       ["codex_pat", "credential_source"].includes(authMethod.value)
     ) {
       authMethod.value = "api_key";
@@ -1559,7 +1575,7 @@ function renderAgentForm(
   mode.addEventListener("change", () => {
     modeDefaulted = false;
     const previousHarness = harness.value;
-    if (mode.value === "embedded") {
+    if (mode.value === "embedded" && harness.value === "codex") {
       harness.value = "openclaw";
     }
     // Topology alone does not change the model policy or provider transport.
@@ -1589,6 +1605,9 @@ function renderAgentForm(
       if (selectedHarness === "codex") {
         mode.value = "dedicated";
       }
+      if (selectedHarness === "hermes") {
+        mode.value = "embedded";
+      }
     }
     if (typeof ref === "string" && /^(openai|anthropic|codex)\//.test(ref)) {
       if (
@@ -1607,7 +1626,7 @@ function renderAgentForm(
           clearModelCredential();
         }
         nativeProvider.value = selectedProvider;
-        if (selectedProvider === "anthropic") {
+        if (selectedProvider === "anthropic" && harness.value !== "hermes") {
           harness.value = "openclaw";
           mode.value = "embedded";
         }
@@ -2663,6 +2682,7 @@ function renderAgentForm(
     oauthLogin.setDisabled(planLocked || saved);
     mode.disabled ||=
       harness.value === "codex" ||
+      harness.value === "hermes" ||
       nativeProvider.value === "anthropic" ||
       binding?.method === "runtime";
     // Why the harness choice is locked, without the request in flight: the hint must not change
@@ -2727,7 +2747,9 @@ function renderAgentForm(
             : nativeProvider.value === "anthropic"
               ? "Anthropic uses Embedded OpenClaw, which this installation refuses because it selects a Sandbox Driver. Choose OpenAI to use Dedicated execution."
               : "Embedded OpenClaw is unavailable: this installation selects a Sandbox Driver, which requires Dedicated execution. Select Dedicated under Runtime details."
-          : (runtimeBindingRefused ?? "");
+          : embeddedRefused && harness.value === "hermes"
+            ? "Hermes uses Embedded execution, which this installation refuses because it selects a Sandbox Driver."
+            : (runtimeBindingRefused ?? "");
     if (openclawModeUnavailable.textContent !== modeRefusal) {
       openclawModeUnavailable.textContent = modeRefusal;
     }
@@ -2778,6 +2800,11 @@ function renderAgentForm(
     // conditions (finding 1904).
     const harnessOutcome = () => {
       const anthropic = nativeProvider.value === "anthropic";
+      if (harness.value === "hermes") {
+        return embeddedRefused
+          ? "This Agent cannot run Hermes on this installation: Hermes requires Embedded execution."
+          : "This Agent will run Hermes with Embedded execution.";
+      }
       if (harness.value === "codex") {
         // "Will run" only once the Installation's capabilities are known.
         return anthropic

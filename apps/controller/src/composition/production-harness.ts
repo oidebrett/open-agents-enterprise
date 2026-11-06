@@ -12,10 +12,19 @@ export const PRODUCTION_HARNESS_DESCRIPTOR: HarnessDescriptor = Object.freeze({
   version: "1.0.0",
 });
 
+/** OAE: Hermes is the Agent's gateway and harness in one workload (Kubernetes Compute, hermes.ts). */
+export const OAE_HERMES_HARNESS_DESCRIPTOR: HarnessDescriptor = Object.freeze({
+  id: "hermes",
+  version: "1.0.0",
+});
+
 export function resolveApprovedHarness(
   harnessId: string,
   executionMode: HarnessExecutionMode,
 ): HarnessDescriptor | undefined {
+  if (executionMode === "embedded" && harnessId === OAE_HERMES_HARNESS_DESCRIPTOR.id) {
+    return OAE_HERMES_HARNESS_DESCRIPTOR;
+  }
   if (executionMode === "dedicated" && harnessId === PRODUCTION_HARNESS_DESCRIPTOR.id) {
     return PRODUCTION_HARNESS_DESCRIPTOR;
   }

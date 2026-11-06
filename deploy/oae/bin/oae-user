@@ -6,7 +6,8 @@
 # audit log attributes them to a human administrator; reads use the installation's service key.
 #
 #   oae-user add    EMAIL OIDC_SUBJECT          account + attached SSO identity (Keycloak: user ID)
-#   oae-user grant  EMAIL AGENT [user|operator] see the Agent (user) or also edit/deploy/operate it
+#   oae-user grant  EMAIL AGENT [user|operator] see the Agent (user) or also edit/deploy/operate it;
+#                                               AGENT may be a Hermes agent (oae-hermes list)
 #   oae-user revoke EMAIL AGENT                 remove that person's bindings on the Agent
 #   oae-user show   EMAIL                       sign-in methods and grants
 #   oae-user list                               people this tool added
@@ -126,12 +127,29 @@ agent_json() {  # agent_json NS NAME
   $OCC agent list --namespace "$1" --output json | jq -c --arg n "$2" '[.[] | select(.name == $n or .id == $n)][0] // empty'
 }
 
+HERMES_REGISTRY=$PROD/oae-hermes.json
+hermes_ns() { [ -f "$HERMES_REGISTRY" ] && jq -r --arg n "$1" '.[$n].namespaceId // empty' "$HERMES_REGISTRY"; }
+
+# Hermes agents (strike 5a) live next to OCE: access is an OCE Namespace Role per Hermes agent,
+# bound to its Namespace; oae-edge maps the Role name back to the agent. Strike 5b replaces this
+# with ordinary per-Agent bindings.
+grant_hermes() {  # grant_hermes EMAIL NAME LEVEL PRINCIPAL NAMESPACE
+  local role title
+  case $3 in user) title="OAE Hermes user: $2" ;; operator) title="OAE Hermes operator: $2" ;; *) usage ;; esac
+  role=$(ensure_role "$5" "$title" '[{"action":"read","resourceKind":"namespace"}]')
+  echo "Granting $1 $3 access to Hermes agent $2:"
+  ensure_binding "$5" "$4" "$role" namespace "$5"
+  echo "Done. The edge picks this up within a minute."
+}
+
 cmd_grant() {
-  local email agent level ns rec pid a aid cfg rev role perms
+  local email agent level ns rec pid a aid cfg rev role perms hns
   email=$(norm_email "${1:-}"); agent=${2:-}; level=${3:-user}
   [ -n "$email" ] && [ -n "$agent" ] || usage
   rec=$(registry_get "$email"); [ -n "$rec" ] || die "$email is not known here; run: oae-user add $email <subject>"
   pid=$(jq -r .principalId <<<"$rec")
+  hns=$(hermes_ns "$agent")
+  if [ -n "$hns" ]; then grant_hermes "$email" "$agent" "$level" "$pid" "$hns"; return; fi
   ns=$(namespace_id); [ -n "$ns" ] || die "no Namespace $WANT_NS"
   a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent in Namespace $WANT_NS"
   aid=$(jq -r .id <<<"$a"); cfg=$(jq -r .configurationId <<<"$a"); rev=$(jq -r '.activeRevisionId // empty' <<<"$a")
@@ -158,11 +176,21 @@ cmd_grant() {
 }
 
 cmd_revoke() {
-  local email agent ns rec pid a aid cfg rev
+  local email agent ns rec pid a aid cfg rev hns
   email=$(norm_email "${1:-}"); agent=${2:-}
   [ -n "$email" ] && [ -n "$agent" ] || usage
   rec=$(registry_get "$email"); [ -n "$rec" ] || die "$email is not known here"
   pid=$(jq -r .principalId <<<"$rec")
+  hns=$(hermes_ns "$agent")
+  if [ -n "$hns" ]; then
+    local roles; roles=$(api GET "/namespaces/$hns/iam/roles" | jq -c '.data | if type == "array" then . else .items end')
+    bindings "$hns" | jq -r --arg p "$pid" --arg n "$agent" --argjson roles "$roles" '
+      ($roles | map({(.id): .name}) | add // {}) as $rname
+      | .[] | select(.subjectId == $p and ($rname[.roleId] == "OAE Hermes user: \($n)" or $rname[.roleId] == "OAE Hermes operator: \($n)")) | .id' |
+    while read -r b; do api DELETE "/namespaces/$hns/iam/access-bindings/$b" >/dev/null; echo "  - $b"; done
+    echo "Revoked $email on Hermes agent $agent."
+    return
+  fi
   ns=$(namespace_id); a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent"
   aid=$(jq -r .id <<<"$a"); cfg=$(jq -r .configurationId <<<"$a"); rev=$(jq -r '.activeRevisionId // empty' <<<"$a")
   bindings "$ns" | jq -r --arg p "$pid" --arg a "$aid" --arg c "$cfg" --arg r "$rev" \
@@ -208,11 +236,25 @@ cmd_device() {
       edge_resync
       echo "App token $id for $email ($label). Shown once; anyone with it acts as $email on their granted Agents:"
       echo "  $token"
+      if [ -n "$agent" ] && [ -n "$(hermes_ns "$agent")" ]; then
+        host=$(jq -r --arg n "$agent" '.[$n].host' "$HERMES_REGISTRY")
+        echo; echo "Hermes Desktop: Settings > Remote gateway URL:"
+        echo "  https://$host/d/$token"
+        echo "(Any session token the app asks for is replaced by the edge; the URL is the credential.)"
+        agent=""
+      fi
       if [ -n "$agent" ]; then
         ns=$(namespace_id); a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent"
         aid=$(jq -r .id <<<"$a"); ins=$($OCC installation get --output json | jq -r .id)
         h=$(printf '%s\0%s\0%s' "$ins" "$ns" "$aid" | sha256sum | cut -c1-32)
         host="agent-$h.agents.$(sed -nE 's#^https://##p' <<<"$URL")"
+        if KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl get svc -A -l "openclaw.dev/agent=$aid,oae.dev/runtime=hermes" -o name 2>/dev/null | grep -q .; then
+          # OCE-native Hermes Agent (strike 5b): Hermes Desktop, not an OpenClaw pairing QR.
+          echo; echo "Hermes Desktop: Settings > Remote gateway URL:"
+          echo "  https://$host/d/$token"
+          echo "(Any session token the app asks for is replaced by the edge; the URL is the credential.)"
+          return 0
+        fi
         url="wss://$host/d/$token"
         echo; echo "Gateway URL for the OpenClaw app (Settings > Gateway, or scan below):"
         echo "  $url"

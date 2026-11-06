@@ -14,7 +14,11 @@ function configuredRuntime(value: unknown): string | undefined {
     return undefined;
   }
   const runtime = asRecord(runtimeValue);
-  if (runtime === undefined || (runtime.id !== "openclaw" && runtime.id !== "codex")) {
+  // OAE: "hermes" — Hermes as the Agent's gateway and harness (embedded; docs/oae/strikes.md 5b).
+  if (
+    runtime === undefined ||
+    (runtime.id !== "openclaw" && runtime.id !== "codex" && runtime.id !== "hermes")
+  ) {
     throw new ConfigurationHarnessError(
       "The configured model Harness runtime identity is unsupported.",
     );
