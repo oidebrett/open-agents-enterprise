@@ -175,8 +175,11 @@ Namespace catalog before creating an Agent. It uses ordinary, unprotected execut
 and narrows the launcher's exact direct GitHub rule to no endpoints for this test.
 The outer OpenShell policy must then deny GitHub before Agent opt-in. Other
 OpenShell defaults and provider-selected native execution settings stay unchanged.
-It checks the revision's exact Compute service acknowledgement in the admitted
-Sandbox policy. It selects `runtime.modelProvider` with the `openai-responses` protocol.
+It reads the deployed policy through the public Sandbox policy API and checks the
+reader registry's revision identity, selected scope and live lease. Internal
+admission snapshots are not part of the public revision DTO. The authored native
+proxy permits full HTTP methods for Git upload-pack, with an exact reader-host
+allow and no local binding. It selects `runtime.modelProvider` with the `openai-responses` protocol.
 Supply the same protected API-key inputs as `codex-search-config`, plus an explicit
 model. No GitHub App credential is required.
 
