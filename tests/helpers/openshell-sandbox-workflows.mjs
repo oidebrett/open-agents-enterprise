@@ -2914,7 +2914,12 @@ async function prepareProductionInstallation(
     observerPool,
     policyFixturePool,
     pauseWorker,
-    resumeWorker: startWorker,
+    resumeWorker: async () => {
+      // A real worker restart creates fresh process-owned services. Reusing the
+      // stopped worker's Token Service would register its OAuth issuer twice.
+      ({ diagnosticWorkerDrivers } = await loadWorkerDrivers());
+      await startWorker();
+    },
     workerEvents: events,
     provisioningFailure: (revisionId) => createSandboxDriver.provisioningFailures.get(revisionId),
     diagnoseAgentRevision: (agentId, revisionId) =>

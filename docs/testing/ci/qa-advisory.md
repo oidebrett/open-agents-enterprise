@@ -180,8 +180,9 @@ reader registry's revision identity, selected scope and live lease. Internal
 admission snapshots are not part of the public revision DTO. The authored native
 proxy permits full HTTP methods for Git upload-pack, with an exact reader-host
 allow and no local binding. It selects `runtime.modelProvider` with the `openai-responses` protocol.
-Supply the same protected API-key inputs as `codex-search-config`, plus an explicit
-model. No GitHub App credential is required.
+Supply the same protected API-key inputs as `codex-search-config`, plus a Responses
+model that supports Codex's custom tools. The hosted job uses the environment's
+`OCC_TEST_QA_CODEX_MODEL`, shared with other Codex jobs. No GitHub App credential is required.
 
 For local execution, `OCC_TEST_DEV_UP_CONTAINER_ENGINE=podman` selects Podman.
 This Compose topology needs a `docker-compose` provider that accepts
