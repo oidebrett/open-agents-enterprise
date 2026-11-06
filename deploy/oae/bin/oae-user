@@ -1,0 +1,181 @@
+#!/bin/bash
+# oae-user — people on an Open Agents Enterprise installation: SSO accounts and Agent access.
+# Installed on the OAE server by manidae-cloud; run as root. Uses only OCE's own APIs:
+# account provisioning, OIDC identity attachment, and Namespace Roles + AccessBindings
+# (docs/guides/topics/iam.md). Writes run under the recovery administrator's session, so OCE's
+# audit log attributes them to a human administrator; reads use the installation's service key.
+#
+#   oae-user add    EMAIL OIDC_SUBJECT          account + attached SSO identity (Keycloak: user ID)
+#   oae-user grant  EMAIL AGENT [user|operator] see the Agent (user) or also edit/deploy/operate it
+#   oae-user revoke EMAIL AGENT                 remove that person's bindings on the Agent
+#   oae-user show   EMAIL                       sign-in methods and grants
+#   oae-user list                               people this tool added
+#
+# Options (env): OAE_NAMESPACE (name or ns_ ID, default "default").
+set -euo pipefail
+. /opt/oce/env.sh
+OCC=/opt/oce/src/bin/occ
+PROD=/opt/oce/prod
+SECURE=$PROD/secure
+REGISTRY=$PROD/oae-users.json   # OCE has no API that lists accounts; this keeps email -> IDs.
+ACCESS=/root/oce-access.txt
+URL=${OAE_URL:-$(sed -nE 's#^Console: +(https://[^/]+)/console/.*#\1#p' "$ACCESS")}
+ADMIN=${OAE_ADMIN_EMAIL:-$(sed -nE 's/^Sign in: +([^ ]+).*/\1/p' "$ACCESS")}
+WANT_NS=${OAE_NAMESPACE:-default}
+ROLE_USER="OAE Agent user"
+ROLE_OPERATOR="OAE Agent operator"
+
+die() { echo "oae-user: $*" >&2; exit 1; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+[ -n "$URL" ] && [ -n "$ADMIN" ] || die "cannot read the console URL and admin email from $ACCESS"
+[ -f "$REGISTRY" ] || { umask 077; echo '{}' > "$REGISTRY"; }
+
+W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+JAR=$W/session
+
+# Recovery administrator session (password sign-in stays available to the recovery account).
+signin() {
+  [ -s "$JAR" ] && return 0
+  jq -nc --arg e "$ADMIN" --rawfile p "$SECURE/initial-admin-password" '{email: $e, password: ($p | rtrimstr("\n"))}' > "$W/cred"
+  local code
+  code=$(curl -s -o "$W/out" -w '%{http_code}' -c "$JAR" -H "Origin: $URL" \
+    -H 'Content-Type: application/json' --data-binary @"$W/cred" "$URL/api/auth/sign-in/email")
+  rm -f "$W/cred"
+  [ "$code" = 200 ] || die "administrator sign-in failed (HTTP $code)"
+}
+
+# api METHOD PATH [JSON]: prints the response body; fails with OCE's own message on non-2xx.
+api() {
+  signin
+  local code args=(-s -o "$W/out" -w '%{http_code}' -b "$JAR" -H "Origin: $URL" -X "$1")
+  [ $# -ge 3 ] && args+=(-H 'Content-Type: application/json' --data-binary "$3")
+  code=$(curl "${args[@]}" "$URL$2")
+  case $code in 2??) cat "$W/out" ;;
+    *) die "$1 $2 -> HTTP $code: $(jq -r '.error.message // empty' "$W/out" 2>/dev/null)" ;; esac
+}
+
+namespace_id() {
+  $OCC namespace list --output json | jq -r --arg n "$WANT_NS" '[.[] | select(.name == $n or .id == $n)][0].id // empty'
+}
+registry_get() { jq -c --arg e "$1" '.[$e] // empty' "$REGISTRY"; }
+registry_put() {
+  local tmp; tmp=$(mktemp "$REGISTRY.XXXX")
+  jq --arg e "$1" --argjson v "$2" '.[$e] = $v' "$REGISTRY" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$REGISTRY"
+}
+norm_email() { tr '[:upper:]' '[:lower:]' <<<"$1"; }
+
+cmd_add() {
+  local email subject rec uid pid version
+  email=$(norm_email "${1:-}"); subject=${2:-}
+  [[ $email =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || usage
+  [[ $subject =~ ^[[:print:]]{1,255}$ && $subject != *" "* ]] || die "OIDC subject: 1-255 printable characters, no spaces"
+  rec=$(registry_get "$email")
+  if [ -n "$rec" ]; then
+    uid=$(jq -r .userId <<<"$rec")
+  else
+    # OCE creates every account with a password; an SSO-only person never receives it.
+    jq -nc --arg e "$email" --arg p "$(openssl rand -base64 33 | tr -d '\n')" '{email: $e, password: $p}' > "$W/acct"
+    api POST /api/auth/accounts "$(cat "$W/acct")" > "$W/created"; rm -f "$W/acct"
+    uid=$(jq -r .data.id "$W/created"); pid=$(jq -r .data.principalId "$W/created")
+    registry_put "$email" "$(jq -nc --arg u "$uid" --arg p "$pid" '{userId: $u, principalId: $p}')"
+    echo "Created account $email ($uid)"
+  fi
+  api GET "/api/auth/accounts/$uid" > "$W/acct.json"
+  if jq -e --arg s "$subject" 'any(.data.methods[]; (.providerId | startswith("oidc:")) and .subject == $s)' "$W/acct.json" >/dev/null; then
+    echo "SSO identity already attached"
+  else
+    version=$(jq -r .data.version "$W/acct.json")
+    api POST "/api/auth/accounts/$uid/providers/oidc" "$(jq -nc --arg s "$subject" --argjson v "$version" '{subject: $s, expectedVersion: $v}')" >/dev/null
+    echo "Attached SSO identity $subject"
+  fi
+  pid=$(api GET "/api/auth/accounts/$uid" | jq -r .data.principalId)
+  registry_put "$email" "$(jq -nc --arg u "$uid" --arg p "$pid" --arg s "$subject" '{userId: $u, principalId: $p, subject: $s}')"
+  echo "$email can now sign in with SSO. Give access with: oae-user grant $email <agent>"
+}
+
+ensure_role() {  # ensure_role NS NAME PERMISSIONS_JSON -> role ID
+  local id
+  id=$(api GET "/namespaces/$1/iam/roles" | jq -r --arg n "$2" '[(.data | if type == "array" then . else .items end)[] | select(.name == $n)][0].id // empty')
+  [ -n "$id" ] || id=$(api POST "/namespaces/$1/iam/roles" "$(jq -nc --arg n "$2" --argjson p "$3" '{name: $n, permissions: $p}')" | jq -r .data.id)
+  echo "$id"
+}
+
+bindings() {  # bindings NS -> JSON array of the Namespace's AccessBindings
+  api GET "/namespaces/$1/iam/access-bindings" | jq -c '.data | if type == "array" then . else .items end'
+}
+
+ensure_binding() {  # ensure_binding NS PRINCIPAL ROLE KIND ID
+  if bindings "$1" | jq -e --arg p "$2" --arg r "$3" --arg k "$4" --arg i "$5" \
+      'any(.[]; .subjectId == $p and .roleId == $r and .resourceKind == $k and .resourceId == $i)' >/dev/null; then
+    return 0
+  fi
+  api POST "/namespaces/$1/iam/access-bindings" "$(jq -nc --arg p "$2" --arg r "$3" --arg k "$4" --arg i "$5" \
+    '{subjectKind: "identity", subjectId: $p, roleId: $r, resourceKind: $k, resourceId: $i}')" >/dev/null
+  echo "  + $4 $5"
+}
+
+agent_json() {  # agent_json NS NAME
+  $OCC agent list --namespace "$1" --output json | jq -c --arg n "$2" '[.[] | select(.name == $n or .id == $n)][0] // empty'
+}
+
+cmd_grant() {
+  local email agent level ns rec pid a aid cfg rev role perms
+  email=$(norm_email "${1:-}"); agent=${2:-}; level=${3:-user}
+  [ -n "$email" ] && [ -n "$agent" ] || usage
+  rec=$(registry_get "$email"); [ -n "$rec" ] || die "$email is not known here; run: oae-user add $email <subject>"
+  pid=$(jq -r .principalId <<<"$rec")
+  ns=$(namespace_id); [ -n "$ns" ] || die "no Namespace $WANT_NS"
+  a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent in Namespace $WANT_NS"
+  aid=$(jq -r .id <<<"$a"); cfg=$(jq -r .configurationId <<<"$a"); rev=$(jq -r '.activeRevisionId // empty' <<<"$a")
+  case $level in
+    user)
+      perms='[{"action":"read","resourceKind":"namespace"},{"action":"read","resourceKind":"agent"},{"action":"read","resourceKind":"agent_revision"}]'
+      role=$(ensure_role "$ns" "$ROLE_USER" "$perms") ;;
+    operator)
+      perms='[{"action":"read","resourceKind":"namespace"},{"action":"read","resourceKind":"agent"},{"action":"update","resourceKind":"agent"},{"action":"deploy","resourceKind":"agent"},{"action":"operate","resourceKind":"agent"},{"action":"read","resourceKind":"configuration"},{"action":"update","resourceKind":"configuration"},{"action":"read","resourceKind":"agent_revision"}]'
+      role=$(ensure_role "$ns" "$ROLE_OPERATOR" "$perms") ;;
+    *) usage ;;
+  esac
+  echo "Granting $email $level access to Agent $(jq -r .name <<<"$a") ($aid):"
+  ensure_binding "$ns" "$pid" "$role" namespace "$ns"
+  ensure_binding "$ns" "$pid" "$role" agent "$aid"
+  [ "$level" = operator ] && ensure_binding "$ns" "$pid" "$role" configuration "$cfg"
+  [ -n "$rev" ] && ensure_binding "$ns" "$pid" "$role" agent_revision "$rev"
+  [ "$level" = operator ] && echo "Note: deploying also needs 'operate' on the Agent's Secrets; an administrator grants those." || true
+  echo "Done. A new revision needs: oae-user grant $email $agent $level (again, after each deploy)."
+}
+
+cmd_revoke() {
+  local email agent ns rec pid a aid cfg rev
+  email=$(norm_email "${1:-}"); agent=${2:-}
+  [ -n "$email" ] && [ -n "$agent" ] || usage
+  rec=$(registry_get "$email"); [ -n "$rec" ] || die "$email is not known here"
+  pid=$(jq -r .principalId <<<"$rec")
+  ns=$(namespace_id); a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent"
+  aid=$(jq -r .id <<<"$a"); cfg=$(jq -r .configurationId <<<"$a"); rev=$(jq -r '.activeRevisionId // empty' <<<"$a")
+  bindings "$ns" | jq -r --arg p "$pid" --arg a "$aid" --arg c "$cfg" --arg r "$rev" \
+    '.[] | select(.subjectId == $p and ((.resourceKind == "agent" and .resourceId == $a) or (.resourceKind == "configuration" and .resourceId == $c) or (.resourceKind == "agent_revision" and .resourceId == $r))) | .id' |
+  while read -r b; do api DELETE "/namespaces/$ns/iam/access-bindings/$b" >/dev/null; echo "  - $b"; done
+  echo "Revoked $email on $agent (the Namespace read binding stays for their other Agents)."
+}
+
+cmd_show() {
+  local email rec uid pid ns
+  email=$(norm_email "${1:-}"); rec=$(registry_get "$email"); [ -n "$rec" ] || die "$email is not known here"
+  uid=$(jq -r .userId <<<"$rec"); pid=$(jq -r .principalId <<<"$rec")
+  api GET "/api/auth/accounts/$uid" | jq -r '.data | "Account \(.userId)  disabled=\(.disabled)", (.methods[] | "  sign-in: \(if (.providerId | startswith("oidc:")) then "SSO subject \(.subject)" else .providerId end)")'
+  ns=$(namespace_id)
+  echo "Grants in Namespace $WANT_NS:"
+  bindings "$ns" | jq -r --arg p "$pid" '.[] | select(.subjectId == $p) | "  \(.resourceKind) \(.resourceId)  role \(.roleId)"'
+}
+
+cmd_list() { jq -r 'to_entries[] | "\(.key)\t\(.value.userId)\tsubject=\(.value.subject // "-")"' "$REGISTRY"; }
+
+case ${1:-} in
+  add) shift; cmd_add "$@" ;;
+  grant) shift; cmd_grant "$@" ;;
+  revoke) shift; cmd_revoke "$@" ;;
+  show) shift; cmd_show "$@" ;;
+  list) cmd_list ;;
+  *) usage ;;
+esac

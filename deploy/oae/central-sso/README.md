@@ -52,6 +52,18 @@ Then, on the OAE box, put the client ID and secret in the `occ-oidc-login` Secre
 and is one-way for the installation. People sign in with SSO only after an administrator creates
 their OAE account and attaches their Keycloak user ID (the token's `sub`).
 
+## Add a person
+
+```bash
+./oae-sso-user.sh oae-oracle alice@example.com Alice Smith   # Keycloak side: person + one-time password
+# then on the OAE server, as root (oae-user is installed with OAE):
+oae-user add alice@example.com <keycloak-user-id>
+oae-user grant alice@example.com <agent> user                # or: operator
+```
+
+Access is OCE's own Namespace Roles and AccessBindings; `oae-user show` and `oae-user revoke` read
+and remove them. Sign-in alone grants nothing.
+
 ## Security notes
 
 - The Keycloak admin console (`/admin`) is reachable on the public name. Use a long admin

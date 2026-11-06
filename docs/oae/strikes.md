@@ -72,11 +72,21 @@ Progress (2026-11-06):
   `recoveryUserId` (native admin turned off, as OCE requires); `occ-oidc-login` Secret; `helm
   upgrade`. Browser test: console → Keycloak → callback → signed in as `oae-demo@…`, who sees no
   Namespaces (no grants yet). Password sign-in for the recovery admin still works.
-- ⬜ Grants: give a person access to one Agent (RFC 0010 sharing) and check they see only it.
-- ⬜ `oae-user` helper: create the OAE account and attach the Keycloak `sub` in one step.
+- ✅ Grants: OCE Namespace Roles + AccessBindings (`docs/guides/topics/iam.md`), not native-admin
+  sharing. Browser check as the SSO user: lists only the granted Agent; the other Agent, IAM
+  roles → 403; Secrets list filtered to none; revoke takes effect immediately.
+- ✅ Helpers: [`deploy/oae/bin/oae-user`](../../deploy/oae/bin/oae-user) on the OAE box
+  (`add` account + SSO identity, `grant user|operator`, `revoke`, `show`, `list`; writes run under
+  the recovery administrator's session for audit) and
+  [`central-sso/oae-sso-user.sh`](../../deploy/oae/central-sso/oae-sso-user.sh) on the Keycloak
+  side (person + one-time password, prints the `oae-user` commands). Both idempotent.
+  Known gaps: grants must be re-run after each deploy (new revision); `operator` still needs
+  `operate` on the Agent's Secrets from an administrator; OCE has no account list, so `oae-user`
+  keeps `/opt/oce/prod/oae-users.json`.
 - ⬜ Installer: OIDC inputs in manidae `oce.py` (issuer, endpoints, client Secret, recovery user;
   Keycloak or a customer IdP, not surfaced in the UI yet); co-hosted Traefik detection (strike 1
-  finding); button label "SSO" (the console prefixes "Continue with").
+  finding); button label "SSO" (the console prefixes "Continue with"); install `oae-user`;
+  `oce-nvidia-agent` must skip `oce-admin-ui` when native admin is off (OIDC installs).
 - ⬜ Edge for Agent UIs (replaces native admin): forward-auth on the OAE session + Agent grant,
   sets `x-occ-identity` for the gateway's trusted-proxy auth.
 
