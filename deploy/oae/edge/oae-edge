@@ -190,7 +190,6 @@ cmd_sync() {
         | map({sub: $sub[.subjectId], level: (if $rname[.roleId] == $op then "operator" else "user" end)})
         | reduce .[] as $e ({}; .[$e.sub] = (if .[$e.sub] == "operator" or $e.level == "operator" then "operator" else "user" end))' <<<"$bindings")
       acl=$(jq -c --arg h "$host" --argjson p "$people" '.[$h] = $p' <<<"$acl")
-      [ "$people" = "{}" ] && continue
       svc=$(kubectl get svc -A -l "openclaw.dev/agent=$aid" -o json | jq -c '[.items[] | select(.metadata.name | startswith("gateway-"))][0] // empty')
       [ -n "$svc" ] || continue
       tns=$(jq -r .metadata.namespace <<<"$svc"); sname=$(jq -r .metadata.name <<<"$svc")
@@ -198,7 +197,12 @@ cmd_sync() {
       tenant_middlewares "$tns"
       agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid"
       routes+="$host"$'\n'
-      if gateway_identities "$ns" "$aid" "$cfgid" "https://$host" "$people"; then
+      # Agents never shared stay untouched; when the last person goes, their identities leave the
+      # gateway too (the route stays, so the edge answers "No access" instead of 404).
+      if [ "$people" = "{}" ] && ! $OCC configuration get "$cfgid" --namespace "$ns" --output json |
+          jq -e '(.values.gateway.auth.trustedProxy.allowUsers // []) | any(. != "occ-workspace-files")' >/dev/null; then
+        :
+      elif gateway_identities "$ns" "$aid" "$cfgid" "https://$host" "$people"; then
         log "$(jq -r .name <<<"$agent"): gateway identities changed; redeploying"
       fi
       # New revisions: bind each person's Role to the active revision too (oae-user's known gap).
