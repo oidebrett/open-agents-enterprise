@@ -163,7 +163,7 @@ grants, revisions, audit and the console).
   chat over WebSocket answered (NVIDIA Nemotron).
 - ⬜ Hermes Desktop through `oae-user device add EMAIL HERMES` (needs the user's Desktop app).
 
-### 🟨 5b — Hermes as a native OCE Agent runtime (branch `strike/5b-hermes-kind`)
+### ✅ 5b — Hermes as a native OCE Agent runtime (branch `strike/5b-hermes-kind`)
 
 Design change from the plan: Hermes is an Agent **runtime** (`agentRuntime.id: "hermes"`, embedded),
 not a configuration kind. Migration 0006 pins `CHECK(kind='agent')` and OCE's migration history is
@@ -206,7 +206,14 @@ later upstream sync. A runtime needs no schema change.
 - ✅ Full conformance on the final runtime commit: 3147 tests, 37 failures, all in the unmodified
   baseline's set (SSH/`gh` environment); none only with 5b.
 - On Oracle: controller `sha256:5851316c…` (commit `a3d33210`).
-- ⬜ Merge into `oae`; manidae pins (`OAE_SOURCE`, controller image).
+- ✅ Merged into `oae` (`baf79dd3`). Fix `037693e3`: `oae-user grant` exited silently on a box
+  without the 5a registry.
+- ✅ manidae branch `oae/strike-5-hermes` pins `037693e3`, controller `sha256:5851316c…` and
+  edge `sha256:b9d1bb87…`.
+- ✅ Fresh unattended install on Oracle from those pins (2026-11-07): 0 warnings, and
+  AgentGateway was untouched. OpenClaw `oae-test` and native Hermes `hermes-test` both answered,
+  and the SSO demo user, granted on both, chatted with Hermes in the browser and connected to
+  OpenClaw.
 - ⬜ Hermes Desktop (user).
 - Known:
   - `dashboard.public_url` is only set when the controller has `OAE_INSTALLATION_ID` and
