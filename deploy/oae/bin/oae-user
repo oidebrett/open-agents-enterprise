@@ -128,7 +128,8 @@ agent_json() {  # agent_json NS NAME
 }
 
 HERMES_REGISTRY=$PROD/oae-hermes.json
-hermes_ns() { [ -f "$HERMES_REGISTRY" ] && jq -r --arg n "$1" '.[$n].namespaceId // empty' "$HERMES_REGISTRY"; }
+# Always succeeds: a box without strike-5a Hermes agents has no registry (set -e would end the caller).
+hermes_ns() { [ -f "$HERMES_REGISTRY" ] || return 0; jq -r --arg n "$1" '.[$n].namespaceId // empty' "$HERMES_REGISTRY"; }
 
 # Hermes agents (strike 5a) live next to OCE: access is an OCE Namespace Role per Hermes agent,
 # bound to its Namespace; oae-edge maps the Role name back to the agent. Strike 5b replaces this
