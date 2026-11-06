@@ -73,7 +73,12 @@ Agent's next deploy. OCE's own caveat stands: withdrawal does not cancel work al
   native-admin recipe; capped by `x-openclaw-scopes`). Spoofed `x-occ-identity` /
   `x-openclaw-scopes` headers without a session → 401. Revoke → "No access" (403) on the next
   load, identity removed from the gateway at the next sync. New revisions are re-bound by the sync.
-- ⬜ manidae installer: `oae-edge` install + timer, edge client settings, image pins.
+- ✅ manidae installer (branch `oae/strike-2-installer`, `b31f217d`): OAE pins fork `ff69c09` with our
+  controller and edge images; with SSO + the `oae-edge` client the install runs `oae-edge install`
+  and enables the timer. Fresh unattended install on Oracle: 0 warnings; agent created, person
+  added and granted, the timer alone made the gateway admit them in ~75 s; browser connected as
+  the person and a chat turn answered.
+- Grant latency: up to ~2–3 min (timer 60 s, ConfigMap propagation to the pod ~60 s, redeploy ~60 s).
 
 ## Open points
 

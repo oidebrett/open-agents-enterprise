@@ -45,7 +45,7 @@ BYOVPS customer with an existing Pangolin stack can use the package, the install
 must detect the Traefik container's network and route through its gateway (to do,
 with strike 2's edge, which needs the same plumbing).
 
-## 🟨 Strike 2 — Email sign-in and per-Agent access (reuse OCE)
+## ✅ Strike 2 — Email sign-in and per-Agent access (reuse OCE)
 
 Goal: people sign in with their email identity and reach only their Agents.
 
@@ -96,8 +96,8 @@ Progress (2026-11-06):
 - ✅ Edge for Agent UIs: OCE's human ingress (upstream #3049 cherry-picked; our controller image on
   Docker Hub) + `oae-edge` (sign-in/authz service, per-Agent routes, exact-peer NetworkPolicy,
   gateway identities). Verified in a browser on Oracle: SSO → Agent UI connected as the person →
-  chat answered; revoke → No access. Details: [`edge-design.md`](edge-design.md). Remaining:
-  manidae installer wiring for the edge.
+  chat answered; revoke → No access. Details: [`edge-design.md`](edge-design.md). Installed by
+  manidae (fresh unattended install verified on Oracle).
 
 ## ⬜ Strike 3 — Remote clients for OpenClaw Agents (mobile app)
 
