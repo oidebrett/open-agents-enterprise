@@ -87,20 +87,17 @@ spec:
         command: ["sh", "-c", "[ -f /opt/data/config.yaml ] || cp /seed/config.yaml /opt/data/config.yaml"]
         volumeMounts: [{ name: data, mountPath: /opt/data }, { name: seed, mountPath: /seed }]
       containers:
-      - name: gateway
+      # One container: s6 supervises the gateway and, with HERMES_DASHBOARD, the dashboard
+      # (0.0.0.0:9119) in the same process tree, so the dashboard sees the gateway's state.
+      - name: hermes
         image: $IMAGE
         args: ["gateway", "run"]
-        envFrom: [{ secretRef: { name: hermes-$name } }]
-        volumeMounts: [{ name: data, mountPath: /opt/data }]
-        resources: { requests: { cpu: 100m, memory: 512Mi }, limits: { memory: 3Gi } }
-      - name: dashboard
-        image: $IMAGE
-        args: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
+        env: [{ name: HERMES_DASHBOARD, value: "1" }]
         envFrom: [{ secretRef: { name: hermes-$name } }]
         ports: [{ name: http, containerPort: 9119 }]
         readinessProbe: { httpGet: { path: /api/status, port: http }, periodSeconds: 10 }
         volumeMounts: [{ name: data, mountPath: /opt/data }]
-        resources: { requests: { cpu: 50m, memory: 256Mi }, limits: { memory: 1Gi } }
+        resources: { requests: { cpu: 100m, memory: 768Mi }, limits: { memory: 4Gi } }
       volumes:
       - { name: data, persistentVolumeClaim: { claimName: hermes-$name-data } }
       - { name: seed, configMap: { name: hermes-$name-seed } }
