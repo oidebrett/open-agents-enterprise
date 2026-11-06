@@ -22,6 +22,7 @@ import type {
   OpenClawConfigurationDocument,
 } from "@openclaw-enterprise/contracts";
 import type { KubernetesObjectApi, V1Deployment } from "@kubernetes/client-node";
+import { numericErrorStatus } from "@openclaw-enterprise/utils";
 
 /** Harness id selected by `agentRuntime.id: "hermes"`. */
 export const HERMES_HARNESS_ID = "hermes";
@@ -36,11 +37,14 @@ const TRUSTED_PROXY_CIDRS = (process.env.OAE_HERMES_TRUSTED_PROXY_CIDRS ?? "10.4
 
 type NamespaceAddress = { readonly name: string; readonly plane: "control" | "execution" };
 type Clients = { readonly objects: KubernetesObjectApi; readonly core: CoreReader; readonly apps: AppsReader };
+type SecretObject = {
+  metadata?: { uid?: string; deletionTimestamp?: unknown; resourceVersion?: string };
+  data?: Record<string, string>;
+};
 type CoreReader = {
-  readNamespacedSecret(args: { name: string; namespace: string }): Promise<{
-    metadata?: { uid?: string; deletionTimestamp?: unknown };
-    data?: Record<string, string>;
-  }>;
+  readNamespacedSecret(args: { name: string; namespace: string }): Promise<SecretObject>;
+  createNamespacedSecret(args: { namespace: string; body: Record<string, unknown> }): Promise<unknown>;
+  replaceNamespacedSecret(args: { name: string; namespace: string; body: Record<string, unknown> }): Promise<unknown>;
 };
 type AppsReader = {
   readNamespacedDeployment(args: { name: string; namespace: string }): Promise<V1Deployment>;
@@ -174,21 +178,25 @@ class HermesWorkloads {
     const meta = (name: string) => ({ name, namespace: namespace.name, labels });
 
     // A stable session token per Agent (the edge reads it); the model key follows the binding.
-    let token: string | undefined;
+    // The worker may create and replace Secrets but not patch them (OCE's tenant Role), so no apply.
+    let existing: SecretObject | undefined;
     try {
-      const existing = await clients.core.readNamespacedSecret({ name: n.env, namespace: namespace.name });
-      token = existing.data?.HERMES_DASHBOARD_SESSION_TOKEN;
-    } catch {
-      token = undefined;
+      existing = await clients.core.readNamespacedSecret({ name: n.env, namespace: namespace.name });
+    } catch (error) {
+      if (numericErrorStatus(error) !== 404) throw error;
     }
-    token ??= Buffer.from(randomBytes(32).toString("hex")).toString("base64");
-    await this.apply(clients, {
+    const token =
+      existing?.data?.HERMES_DASHBOARD_SESSION_TOKEN ?? Buffer.from(randomBytes(32).toString("hex")).toString("base64");
+    const secret = {
       apiVersion: "v1",
       kind: "Secret",
-      metadata: meta(n.env),
+      metadata: { ...meta(n.env), resourceVersion: existing?.metadata?.resourceVersion },
       type: "Opaque",
       data: { [settings.keyEnvironment]: await this.modelKey(revision, context), HERMES_DASHBOARD_SESSION_TOKEN: token },
-    });
+    };
+    await (existing
+      ? clients.core.replaceNamespacedSecret({ name: n.env, namespace: namespace.name, body: secret })
+      : clients.core.createNamespacedSecret({ namespace: namespace.name, body: secret }));
     await this.apply(clients, {
       apiVersion: "v1",
       kind: "ConfigMap",
