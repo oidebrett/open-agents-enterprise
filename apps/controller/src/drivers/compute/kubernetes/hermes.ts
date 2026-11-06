@@ -32,6 +32,11 @@ export const HERMES_IMAGE =
   "docker.io/nousresearch/hermes-agent@sha256:adb7890916de63245523492be8f68f9d2095fecbec4e2a6dab7960381f0fc002";
 const DASHBOARD_PORT = 9119;
 const MANAGER = "oae-hermes";
+const HERMES_UID = 10000; // the image's "hermes" user
+const CONTAINER_SECURITY = {
+  allowPrivilegeEscalation: false,
+  capabilities: { drop: ["ALL"] },
+};
 // The edge's proxies (k3s Traefik Pods) — the Pod CIDR, as gatewayTrustedProxyCidrs.
 const TRUSTED_PROXY_CIDRS = (process.env.OAE_HERMES_TRUSTED_PROXY_CIDRS ?? "10.42.0.0/16").split(",");
 
@@ -226,6 +231,14 @@ class HermesWorkloads {
           spec: {
             automountServiceAccountToken: false,
             nodeSelector: this.driver.options.runtime?.nodeSelector,
+            // OCE tenant namespaces enforce Pod Security "restricted"; Hermes runs as its own user.
+            securityContext: {
+              runAsNonRoot: true,
+              runAsUser: HERMES_UID,
+              runAsGroup: HERMES_UID,
+              fsGroup: HERMES_UID,
+              seccompProfile: { type: "RuntimeDefault" },
+            },
             initContainers: [
               {
                 name: "seed-config",
@@ -234,15 +247,20 @@ class HermesWorkloads {
                 command: [
                   "sh",
                   "-c",
-                  "if [ -f /opt/data/config.yaml ]; then python3 - <<'PY'\n" +
-                    "import yaml\n" +
-                    "seed = yaml.safe_load(open('/seed/config.yaml'))\n" +
-                    "cur = yaml.safe_load(open('/opt/data/config.yaml')) or {}\n" +
-                    "cur['model'] = {**(cur.get('model') or {}), **seed['model']}\n" +
-                    "cur['dashboard'] = {**(cur.get('dashboard') or {}), **seed['dashboard']}\n" +
-                    "yaml.safe_dump(cur, open('/opt/data/config.yaml', 'w'), sort_keys=False)\n" +
+                  // Hermes' own YAML library (ruamel, round-trip: the Agent's comments survive).
+                  "if [ -f /opt/data/config.yaml ]; then /opt/hermes/.venv/bin/python - <<'PY'\n" +
+                    "from ruamel.yaml import YAML\n" +
+                    "y = YAML()\n" +
+                    "seed = y.load(open('/seed/config.yaml'))\n" +
+                    "cur = y.load(open('/opt/data/config.yaml')) or {}\n" +
+                    "for section in ('model', 'dashboard'):\n" +
+                    "    cur.setdefault(section, {})\n" +
+                    "    cur[section] = cur[section] or {}\n" +
+                    "    cur[section].update(seed[section])\n" +
+                    "y.dump(cur, open('/opt/data/config.yaml', 'w'))\n" +
                     "PY\nelse cp /seed/config.yaml /opt/data/config.yaml; fi",
                 ],
+                securityContext: CONTAINER_SECURITY,
                 volumeMounts: [
                   { name: "data", mountPath: "/opt/data" },
                   { name: "seed", mountPath: "/seed" },
@@ -255,17 +273,26 @@ class HermesWorkloads {
                 name: "hermes",
                 image: HERMES_IMAGE,
                 args: ["gateway", "run"],
-                env: [{ name: "HERMES_DASHBOARD", value: "1" }],
+                env: [
+                  { name: "HERMES_DASHBOARD", value: "1" },
+                  // s6-overlay runs unprivileged; /run is an emptyDir, world-writable as Kubernetes makes it.
+                  { name: "S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES", value: "1" },
+                ],
                 envFrom: [{ secretRef: { name: n.env } }],
                 ports: [{ name: "http", containerPort: DASHBOARD_PORT }],
                 readinessProbe: { httpGet: { path: "/api/status", port: "http" }, periodSeconds: 10 },
-                volumeMounts: [{ name: "data", mountPath: "/opt/data" }],
+                securityContext: CONTAINER_SECURITY,
+                volumeMounts: [
+                  { name: "data", mountPath: "/opt/data" },
+                  { name: "run", mountPath: "/run" },
+                ],
                 resources: { requests: { cpu: "100m", memory: "768Mi" }, limits: { memory: "4Gi" } },
               },
             ],
             volumes: [
               { name: "data", persistentVolumeClaim: { claimName: n.data } },
               { name: "seed", configMap: { name: n.seed } },
+              { name: "run", emptyDir: { medium: "Memory", sizeLimit: "64Mi" } },
             ],
           },
         },
