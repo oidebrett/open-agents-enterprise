@@ -218,7 +218,9 @@ cmd_device() {
         if [ -n "$pod" ]; then
           set -- $pod
           echo; echo "Pairing QR / setup code (works for ~10 minutes; usable within ~2 minutes, once the edge has the token):"
-          KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl -n "$1" exec "$2" -c gateway -- openclaw qr --url "$url" || true
+          # The gateway logs as JSON lines; print the human message (QR + setup code) as text.
+          KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl -n "$1" exec "$2" -c gateway -- openclaw qr --url "$url" 2>&1 |
+            jq -Rr '(fromjson? // .) | if type == "object" then (.message // tostring) else . end' || true
         fi
       fi ;;
     list)
