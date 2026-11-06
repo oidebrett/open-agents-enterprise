@@ -142,7 +142,11 @@ cmd_grant() {
   [ "$level" = operator ] && ensure_binding "$ns" "$pid" "$role" configuration "$cfg"
   [ -n "$rev" ] && ensure_binding "$ns" "$pid" "$role" agent_revision "$rev"
   [ "$level" = operator ] && echo "Note: deploying also needs 'operate' on the Agent's Secrets; an administrator grants those." || true
-  echo "Done. A new revision needs: oae-user grant $email $agent $level (again, after each deploy)."
+  if systemctl is-enabled -q oae-edge-sync.timer 2>/dev/null; then
+    echo "Done. The edge picks this up within a minute (and re-binds new revisions after each deploy)."
+  else
+    echo "Done. A new revision needs: oae-user grant $email $agent $level (again, after each deploy)."
+  fi
 }
 
 cmd_revoke() {
