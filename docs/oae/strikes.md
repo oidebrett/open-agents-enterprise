@@ -99,13 +99,20 @@ Progress (2026-11-06):
   chat answered; revoke → No access. Details: [`edge-design.md`](edge-design.md). Installed by
   manidae (fresh unattended install verified on Oracle).
 
-## ⬜ Strike 3 — Remote clients for OpenClaw Agents (mobile app)
+## ✅ Strike 3 — Remote clients for OpenClaw Agents (mobile app)
 
-- The edge also accepts per-person device tokens (issued in OAE, revocable) and
-  maps them to the same identity; OpenClaw device pairing through
-  `deviceAutoApprove` scopes. Revoking a person also revokes their pairings.
-- Done when: the OpenClaw mobile app connects to an OAE Agent from outside, and
-  stops working after revocation.
+- App device tokens through the edge: `oae-user device add EMAIL [AGENT] [LABEL]` prints a
+  revocable token once (only its SHA-256 is stored), the Agent's
+  `wss://agent-<hash>.agents.<host>/d/oaed_<token>` URL and a pairing QR / setup code
+  (`openclaw qr --url`; the setup code keeps the path and is labelled trusted-proxy / full access).
+  OpenClaw's Android and iOS apps dial the URL path as the gateway context path; the edge checks
+  the token from `X-Forwarded-Uri` (allowed → the person's identity and scopes; unknown → 401;
+  ungranted → 403) and strips `/d/<token>` before the gateway.
+- Verified on Oracle: an OpenClaw WebSocket client (`openclaw gateway health --url wss://…/d/…`)
+  connected through the edge as the person; a wrong token → 401; `device revoke` → 401 within
+  ~30 s. Token activation takes up to ~2 min (Secret propagation to the edge Pod).
+- Not yet: a real phone scan (needs a device); tokens in URL paths reach proxy access logs
+  (revocable; consider log redaction).
 
 ## ⬜ Strike 4 — OAE images and the Claude harness for OpenClaw
 
