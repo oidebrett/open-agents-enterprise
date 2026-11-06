@@ -10,6 +10,10 @@
 #   oae-user revoke EMAIL AGENT                 remove that person's bindings on the Agent
 #   oae-user show   EMAIL                       sign-in methods and grants
 #   oae-user list                               people this tool added
+#   oae-user device add    EMAIL [AGENT] [LABEL] app token (OpenClaw mobile/desktop); with AGENT,
+#                                                 its wss:// URL and a pairing QR / setup code
+#   oae-user device list   [EMAIL]              app tokens (never the tokens themselves)
+#   oae-user device revoke EMAIL ID|all         stop an app token (within ~2 minutes)
 #
 # Options (env): OAE_NAMESPACE (name or ns_ ID, default "default").
 set -euo pipefail
@@ -18,6 +22,7 @@ OCC=/opt/oce/src/bin/occ
 PROD=/opt/oce/prod
 SECURE=$PROD/secure
 REGISTRY=$PROD/oae-users.json   # OCE has no API that lists accounts; this keeps email -> IDs.
+DEVICES=$PROD/oae-devices.json   # app tokens: sha256(token) -> {email, id, label, created}
 ACCESS=/root/oce-access.txt
 URL=${OAE_URL:-$(sed -nE 's#^Console: +(https://[^/]+)/console/.*#\1#p' "$ACCESS")}
 ADMIN=${OAE_ADMIN_EMAIL:-$(sed -nE 's/^Sign in: +([^ ]+).*/\1/p' "$ACCESS")}
@@ -26,7 +31,7 @@ ROLE_USER="OAE Agent user"
 ROLE_OPERATOR="OAE Agent operator"
 
 die() { echo "oae-user: $*" >&2; exit 1; }
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 [ -n "$URL" ] && [ -n "$ADMIN" ] || die "cannot read the console URL and admin email from $ACCESS"
 [ -f "$REGISTRY" ] || { umask 077; echo '{}' > "$REGISTRY"; }
 
@@ -175,11 +180,70 @@ cmd_show() {
 
 cmd_list() { jq -r 'to_entries[] | "\(.key)\t\(.value.userId)\tsubject=\(.value.subject // "-")"' "$REGISTRY"; }
 
+edge_resync() { systemctl start --no-block oae-edge-sync.service 2>/dev/null || true; }
+
+devices_put() {  # devices_put JQ_FILTER [ARGS...]: atomic update of the device file
+  local filter=$1 tmp; shift
+  [ -f "$DEVICES" ] || { umask 077; echo '{}' > "$DEVICES"; }
+  tmp=$(mktemp "$DEVICES.XXXX")
+  jq "$@" "$filter" "$DEVICES" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$DEVICES"
+}
+
+cmd_device() {
+  local sub=${1:-}; shift || true
+  case $sub in
+    add)
+      local email agent label rec token hash id ns a aid ins h host url pod
+      email=$(norm_email "${1:-}"); agent=${2:-}; label=${3:-app}
+      rec=$(registry_get "$email"); [ -n "$rec" ] || die "$email is not known here; run: oae-user add $email <subject>"
+      jq -e .subject <<<"$rec" >/dev/null || die "$email has no SSO subject"
+      [[ $label =~ ^[A-Za-z0-9\ ._-]{1,40}$ ]] || die "label: up to 40 letters, digits, spaces or ._-"
+      token="oaed_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+      hash=$(printf %s "$token" | sha256sum | cut -d' ' -f1); id=${hash:0:8}
+      devices_put '.[$h] = {email: $e, id: $i, label: $l, created: $c}' \
+        --arg h "$hash" --arg e "$email" --arg i "$id" --arg l "$label" --arg c "$(date -u +%FT%TZ)"
+      edge_resync
+      echo "App token $id for $email ($label). Shown once; anyone with it acts as $email on their granted Agents:"
+      echo "  $token"
+      if [ -n "$agent" ]; then
+        ns=$(namespace_id); a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent"
+        aid=$(jq -r .id <<<"$a"); ins=$($OCC installation get --output json | jq -r .id)
+        h=$(printf '%s\0%s\0%s' "$ins" "$ns" "$aid" | sha256sum | cut -c1-32)
+        host="agent-$h.agents.$(sed -nE 's#^https://##p' <<<"$URL")"
+        url="wss://$host/d/$token"
+        echo; echo "Gateway URL for the OpenClaw app (Settings > Gateway, or scan below):"
+        echo "  $url"
+        pod=$(KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl get pods -A -l "openclaw.dev/agent=$aid,openclaw.dev/workload-role=gateway" \
+          -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}')
+        if [ -n "$pod" ]; then
+          set -- $pod
+          echo; echo "Pairing QR / setup code (works for ~10 minutes; usable within ~2 minutes, once the edge has the token):"
+          KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl -n "$1" exec "$2" -c gateway -- openclaw qr --url "$url" || true
+        fi
+      fi ;;
+    list)
+      local email; email=$(norm_email "${1:-}")
+      [ -f "$DEVICES" ] || { echo "no app tokens"; return 0; }
+      jq -r --arg e "$email" 'to_entries[] | select($e == "" or .value.email == $e) | "\(.value.id)\t\(.value.email)\t\(.value.label)\t\(.value.created)"' "$DEVICES" ;;
+    revoke)
+      local email id n; email=$(norm_email "${1:-}"); id=${2:-}
+      [ -n "$email" ] && [ -n "$id" ] || usage
+      [ -f "$DEVICES" ] || die "no app tokens"
+      n=$(jq --arg e "$email" --arg i "$id" '[to_entries[] | select(.value.email == $e and ($i == "all" or .value.id == $i))] | length' "$DEVICES")
+      [ "$n" -gt 0 ] || die "no matching app token for $email"
+      devices_put 'with_entries(select((.value.email == $e and ($i == "all" or .value.id == $i)) | not))' --arg e "$email" --arg i "$id"
+      edge_resync
+      echo "Revoked $n app token(s) for $email; the edge refuses them within ~2 minutes." ;;
+    *) usage ;;
+  esac
+}
+
 case ${1:-} in
   add) shift; cmd_add "$@" ;;
   grant) shift; cmd_grant "$@" ;;
   revoke) shift; cmd_revoke "$@" ;;
   show) shift; cmd_show "$@" ;;
   list) cmd_list ;;
+  device) shift; cmd_device "$@" ;;
   *) usage ;;
 esac
