@@ -3,7 +3,7 @@
 **Status (2026-11-07):** OpenClaw Agents answer Microsoft Teams / Bot Framework messages. Verified
 end to end with an Azure Bot's **Test in Web Chat** (real Bot Framework service, Microsoft-signed
 tokens, replies through the Bot Connector) on an Embedded OpenClaw Agent with Claude Haiku 5.5.
-The Teams client itself needs a Microsoft 365 licence with Teams (not tested yet). Hermes: next.
+The Teams client itself needs a Microsoft 365 licence with Teams (not tested yet).
 
 ## What OAE adds to OCE
 
@@ -47,9 +47,31 @@ Dedicated Agent still needs OCE's channel runtime plus Microsoft hosts in the pr
 
 Testbed helper on Oracle: `/root/teams-agent.sh NAME APP_ID TENANT_ID`.
 
-## Next
+## Console
 
-- Console: a Microsoft Teams card on the Agent's channel settings (App ID, Tenant ID, app-password
-  Secret, the endpoint to paste), like OCE's Slack editor.
-- Hermes: its bundled Teams platform plugin needs the `microsoft-teams-apps` SDK in the Hermes
-  image, its port 3978 on the workload, and the same edge route.
+Agent → Configuration → **Channels** shows a **Microsoft Teams** card beside Slack, on Embedded and
+Dedicated Agents: enable, App ID, Tenant ID, the `MSTEAMS_APP_PASSWORD` Secret (choose or create;
+the Agent is granted `operate` on save), direct-message policy, and the exact messaging endpoint
+(`GET /oae/api/agent` returns the Agent's host). The Credentials tab no longer blocks Teams.
+
+## Dedicated Agents
+
+The Installation's channel runtime is on (`channels.managedSlackProxy: true` in the profile input),
+and the managed channel proxy (`apps/controller/src/slack-proxy.mjs`) also allows Microsoft's
+Bot Framework, Entra sign-in and Graph hosts (verified: those 200, other hosts 403). A Dedicated
+gateway reaches Microsoft through it (`HTTPS_PROXY`), as Slack does. Not yet proven end to end:
+needs a Dedicated (Codex) Agent, i.e. an OpenAI key.
+
+## Hermes
+
+`deploy/oae/runtime-hermes` adds the Microsoft Teams SDK (Hermes's `teams` extra) to the official
+image. The Hermes driver turns `channels.msteams` into `TEAMS_CLIENT_ID/TENANT_ID/PORT` and
+`TEAMS_ALLOW_ALL_USERS` or `TEAMS_ALLOWED_USERS`, with the app password from the same Secret
+binding; port 3978 is opened only when Teams is on, and the edge routes `/api/messages` there
+(identity-only strip: Bot Framework's token is in `Authorization`).
+
+Verified 2026-11-07: Bot Framework delivers to Hermes, the plugin validates the token (unsigned:
+401), Hermes answers, and the bot's credentials mint a Bot Framework token. **Web Chat cannot show
+Hermes's reply:** Hermes's Teams plugin always replies through the Teams connector
+(`smba.trafficmanager.net/teams/`, an allowlist that excludes `webchat.botframework.com`), by
+design. Proving replies needs the Teams client (a Microsoft 365 licence with Teams).
