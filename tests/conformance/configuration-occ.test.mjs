@@ -1309,6 +1309,30 @@ test("Configuration save refuses OpenClaw's sandbox and keeps the values the OCE
   assert.deepEqual((await save(values)).values, values);
 });
 
+// OAE: OpenClaw's Claude Code CLI backend runs in the OpenClaw gateway, so its Harness is OpenClaw,
+// and only an Anthropic model may select it (docs/oae/claude-harness.md).
+test("OAE: claude-cli runs Anthropic models on the OpenClaw Harness", () => {
+  const claude = (model) =>
+    resolveConfiguredHarnessId({
+      agents: {
+        defaults: { model, models: { [model]: { agentRuntime: { id: "claude-cli" } } } },
+      },
+      models: {
+        providers: {
+          [model.split("/")[0]]: {
+            baseUrl: "https://api.anthropic.com",
+            api: "anthropic-messages",
+            models: [{ id: model.split("/")[1], name: model.split("/")[1] }],
+          },
+        },
+      },
+    });
+  assert.equal(claude("anthropic/claude-haiku-5-5"), "openclaw");
+  assert.throws(() => claude("openai/gpt-4.1"), {
+    message: "The Claude Code runtime (claude-cli) requires the anthropic model provider.",
+  });
+});
+
 test("native selected-model policy explicitly chooses Codex or OpenClaw", () => {
   for (const [model, runtime] of [
     ["codex/gpt-4.1", "codex"],

@@ -13,7 +13,9 @@ import type { AgentAccessContext } from "./credential-access.mjs";
 import { createDeviceLogin, type DeviceLogin } from "./device-login.mjs";
 
 // Display native model policy; deployment admission owns full Configuration validation.
-export function configuredHarnessId(values: unknown): "codex" | "openclaw" | "hermes" | undefined {
+export function configuredHarnessId(
+  values: unknown,
+): "codex" | "openclaw" | "hermes" | "claude-cli" | undefined {
   const { agents, models } = responseFields(values);
   const agentPolicy = responseFields(agents);
   const defaults = responseFields(agentPolicy.defaults);
@@ -46,8 +48,14 @@ export function configuredHarnessId(values: unknown): "codex" | "openclaw" | "he
   );
   if (runtimes.size === 1) {
     const [runtime] = runtimes;
-    // OAE: "hermes" is an embedded Agent runtime (Kubernetes Compute runs the Hermes workload).
-    return runtime === "codex" || runtime === "openclaw" || runtime === "hermes" ? runtime : undefined;
+    // OAE: "hermes" is an embedded Agent runtime (Kubernetes Compute runs the Hermes workload);
+    // "claude-cli" is OpenClaw's Claude Code runtime.
+    return runtime === "codex" ||
+      runtime === "openclaw" ||
+      runtime === "hermes" ||
+      runtime === "claude-cli"
+      ? runtime
+      : undefined;
   }
   return runtimes.size === 0 && !provider && !["openai", "codex"].includes(providerId)
     ? "openclaw"

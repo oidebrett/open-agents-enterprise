@@ -200,6 +200,7 @@ import {
 } from "../native-gateway-transport.ts";
 import { validateCodexApprovalPolicySetting } from "../../../gateway/codex-approval-policy.ts";
 import {
+  EMBEDDED_DIRECT_CHANNELS,
   enabledChannelProviders,
   OPENCLAW_GATEWAY_PASSWORD,
   requireChannelTopology,
@@ -14678,17 +14679,19 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       CHANNEL_PROVIDERS,
       preparationSettingError,
     );
+    const embedded = revision.harness.mode === "embedded";
     requireChannelTopology(
       providers,
       {
-        embedded: revision.harness.mode === "embedded",
+        embedded,
         channelRuntime: this.options.runtime?.channels !== undefined,
       },
       preparationSettingError,
     );
-    return providers.map(
-      (provider) => CHANNEL_REQUIREMENTS[provider as keyof typeof CHANNEL_REQUIREMENTS],
-    );
+    // OAE: an Embedded gateway runs Teams over its own egress: no channel proxy, no proxy policy.
+    return providers
+      .filter((provider) => !(embedded && EMBEDDED_DIRECT_CHANNELS.includes(provider)))
+      .map((provider) => CHANNEL_REQUIREMENTS[provider as keyof typeof CHANNEL_REQUIREMENTS]);
   }
 
   // Deployment admission: requireChannelSecretBindings, the rule OCC's Configuration save runs,

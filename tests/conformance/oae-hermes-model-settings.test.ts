@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   HermesConfigurationError,
   hermesModelSettings,
+  hermesTeams,
 } from "../../apps/controller/src/drivers/compute/kubernetes/hermes.ts";
 
 const configuration = (model: string, providers: Record<string, unknown> = {}) =>
@@ -57,5 +58,29 @@ test("Hermes refuses endpoints the OpenAI provider would refuse", () => {
         configuration("custom/m", { custom: { baseUrl: "https://example.com/v1" } }),
       ),
     HermesConfigurationError,
+  );
+});
+
+test("OAE: Hermes Teams settings come from channels.msteams", () => {
+  const appId = "7061d238-5d00-49b1-a6ea-4cc488b9acfe";
+  const tenantId = "ba5209bd-debd-400a-8ca9-a508a4d2c99d";
+  assert.equal(hermesTeams({}), undefined);
+  assert.equal(
+    hermesTeams({ channels: { msteams: { enabled: false, appId, tenantId } } }),
+    undefined,
+  );
+  assert.deepEqual(
+    hermesTeams({ channels: { msteams: { appId, tenantId, dmPolicy: "open", allowFrom: ["*"] } } }),
+    { appId, tenantId },
+  );
+  assert.deepEqual(
+    hermesTeams({
+      channels: { msteams: { appId, tenantId, dmPolicy: "allowlist", allowFrom: ["a", "b"] } },
+    }),
+    { appId, tenantId, allowedUsers: "a,b" },
+  );
+  assert.throws(
+    () => hermesTeams({ channels: { msteams: { appId: "nope", tenantId } } }),
+    /channels\.msteams\.appId/,
   );
 });

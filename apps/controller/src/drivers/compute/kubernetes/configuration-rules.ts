@@ -80,6 +80,14 @@ export function requireWorkspaceNodePlugins(
  * (`runtime.channels`: isolated credentials and a reviewed proxy). `providers` lists the
  * enabled channel providers, in Configuration order.
  */
+/**
+ * OAE: channels an Embedded Agent may run without the channel runtime. Microsoft Teams receives
+ * Bot Framework webhooks on the gateway's own port (the edge routes `/api/messages`) and calls
+ * Microsoft over the egress an Embedded gateway already has for its model; its credential arrives
+ * as an Agent-only Secret binding, next to the model key it already holds. docs/oae/teams.md
+ */
+export const EMBEDDED_DIRECT_CHANNELS: readonly string[] = ["msteams"];
+
 export function requireChannelTopology(
   providers: readonly string[],
   topology: { readonly embedded: boolean; readonly channelRuntime: boolean },
@@ -87,6 +95,9 @@ export function requireChannelTopology(
 ): void {
   const [provider] = providers;
   if (provider === undefined) {
+    return;
+  }
+  if (topology.embedded && providers.every((each) => EMBEDDED_DIRECT_CHANNELS.includes(each))) {
     return;
   }
   if (topology.embedded) {

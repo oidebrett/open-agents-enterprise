@@ -250,6 +250,29 @@ spec:
 YAML
 }
 
+# Microsoft Teams (OpenClaw msteams): Bot Framework posts to https://<agent host>/api/messages,
+# served on the gateway's own port. Microsoft cannot sign in, so that one exact path skips the
+# edge's sign-in; the plugin validates every request's Microsoft-signed token, and the identity
+# headers are still stripped. Everything else on the host stays behind SSO. docs/oae/teams.md
+teams_route() {  # teams_route TENANT_NS SHORT SERVICE PORT HOST [MIDDLEWARE_PREFIX]
+  local mw=${6:-oae-edge}
+  kubectl apply -f - >/dev/null <<YAML
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oae-edge-$2-teams
+  namespace: $1
+  labels: { app.kubernetes.io/managed-by: oae-edge, oae.dev/channel: msteams }
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: "$1-$mw-strip@kubernetescrd,$1-oae-edge-nocookie@kubernetescrd"
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: "$5"
+    http: { paths: [{ path: /api/messages, pathType: Exact, backend: { service: { name: $3, port: { number: $4 } } } }] }
+YAML
+}
+
 # Make the Agent's gateway admit exactly the granted people (+ the machine identity) and the
 # Agent UI origin. Redeploys only when that changes; OCE revisions are immutable.
 gateway_identities() {  # gateway_identities NS AGENT_ID CONFIG_ID ORIGIN PEOPLE_JSON
@@ -271,6 +294,20 @@ gateway_identities() {  # gateway_identities NS AGENT_ID CONFIG_ID ORIGIN PEOPLE
   $OCC configuration update "$3" --namespace "$1" --file "$f" --output json >/dev/null; rm -f "$f"
   $OCC agent deploy "$2" --namespace "$1" --output json >/dev/null
   return 0
+}
+
+# Whether an OpenClaw Agent's Anthropic credential is a Claude subscription setup token (sk-ant-oat…)
+# rather than an API key: such an Agent is personal, one person only (the edge enforces it). Reads
+# only the value's prefix from the gateway's own Secret; never prints it.
+personal_credential() {  # personal_credential NAMESPACE AGENT_ID
+  local ref
+  ref=$(kubectl -n "$1" get deploy -l "openclaw.dev/agent=$2" -o json 2>/dev/null | jq -c '
+    [.items[].spec.template.spec.containers[] | select(.name == "gateway") | .env[]?
+     | select(.name == "ANTHROPIC_API_KEY") | .valueFrom.secretKeyRef // empty][0] // empty')
+  [ -n "$ref" ] || return 1
+  kubectl -n "$1" get secret "$(jq -r .name <<<"$ref")" -o json 2>/dev/null |
+    jq -r --arg k "$(jq -r .key <<<"$ref")" '.data[$k] // empty' | base64 -d 2>/dev/null | head -c 10 |
+    grep -q '^sk-ant-oat'
 }
 
 # One unused OpenClaw bootstrap token per shared OpenClaw Agent, for the edge's /apps to put in
@@ -311,7 +348,7 @@ cmd_sync() {
   [ -f "$STATE" ] || echo '{}' > "$STATE"
   state=$(cat "$STATE")
   subjects=$(principal_subjects)
-  acl='{}'; meta='{}'; routes=""; hermes_tokens='{}'; phones=""
+  acl='{}'; meta='{}'; routes=""; hermes_tokens='{}'; phones=""; teams=""
   for ns in $($OCC namespace list --output json | jq -r '.[] | select(.status == "ready") | .id'); do
     roles=$($OCC iam role list --namespace "$ns" --output json)
     bindings=$($OCC iam access-binding list --namespace "$ns" --output json)
@@ -345,10 +382,27 @@ cmd_sync() {
         [ -n "$htok" ] && hermes_tokens=$(jq -c --arg h "$host" --arg t "$htok" '.[$h] = $t' <<<"$hermes_tokens")
         tenant_middlewares "$tns" hermes
         agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid" oae-edge-hermes
+        # Hermes's Teams plugin listens on its own port (3978), which its Service exposes when on.
+        # The plain strip middleware: Bot Framework's signed token rides in Authorization, which
+        # the Hermes middleware set replaces.
+        if $OCC configuration get "$cfgid" --namespace "$ns" --output json 2>/dev/null |
+            jq -e '.values.channels.msteams | . != null and .enabled != false' >/dev/null; then
+          tenant_middlewares "$tns"
+          teams_route "$tns" "$short" "$sname" 3978 "$host"; teams+="$host"$'\n'
+        else
+          kubectl -n "$tns" delete ingress "oae-edge-$short-teams" --ignore-not-found >/dev/null 2>&1 || true
+        fi
       else
         tenant_middlewares "$tns"
         agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid"
         [ "$people" = "{}" ] || phones+="$host $tns $aid"$'\n'
+        if $OCC configuration get "$cfgid" --namespace "$ns" --output json 2>/dev/null |
+            jq -e '.values.channels.msteams | . != null and .enabled != false' >/dev/null; then
+          teams_route "$tns" "$short" "$sname" "$sport" "$host"; teams+="$host"$'\n'
+        else
+          kubectl -n "$tns" delete ingress "oae-edge-$short-teams" --ignore-not-found >/dev/null 2>&1 || true
+        fi
+        personal_credential "$tns" "$aid" && meta=$(jq -c --arg h "$host" '.[$h].personal = true' <<<"$meta")
       fi
       routes+="$host"$'\n'
       # Agents never shared stay untouched; when the last person goes, their identities leave the
@@ -431,6 +485,10 @@ YAML
       # App device tokens ride in the path (/d/oaed_…): keep those requests out of the access log
       # (Traefik >= 3.1 per-router observability); browser traffic stays logged (e.g. CrowdSec).
       printf '    oae-edge-%s-app:\n      entryPoints: [websecure]\n      rule: "Host(`%s`) && PathPrefix(`/d/`)"\n      priority: 10000\n      observability: { accessLogs: false }\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h"
+      # Teams: Bot Framework's webhook path, logged (no secrets in it).
+      if grep -qxF "$h" <<<"$teams"; then
+        printf '    oae-edge-%s-teams:\n      entryPoints: [websecure]\n      rule: "Host(`%s`) && Path(`/api/messages`)"\n      priority: 10000\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h"
+      fi
     done
   } > "$tmp"
   if cmp -s "$tmp" "$rules/oae-edge.yml"; then rm -f "$tmp"; else install -m 644 "$tmp" "$rules/oae-edge.yml"; rm -f "$tmp"; fi

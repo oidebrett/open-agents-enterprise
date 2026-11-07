@@ -161,6 +161,8 @@ test("Agent creation stores its API key separately, grants exact access, and sav
   const harness = page.getByLabel("Harness", { exact: true });
   assert.deepEqual(await optionValues(harness), [
     { value: "codex", text: "Codex" },
+    // OAE: Claude Code (OpenClaw's claude-cli runtime), offered with Anthropic only.
+    { value: "claude-cli", text: "Claude Code" },
     { value: "openclaw", text: "OpenClaw" },
     // OAE: Hermes as an embedded Agent runtime.
     { value: "hermes", text: "Hermes" },

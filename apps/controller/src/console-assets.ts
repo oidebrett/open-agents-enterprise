@@ -87,6 +87,7 @@ const CONSOLE_ASSETS = new Map([
       "agents/credential-access.mts",
       "agents/secret-picker.mts",
       "agents/credentials.mts",
+      "channels/msteams.mts",
       "channels/slack.mts",
       "channels/shared-ui.mts",
       "channels.mts",
