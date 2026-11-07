@@ -17,6 +17,9 @@ what OAE adds and how the fork is kept close to upstream.
 
 Delivery is split into strikes: [docs/oae/strikes.md](docs/oae/strikes.md).
 
+**Administrators:** start with [docs/oae/admin-guide.md](docs/oae/admin-guide.md) — people and access,
+Agents and harnesses, phones and Hermes Desktop, and channels (Microsoft Teams, Slack).
+
 ## Fork rules
 
 The upstream moves at about 140 commits a day. Every line OAE changes in an
