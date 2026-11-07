@@ -488,8 +488,16 @@ async function appsConnect(req, res) {
   let body;
   if (agent.runtime === "hermes") {
     const url = `https://${host}/d/${token}`;
-    body = `<p>In Hermes Desktop open <b>Settings → Remote gateway</b> and enter this URL. If the app also asks for a session token, enter anything: the edge supplies the real one.</p>
-<code class="secret">${esc(url)}</code>`;
+    // Hermes Desktop puts its session token in the chat WebSocket's ?token=, which the edge cannot
+    // set, so the person enters the Agent's own one. It opens nothing alone: every request still
+    // needs this app token (or a signed-in session) at the edge.
+    const sessionToken = hermesToken(host);
+    body = sessionToken
+      ? `<p>In Hermes Desktop open <b>Settings → Remote gateway</b> and enter:</p>
+<p>Gateway URL:</p><code class="secret">${esc(url)}</code>
+<p>Session token:</p><code class="secret">${esc(sessionToken)}</code>
+<p class="muted">The session token belongs to the Agent and works only together with the URL above, which is yours alone.</p>`
+      : `<p>This Agent is still starting, so Hermes Desktop cannot connect yet. Disconnect this app below and connect again in a few minutes.</p>`;
   } else {
     const url = `wss://${host}/d/${token}`;
     // OpenClaw's setup code: base64url JSON. No bootstrap token: the edge authenticates the app as
