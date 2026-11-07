@@ -96,6 +96,9 @@ calls would work with any token (the edge sets `Authorization: Bearer`), but its
 WebSockets (`/api/ws`, `/api/pty`) carry the token as `?token=`, which Hermes compares with its own
 and the edge cannot set. The token is per Agent and opens nothing alone: without the person's app
 token or a signed-in session the edge answers 401, so disconnecting the app still cuts them off.
+In Desktop it goes in **Settings → Gateways → Saved connections** with **Session token** chosen:
+the Primary gateway form maps Hermes's `auth_required: true` to OAuth and hides the token field
+(Desktop's `authModeFromStatus`). Verified with Hermes Desktop against Hermes v0.23.0, 2026-11-07.
 
 Agents no longer see the person's edge session cookie: after the check, Traefik drops `Cookie`
 before the gateway (as OCE's own Gateway routes do), so one Agent cannot replay it against the

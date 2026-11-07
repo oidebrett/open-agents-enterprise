@@ -524,10 +524,10 @@ async function appsConnect(req, res) {
     // needs this app token (or a signed-in session) at the edge.
     const sessionToken = hermesToken(host);
     body = sessionToken
-      ? `<p>In Hermes Desktop open <b>Settings → Remote gateway</b> and enter:</p>
+      ? `<p>In Hermes Desktop open <b>Settings → Gateways → Saved connections</b>, add a connection, choose <b>Session token</b> (not Sign in), and enter:</p>
 <p>Gateway URL:</p><code class="secret">${esc(url)}</code>
 <p>Session token:</p><code class="secret">${esc(sessionToken)}</code>
-<p class="muted">The session token belongs to the Agent and works only together with the URL above, which is yours alone.</p>`
+<p class="muted">Then switch Desktop to that connection. Use Saved connections, not Primary gateway: the Primary gateway form sees that this Agent requires sign-in and offers only "Sign in with your identity provider". The session token belongs to the Agent and works only together with the URL above, which is yours alone.</p>`
       : `<p>This Agent is still starting, so Hermes Desktop cannot connect yet. Disconnect this app below and connect again in a few minutes.</p>`;
   } else {
     const url = `wss://${host}/d/${token}`;
