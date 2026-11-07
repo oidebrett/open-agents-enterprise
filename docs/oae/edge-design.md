@@ -82,6 +82,12 @@ the gateway URL (`wss://agent-…/d/<token>`); the official apps accept that (no
 edge authenticates the app as the person and new operator devices pair automatically, while node
 access waits for an operator's approval in the Agent's Devices page.
 
+Hermes Desktop gets `https://agent-…/d/<token>` **and the Agent's Hermes session token**. Its REST
+calls would work with any token (the edge sets `Authorization: Bearer`), but its chat and terminal
+WebSockets (`/api/ws`, `/api/pty`) carry the token as `?token=`, which Hermes compares with its own
+and the edge cannot set. The token is per Agent and opens nothing alone: without the person's app
+token or a signed-in session the edge answers 401, so disconnecting the app still cuts them off.
+
 Agents no longer see the person's edge session cookie: after the check, Traefik drops `Cookie`
 before the gateway (as OCE's own Gateway routes do), so one Agent cannot replay it against the
 person's other Agents.
