@@ -1224,7 +1224,8 @@ test("a channel Secret save refused for a missing binding says where to bind it"
   await expectNoText(page, /Fix that setting in the Configuration JSON/);
 });
 
-test("Teams-enabled drafts keep console deploy blocked", async (t) => {
+// OAE: Teams is configured on the Channels card, so the Credentials tab no longer blocks it.
+test("OAE: Teams-enabled drafts are not blocked by the Credentials tab", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Teams credential gate", {
@@ -1249,12 +1250,7 @@ test("Teams-enabled drafts keep console deploy blocked", async (t) => {
   const { page } = await newPage(t, fixture);
   await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "credentials"));
   await page.getByRole("button", { name: "Save authentication source" }).waitFor();
-  await page
-    .getByText(
-      "Microsoft Teams credentials and readiness are operator-managed and cannot be confirmed by this Credentials tab. Use the operator deployment workflow for Teams, or disable Teams through the Configuration API to deploy here.",
-    )
-    .waitFor();
-  assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
+  await expectNoText(page, /Microsoft Teams credentials and readiness are operator-managed/);
   await expectNoText(page, /Slack app token|Slack bot token/);
   assert.equal(await page.getByRole("button", { name: "Save channel Secrets" }).count(), 0);
 });

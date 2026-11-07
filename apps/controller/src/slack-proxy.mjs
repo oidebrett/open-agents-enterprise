@@ -8,8 +8,19 @@ const SHUTDOWN_DRAIN_MS = 2_000;
 // How long a client may take to read what is still queued for it, and close its side, after
 // the proxy has finished writing to it.
 const CLIENT_DRAIN_TIMEOUT_MS = 10_000;
-const ALLOWED_SUFFIXES = [".slack.com", ".slack-edge.com", ".slack-msgs.com"];
-const ALLOWED_HOSTS = new Set(["slack.com", "slack-edge.com", "slack-msgs.com"]);
+// OAE: also Microsoft Teams (OpenClaw msteams on a Dedicated Agent): Bot Framework's token and
+// connector services, Microsoft Entra sign-in and its keys, and Microsoft Graph. docs/oae/teams.md
+const ALLOWED_SUFFIXES = [".slack.com", ".slack-edge.com", ".slack-msgs.com", ".botframework.com"];
+const ALLOWED_HOSTS = new Set([
+  "slack.com",
+  "slack-edge.com",
+  "slack-msgs.com",
+  "login.microsoftonline.com",
+  "login.botframework.com",
+  "api.botframework.com",
+  "smba.trafficmanager.net",
+  "graph.microsoft.com",
+]);
 
 function parsePort(value) {
   if (value === undefined || value === "") {
