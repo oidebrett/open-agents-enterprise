@@ -4436,6 +4436,15 @@ export async function renderAgentDetail(
             `agents/${agent.id}?revision=draft&tab=credentials`,
             namespaceId,
           ),
+          // OAE: the Teams card names the Bot Framework endpoint the edge routes to this Agent.
+          messagingEndpoint: async () => {
+            const { host } = responseFields(
+              await request(
+                `/oae/api/agent?namespaceId=${encodeURIComponent(namespaceId)}&agentId=${encodeURIComponent(agent.id)}`,
+              ),
+            );
+            return typeof host === "string" && host ? `https://${host}/api/messages` : undefined;
+          },
         },
         onSave: async (updatedValues, options = {}) => {
           if (!draft) {

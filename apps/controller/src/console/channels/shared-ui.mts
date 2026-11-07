@@ -60,6 +60,8 @@ export interface ChannelDrawerContext extends SlackDirectoryContext {
   secretsCreateAllowed?: (() => Promise<boolean | undefined>) | undefined;
   // Readable Secrets the caller may not operate, which the token fields refuse (finding 2453).
   secretsOperateDenied?: SecretsOperateDenied | undefined;
+  // OAE: the Agent's Bot Framework messaging endpoint, when the OAE edge can name it.
+  messagingEndpoint?: (() => Promise<string | undefined>) | undefined;
 }
 
 type BindingUpdate = { secretBindings?: SecretBindings; changedSecrets?: SecretMetadata[] };
@@ -121,6 +123,8 @@ export interface ChannelProvider<Config extends ChannelValues = ChannelValues> {
   updatedValues(values: ChannelValues, body: HTMLFormElement): ChannelValues;
   updatedSecretBindings(context: ChannelDrawerContext): BindingUpdate | undefined;
   appendFields(body: HTMLFormElement, config: Config, context: ChannelDrawerContext): void;
+  // OAE: the channel also runs on Embedded Agents (Microsoft Teams; docs/oae/teams.md).
+  embedded?: boolean;
 }
 
 export const isRecord = (value: unknown): value is ChannelValues =>
@@ -249,7 +253,8 @@ function renderCard(section: HTMLElement, state: ChannelState, provider: Channel
   const status = statusOf(providerConfig(state.values, provider.id));
   const support = provider.support(state.values);
   const blockReason = pluginBlockReason(state.values, provider);
-  const disabledByMode = state.executionMode === "embedded" && !status.enabled;
+  const disabledByMode =
+    state.executionMode === "embedded" && !status.enabled && provider.embedded !== true;
   const canOpen =
     !state.readOnly &&
     !state.outcomeUnknown &&

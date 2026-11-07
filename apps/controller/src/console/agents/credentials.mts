@@ -204,10 +204,10 @@ export { secretBinding, secretIdForBinding };
 
 type ChannelBindings = Pick<Configuration, "secretBindings">;
 
-export function channelCredentialBlockReason(values: unknown) {
-  return channelEnabled(values, "msteams")
-    ? "Microsoft Teams credentials and readiness are operator-managed and cannot be confirmed by this Credentials tab. Use the operator deployment workflow for Teams, or disable Teams through the Configuration API to deploy here."
-    : null;
+// OAE: Teams is configured on the Channels card (its app password is a Secret binding there), so
+// it no longer blocks deployment from this tab (docs/oae/teams.md).
+export function channelCredentialBlockReason(_values: unknown): string | null {
+  return null;
 }
 
 export function missingChannelCredentialGroups(values: unknown, configuration: ChannelBindings) {

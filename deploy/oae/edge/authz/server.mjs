@@ -655,7 +655,8 @@ async function consoleApi(req, res, url) {
     if (!INSTALLATION_ID || !/^ns_[0-9a-f-]{36}$/.test(namespaceId) || !/^agt_[0-9a-f-]{36}$/.test(agentId)) {
       return fail(400, "Unknown Agent.");
     }
-    return json(200, { data: { personal: agentsMeta()[agentHost(namespaceId, agentId)]?.personal === true } });
+    const host = agentHost(namespaceId, agentId);
+    return json(200, { data: { host, personal: agentsMeta()[host]?.personal === true } });
   }
   if (route === "GET /oae/api/people") {
     const all = await people.load({ fresh: true });
