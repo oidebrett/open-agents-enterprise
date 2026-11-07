@@ -27,11 +27,17 @@ import { normalizeOpenAiBaseUrl } from "../../openai-endpoint.ts";
 
 /** Harness id selected by `agentRuntime.id: "hermes"`. */
 export const HERMES_HARNESS_ID = "hermes";
-/** The official Hermes image, pinned by digest (multi-arch). */
+/**
+ * The official Hermes image plus the Microsoft Teams SDK (deploy/oae/runtime-hermes), pinned by
+ * digest (multi-arch).
+ */
 export const HERMES_IMAGE =
   process.env.OAE_HERMES_IMAGE ??
-  "docker.io/nousresearch/hermes-agent@sha256:adb7890916de63245523492be8f68f9d2095fecbec4e2a6dab7960381f0fc002";
+  "docker.io/oideibrett/open-agents-enterprise-hermes@sha256:936a0d721da2ccd17949ca5db5cadae0b96fe48b39bf04b721a1a4fe5c9ffa83";
 const DASHBOARD_PORT = 9119;
+// Hermes's Teams platform plugin serves Bot Framework's webhook (/api/messages) on its own port.
+const TEAMS_PORT = 3978;
+const TEAMS_PASSWORD_BINDING = "MSTEAMS_APP_PASSWORD";
 const MANAGER = "oae-hermes";
 const HERMES_UID = 10000; // the image's "hermes" user
 const CONTAINER_SECURITY = {
@@ -127,6 +133,47 @@ export function hermesModelSettings(configuration: Readonly<OpenClawConfiguratio
   );
 }
 
+/**
+ * Microsoft Teams for Hermes, from the same `channels.msteams` settings the console's Teams card
+ * writes for OpenClaw (docs/oae/teams.md); undefined when Teams is off.
+ */
+export function hermesTeams(
+  configuration: Readonly<OpenClawConfigurationDocument>,
+):
+  | { readonly appId: string; readonly tenantId: string; readonly allowedUsers?: string }
+  | undefined {
+  const channels = configuration.channels as Record<string, unknown> | undefined;
+  const teams = channels?.msteams as
+    | {
+        enabled?: unknown;
+        appId?: unknown;
+        tenantId?: unknown;
+        dmPolicy?: unknown;
+        allowFrom?: unknown;
+      }
+    | undefined;
+  if (teams === undefined || teams.enabled === false) {
+    return undefined;
+  }
+  const guid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (typeof teams.appId !== "string" || !guid.test(teams.appId)) {
+    throw new HermesConfigurationError("Hermes Teams needs channels.msteams.appId (a GUID).");
+  }
+  if (typeof teams.tenantId !== "string" || !guid.test(teams.tenantId)) {
+    throw new HermesConfigurationError("Hermes Teams needs channels.msteams.tenantId (a GUID).");
+  }
+  const allowFrom = Array.isArray(teams.allowFrom)
+    ? teams.allowFrom.filter((id): id is string => typeof id === "string")
+    : [];
+  // "open" (or allowFrom ["*"]) admits anyone in the bot's tenant; otherwise the listed users.
+  const open = teams.dmPolicy === "open" || allowFrom.includes("*");
+  return {
+    appId: teams.appId,
+    tenantId: teams.tenantId,
+    ...(open ? {} : { allowedUsers: allowFrom.join(",") }),
+  };
+}
+
 function hermesConfigYaml(
   settings: ReturnType<typeof hermesModelSettings>,
   publicUrl?: string,
@@ -213,6 +260,50 @@ class HermesWorkloads {
     return value; // base64, as Secret data
   }
 
+  /** Hermes's TEAMS_* settings; the app password from its Secret binding (uid-checked). */
+  private async teamsEnvironment(
+    revision: AgentRevision,
+    context: ComputeRevisionContext | undefined,
+    teams: NonNullable<ReturnType<typeof hermesTeams>>,
+  ): Promise<Record<string, string>> {
+    const projection = context?.secretEnvironment?.find(
+      (each) => each.name === TEAMS_PASSWORD_BINDING,
+    );
+    if (!projection) {
+      throw new HermesConfigurationError(
+        `Hermes Teams needs the ${TEAMS_PASSWORD_BINDING} Secret binding (the Azure Bot's client secret).`,
+      );
+    }
+    const source = await this.driver.controlNamespace(revision.namespaceId);
+    if (projection.backendRef.namespaceName !== source.name) {
+      throw new HermesConfigurationError("The Teams app password Secret is in another namespace.");
+    }
+    const control = await this.driver.clients(source.plane);
+    const secret = await control.core.readNamespacedSecret({
+      name: projection.backendRef.name,
+      namespace: source.name,
+    });
+    if (secret.metadata?.deletionTimestamp || secret.metadata?.uid !== projection.backendRef.uid) {
+      throw new HermesConfigurationError(
+        "The Teams app password Secret changed identity or is being deleted.",
+      );
+    }
+    const password = secret.data?.[projection.backendRef.key];
+    if (!password) {
+      throw new HermesConfigurationError("The Teams app password Secret has no value.");
+    }
+    const b64 = (value: string) => Buffer.from(value).toString("base64");
+    return {
+      TEAMS_CLIENT_ID: b64(teams.appId),
+      TEAMS_TENANT_ID: b64(teams.tenantId),
+      TEAMS_CLIENT_SECRET: password, // base64, as Secret data
+      TEAMS_PORT: b64(String(TEAMS_PORT)),
+      ...(teams.allowedUsers === undefined
+        ? { TEAMS_ALLOW_ALL_USERS: b64("true") }
+        : { TEAMS_ALLOWED_USERS: b64(teams.allowedUsers) }),
+    };
+  }
+
   async prepare(
     revision: AgentRevision,
     context?: ComputeRevisionContext,
@@ -223,6 +314,7 @@ class HermesWorkloads {
       revisionId: revision.id,
     };
     const settings = hermesModelSettings(revision.configuration);
+    const teams = hermesTeams(revision.configuration);
     const { namespace, clients } = await this.target(revision);
     const n = names(revision.agentId);
     const labels = {
@@ -260,6 +352,7 @@ class HermesWorkloads {
           ? { OPENAI_BASE_URL: Buffer.from(settings.baseUrl).toString("base64") }
           : {}),
         HERMES_DASHBOARD_SESSION_TOKEN: token,
+        ...(teams ? await this.teamsEnvironment(revision, context, teams) : {}),
       },
     };
     await (existing
@@ -356,7 +449,10 @@ class HermesWorkloads {
                   { name: "S6_YES_I_WANT_A_WORLD_WRITABLE_RUN_BECAUSE_KUBERNETES", value: "1" },
                 ],
                 envFrom: [{ secretRef: { name: n.env } }],
-                ports: [{ name: "http", containerPort: DASHBOARD_PORT }],
+                ports: [
+                  { name: "http", containerPort: DASHBOARD_PORT },
+                  ...(teams ? [{ name: "teams", containerPort: TEAMS_PORT }] : []),
+                ],
                 readinessProbe: {
                   httpGet: { path: "/api/status", port: "http" },
                   periodSeconds: 10,
@@ -385,7 +481,13 @@ class HermesWorkloads {
       apiVersion: "v1",
       kind: "Service",
       metadata: meta(n.base),
-      spec: { selector, ports: [{ name: "http", port: DASHBOARD_PORT, targetPort: "http" }] },
+      spec: {
+        selector,
+        ports: [
+          { name: "http", port: DASHBOARD_PORT, targetPort: "http" },
+          ...(teams ? [{ name: "teams", port: TEAMS_PORT, targetPort: "teams" }] : []),
+        ],
+      },
     });
     await this.apply(clients, {
       apiVersion: "networking.k8s.io/v1",
@@ -405,7 +507,10 @@ class HermesWorkloads {
                 podSelector: { matchLabels: { "app.kubernetes.io/name": "traefik" } },
               },
             ],
-            ports: [{ protocol: "TCP", port: DASHBOARD_PORT }],
+            ports: [
+              { protocol: "TCP", port: DASHBOARD_PORT },
+              ...(teams ? [{ protocol: "TCP", port: TEAMS_PORT }] : []),
+            ],
           },
         ],
         // DNS, and HTTPS anywhere public (model API, channels).

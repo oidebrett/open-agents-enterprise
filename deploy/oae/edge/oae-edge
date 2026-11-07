@@ -254,7 +254,8 @@ YAML
 # served on the gateway's own port. Microsoft cannot sign in, so that one exact path skips the
 # edge's sign-in; the plugin validates every request's Microsoft-signed token, and the identity
 # headers are still stripped. Everything else on the host stays behind SSO. docs/oae/teams.md
-teams_route() {  # teams_route TENANT_NS SHORT SERVICE PORT HOST
+teams_route() {  # teams_route TENANT_NS SHORT SERVICE PORT HOST [MIDDLEWARE_PREFIX]
+  local mw=${6:-oae-edge}
   kubectl apply -f - >/dev/null <<YAML
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -263,7 +264,7 @@ metadata:
   namespace: $1
   labels: { app.kubernetes.io/managed-by: oae-edge, oae.dev/channel: msteams }
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: "$1-oae-edge-strip@kubernetescrd,$1-oae-edge-nocookie@kubernetescrd"
+    traefik.ingress.kubernetes.io/router.middlewares: "$1-$mw-strip@kubernetescrd,$1-oae-edge-nocookie@kubernetescrd"
 spec:
   ingressClassName: traefik
   rules:
@@ -381,6 +382,16 @@ cmd_sync() {
         [ -n "$htok" ] && hermes_tokens=$(jq -c --arg h "$host" --arg t "$htok" '.[$h] = $t' <<<"$hermes_tokens")
         tenant_middlewares "$tns" hermes
         agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid" oae-edge-hermes
+        # Hermes's Teams plugin listens on its own port (3978), which its Service exposes when on.
+        # The plain strip middleware: Bot Framework's signed token rides in Authorization, which
+        # the Hermes middleware set replaces.
+        if $OCC configuration get "$cfgid" --namespace "$ns" --output json 2>/dev/null |
+            jq -e '.values.channels.msteams | . != null and .enabled != false' >/dev/null; then
+          tenant_middlewares "$tns"
+          teams_route "$tns" "$short" "$sname" 3978 "$host"; teams+="$host"$'\n'
+        else
+          kubectl -n "$tns" delete ingress "oae-edge-$short-teams" --ignore-not-found >/dev/null 2>&1 || true
+        fi
       else
         tenant_middlewares "$tns"
         agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid"
