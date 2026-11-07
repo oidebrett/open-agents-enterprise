@@ -108,6 +108,12 @@ export function renderOaePeople(
   );
   const give = element("button", { type: "submit" }, "Give access");
   const appsHint = element("p", { className: "hint" });
+  // Shown when the Agent runs on a person's Claude subscription token.
+  const personalNote = element(
+    "p",
+    { className: "hint", hidden: true },
+    "This Agent runs on a personal Claude subscription token, so only one person may use it: the subscriber. With more than one person, the edge refuses everyone.",
+  );
   const form = element(
     "form",
     { className: "agent-access-form" },
@@ -133,6 +139,7 @@ export function renderOaePeople(
       "People sign in with SSO and open this Agent with Open Agent. Changes here are made with your own session and recorded in OCE’s audit log.",
     ),
     appsHint,
+    personalNote,
     feedback,
     rows,
     form,
@@ -141,6 +148,7 @@ export function renderOaePeople(
   const state = {
     pending: false,
     directory: true,
+    personal: false,
     roles: [] as Role[],
     bindings: [] as Binding[],
     people: [] as Person[],
@@ -166,6 +174,7 @@ export function renderOaePeople(
 
   function render() {
     give.disabled = state.pending || !state.directory;
+    personalNote.hidden = !state.personal;
     const roleName = new Map(state.roles.map((role) => [role.id, role.name]));
     const levels = new Map<string, Level>();
     for (const binding of state.bindings) {
@@ -218,11 +227,15 @@ export function renderOaePeople(
   }
 
   async function load() {
-    const [roles, bindings, people] = await Promise.all([
+    const [roles, bindings, people, agentState] = await Promise.all([
       context.request(`${iam}/roles`),
       context.request(`${iam}/access-bindings`),
       context.request("/oae/api/people"),
+      context.request(
+        `/oae/api/agent?namespaceId=${encodeURIComponent(context.namespaceId)}&agentId=${encodeURIComponent(agent.id)}`,
+      ),
     ]);
+    state.personal = responseFields(agentState).personal === true;
     state.roles = list(roles).map((role) => ({ id: text(role.id), name: text(role.name) }));
     state.bindings = list(bindings).map((binding) => ({
       id: text(binding.id),
@@ -372,6 +385,23 @@ export function renderOaePeople(
     }
     const principalId = await account(found, address);
     await load();
+    // A personal Agent (a Claude subscription token) is for its subscriber alone.
+    const others = new Set(
+      state.bindings
+        .filter(
+          (binding) =>
+            binding.subjectKind === "identity" &&
+            binding.resourceKind === "agent" &&
+            binding.resourceId === agent.id &&
+            binding.subjectId !== principalId,
+        )
+        .map((binding) => binding.subjectId),
+    );
+    if (state.personal && others.size > 0) {
+      throw new PanelError(
+        `${agent.name} runs on a personal Claude subscription token, so only one person may use it. Remove the person who has access first, or give the Agent an Anthropic API key.`,
+      );
+    }
     const roleId = await ensureRole(granted);
     // A change of level replaces the other OAE Role's bindings on this Agent.
     const other = state.roles.find(

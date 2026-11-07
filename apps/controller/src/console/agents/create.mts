@@ -3084,6 +3084,10 @@ function renderAgentForm(
       apiKey.placeholder = "";
       credentialHelp.textContent =
         "Use an API key the endpoint accepts as a bearer token. It is sent only to the Base URL's host.";
+    } else if (harness.value === CLAUDE_CODE) {
+      apiKey.placeholder = "sk-ant-…";
+      credentialHelp.textContent =
+        "Use an Anthropic API key. For an Agent only you will use, a Claude subscription token from `claude setup-token` (sk-ant-oat…) also works: it uses your personal Claude plan, so the Agent is limited to one person.";
     } else {
       apiKey.placeholder = "sk-ant-…";
       credentialHelp.textContent = "Use an Anthropic API key for embedded OpenClaw.";

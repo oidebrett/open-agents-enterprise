@@ -289,10 +289,20 @@ async function oidcConfig() {
 }
 
 // --- Agent requests (forwardAuth) -------------------------------------------------------------
+// An Agent on a person's Claude subscription token (the sync marks it `personal`) is for one person:
+// with more than one granted, the edge refuses everyone until an administrator removes the others.
+function personalShared(host) {
+  return agentsMeta()[host]?.personal === true && Object.keys(grants()[host] ?? {}).length > 1;
+}
+
 function grant(res, host, sub, via) {
   const scopes = SCOPES[grants()[host]?.[sub]];
   if (!scopes) {
     log("check.denied", { host, sub, via });
+    return null;
+  }
+  if (personalShared(host)) {
+    log("check.denied", { host, sub, via, reason: "personal Agent granted to more than one person" });
     return null;
   }
   const headers = { "x-occ-identity": `${IDENTITY_PREFIX}:${sub}`, "x-openclaw-scopes": scopes };
@@ -389,14 +399,16 @@ async function callback(req, res, url) {
 // GET /open/<namespace>/<agent>: the console's "Open Agent" link. Redirects to that Agent's host,
 // which signs the person in and checks their grant as any visit does. Only ever redirects to a host
 // it computes under the agents domain; IDs are OCE's own formats.
+// An Agent's host, as the sync computes it: agent-<sha256(installation\0namespace\0agent)[:32]>.
+function agentHost(namespaceId, agentId) {
+  const hash = createHash("sha256").update(`${INSTALLATION_ID}\0${namespaceId}\0${agentId}`).digest("hex").slice(0, 32);
+  return `agent-${hash}.${AGENTS_DOMAIN}`;
+}
+
 function open(res, url) {
   const match = /^\/open\/(ns_[0-9a-f-]{36})\/(agt_[0-9a-f-]{36})$/.exec(url.pathname);
   if (!INSTALLATION_ID || !match) return send(res, 404, {}, "not found");
-  const hash = createHash("sha256")
-    .update(`${INSTALLATION_ID}\0${match[1]}\0${match[2]}`)
-    .digest("hex")
-    .slice(0, 32);
-  return send(res, 302, { location: `https://agent-${hash}.${AGENTS_DOMAIN}/`, "cache-control": "no-store" });
+  return send(res, 302, { location: `https://${agentHost(match[1], match[2])}/`, "cache-control": "no-store" });
 }
 
 function logout(req, res) {
@@ -635,6 +647,15 @@ async function consoleApi(req, res, url) {
   const route = `${req.method} ${url.pathname}`;
   if (route === "GET /oae/api/status") {
     return json(200, { data: { appsUrl: APPS_URL, directory: Boolean(DIRECTORY_CLIENT_ID && DIRECTORY_BASE) } });
+  }
+  // Whether an Agent runs on a person's Claude subscription token (one person only).
+  if (route === "GET /oae/api/agent") {
+    const namespaceId = String(url.searchParams.get("namespaceId") ?? "");
+    const agentId = String(url.searchParams.get("agentId") ?? "");
+    if (!INSTALLATION_ID || !/^ns_[0-9a-f-]{36}$/.test(namespaceId) || !/^agt_[0-9a-f-]{36}$/.test(agentId)) {
+      return fail(400, "Unknown Agent.");
+    }
+    return json(200, { data: { personal: agentsMeta()[agentHost(namespaceId, agentId)]?.personal === true } });
   }
   if (route === "GET /oae/api/people") {
     const all = await people.load({ fresh: true });

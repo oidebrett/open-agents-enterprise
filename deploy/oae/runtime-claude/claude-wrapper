@@ -1,0 +1,16 @@
+#!/bin/sh
+# OAE: `claude` as OpenClaw starts it. OpenClaw removes ANTHROPIC_API_KEY and
+# CLAUDE_CODE_OAUTH_TOKEN from Claude Code's environment (Claude CLI keeps native-login semantics),
+# so this passes on the Agent's own credential: the one OCE gave the gateway container as
+# ANTHROPIC_API_KEY (PID 1's environment, same user). A Claude subscription setup token
+# (sk-ant-oat…) goes to Claude Code as CLAUDE_CODE_OAUTH_TOKEN, an API key as ANTHROPIC_API_KEY.
+# A credential already in the environment wins. docs/oae/claude-harness.md
+if [ -z "${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  credential=$(tr '\0' '\n' < /proc/1/environ 2>/dev/null | sed -n 's/^ANTHROPIC_API_KEY=//p' | head -n 1)
+  case "$credential" in
+    sk-ant-oat*) CLAUDE_CODE_OAUTH_TOKEN=$credential; export CLAUDE_CODE_OAUTH_TOKEN ;;
+    ?*) ANTHROPIC_API_KEY=$credential; export ANTHROPIC_API_KEY ;;
+  esac
+  unset credential
+fi
+exec /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe "$@"

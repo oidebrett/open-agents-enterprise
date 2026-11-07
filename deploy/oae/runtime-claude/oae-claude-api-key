@@ -1,6 +1,0 @@
-#!/bin/sh
-# Claude Code apiKeyHelper (OAE). OpenClaw starts `claude` with ANTHROPIC_API_KEY removed from its
-# environment (Claude CLI keeps native-login semantics), so Claude Code reads the Agent's key here:
-# the one OCE already gave the gateway container (PID 1's environment, same user). Prints nothing
-# when the container has no key.
-tr '\0' '\n' < /proc/1/environ 2>/dev/null | sed -n 's/^ANTHROPIC_API_KEY=//p' | head -n 1

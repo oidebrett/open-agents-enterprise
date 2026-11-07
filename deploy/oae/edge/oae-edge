@@ -273,6 +273,20 @@ gateway_identities() {  # gateway_identities NS AGENT_ID CONFIG_ID ORIGIN PEOPLE
   return 0
 }
 
+# Whether an OpenClaw Agent's Anthropic credential is a Claude subscription setup token (sk-ant-oat…)
+# rather than an API key: such an Agent is personal, one person only (the edge enforces it). Reads
+# only the value's prefix from the gateway's own Secret; never prints it.
+personal_credential() {  # personal_credential NAMESPACE AGENT_ID
+  local ref
+  ref=$(kubectl -n "$1" get deploy -l "openclaw.dev/agent=$2" -o json 2>/dev/null | jq -c '
+    [.items[].spec.template.spec.containers[] | select(.name == "gateway") | .env[]?
+     | select(.name == "ANTHROPIC_API_KEY") | .valueFrom.secretKeyRef // empty][0] // empty')
+  [ -n "$ref" ] || return 1
+  kubectl -n "$1" get secret "$(jq -r .name <<<"$ref")" -o json 2>/dev/null |
+    jq -r --arg k "$(jq -r .key <<<"$ref")" '.data[$k] // empty' | base64 -d 2>/dev/null | head -c 10 |
+    grep -q '^sk-ant-oat'
+}
+
 # One unused OpenClaw bootstrap token per shared OpenClaw Agent, for the edge's /apps to put in
 # a person's phone setup code. `openclaw qr --limited`: node + operator without operator.admin;
 # minting needs operator.admin on the gateway, which no person holds (OCE), so the platform mints.
@@ -349,6 +363,7 @@ cmd_sync() {
         tenant_middlewares "$tns"
         agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid"
         [ "$people" = "{}" ] || phones+="$host $tns $aid"$'\n'
+        personal_credential "$tns" "$aid" && meta=$(jq -c --arg h "$host" '.[$h].personal = true' <<<"$meta")
       fi
       routes+="$host"$'\n'
       # Agents never shared stay untouched; when the last person goes, their identities leave the
