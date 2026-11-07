@@ -51,6 +51,47 @@ Agent's next deploy. OCE's own caveat stands: withdrawal does not cancel work al
 | `oae-edge-sync` | timer on the host: ACL ConfigMap, per-Agent Ingress + NetworkPolicy, Configuration merge, host Traefik routes | `deploy/oae/edge/` |
 | Keycloak client `oae-edge` | per realm, redirect `https://auth.agents.<host>/oauth2/callback` | `central-sso/oae-realm.sh` |
 
+## Access without a shell (hardening, branch `feat/oae-hardening`)
+
+OCE's model is that people change things through its API with their own identity, and that
+nobody needs a shell in an Agent or on the server for day-to-day work. OAE's first edge needed
+root on the server for three things; each now follows that model.
+
+| Was | Now | Identity OCE sees |
+|---|---|---|
+| `oae-user add/grant/revoke` as root, writing under the **recovery administrator's** session | Console: Agent → Access → **People**. The browser makes every OCE call (account, SSO identity, Roles, AccessBindings) with the administrator's **own** session | The administrator who clicked |
+| `oae-user device add` (root) and `kubectl exec … openclaw qr` | `https://auth.agents.<host>/apps`: the signed-in **person** connects their own OpenClaw mobile app or Hermes Desktop | The person (edge log) |
+| `oae-user device approve-node` via `kubectl exec` into the gateway Pod | Operators approve in the Agent's own **Devices** page (`operator.pairing` in the operator grant; never `operator.admin`) | The operator (gateway) |
+| Root-owned `oae-users.json` / `oae-devices.json` | The edge's own Secrets `oae-edge-people` / `oae-edge-devices`; its ServiceAccount may `get`/`update` only those two | — |
+
+The edge's console API (`/oae/api/`, routed on the console host so the administrator's session
+cookie comes with it):
+
+- Every call first asks OCE whether the caller is a human Installation administrator
+  (`GET /api/auth/session`, then `GET /api/auth/accounts/<self>`, which OCE answers only for one).
+  Writes also need `Origin` = the console and a JSON body.
+- `GET /oae/api/directory?email=` looks the person up in Keycloak with a separate client
+  (`oae-edge-directory`) that can only read users (`realm-management` `view-users`; a write is 403).
+- `POST /oae/api/people {userId}` records which SSO subject an OCE Principal is, read from OCE's own
+  account record (with the administrator's session) and the directory, never from the request.
+
+App tokens (`/apps`): created by the person for one Agent they are granted, bound to that Agent's
+host, shown once (only the SHA-256 is kept), refused when the grant goes (every request is checked
+against the ACL), and listed and disconnected by the person. The OpenClaw setup code carries only
+the gateway URL (`wss://agent-…/d/<token>`); the official apps accept that (no bootstrap token): the
+edge authenticates the app as the person and new operator devices pair automatically, while node
+access waits for an operator's approval in the Agent's Devices page.
+
+Agents no longer see the person's edge session cookie: after the check, Traefik drops `Cookie`
+before the gateway (as OCE's own Gateway routes do), so one Agent cannot replay it against the
+person's other Agents.
+
+What still runs as root is platform automation, not a person: `oae-edge install`, and the
+`oae-edge sync` timer, which reads IAM with the installation's service key (OCE lets only an
+Installation administrator list AccessBindings; a read-only IAM grant would let this narrow) and
+reads each Hermes Agent's dashboard token Secret. `oae-user` remains as break-glass for the
+platform operator when SSO is down, and says so.
+
 ## Status (2026-11-06)
 
 - ✅ Upstream #3049 cherry-picked onto `oae` (branch `strike/2-human-ingress`, clean); upstream's

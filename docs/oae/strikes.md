@@ -238,6 +238,20 @@ Upstream candidate: generic, names no model vendor, adds no server contract.
   only way Hermes sends that key to another host. The vendor-specific Hermes mapping is gone.
 - The vendor-specific 5a `oae-hermes` tool is removed; OAE names no model vendor.
 
+## 🟨 Hardening — access without a shell (branch `feat/oae-hardening`)
+
+Same capabilities as before, in OCE's security pattern (details:
+[`edge-design.md` § Access without a shell](edge-design.md#access-without-a-shell-hardening-branch-feat-oae-hardening)):
+
+- Console **People** panel (Agent → Access): give/remove access by email, made with the
+  administrator's own OCE session (audited as them), replacing `oae-user` on the server.
+- **`/apps`** on the edge: each person connects their own OpenClaw mobile app (QR / setup code) or
+  Hermes Desktop; tokens bound to one Agent; replaces `oae-user device add` and `kubectl exec`.
+- Node approvals in the Agent's own Devices page (`operator.pairing` for operators).
+- The edge keeps its records in two Secrets only it may write; Agents no longer receive the edge
+  session cookie; Keycloak lookups through a read-only directory client.
+- `oae-user` is break-glass only.
+
 ## ⬜ Strike 6 — Hermes on the Codex and Claude harness Pods
 
 - Upstream PR to Hermes: WebSocket transport for its Codex app-server client, so
