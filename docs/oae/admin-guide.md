@@ -152,6 +152,9 @@ choice. Pick **Keycloak** and fill in:
 
 The form checks these before creating the server; the secrets are stored write-only.
 
+**Step by step** (installing Keycloak, the realm and clients by script or by hand, every form
+value, users, Entra ID): [`deploy/oae/central-sso/README.md`](../../deploy/oae/central-sso/README.md).
+
 **Creating the realm and clients.** On the machine that runs Keycloak (Docker container
 `oae-sso-keycloak-1`, admin login in `~/.config/oae-sso/keycloak.env`), run
 `deploy/oae/central-sso/oae-realm.sh <realm> https://<console host>`. It creates the realm and the
