@@ -150,7 +150,8 @@ export function renderOaePeople(
     return (
       binding.subjectKind === "identity" &&
       ((binding.resourceKind === "agent" && binding.resourceId === agent.id) ||
-        (binding.resourceKind === "configuration" && binding.resourceId === agent.configurationId) ||
+        (binding.resourceKind === "configuration" &&
+          binding.resourceId === agent.configurationId) ||
         (binding.resourceKind === "agent_revision" &&
           agent.activeRevisionId !== undefined &&
           binding.resourceId === agent.activeRevisionId))
@@ -162,7 +163,11 @@ export function renderOaePeople(
     const roleName = new Map(state.roles.map((role) => [role.id, role.name]));
     const levels = new Map<string, Level>();
     for (const binding of state.bindings) {
-      if (binding.subjectKind !== "identity" || binding.resourceKind !== "agent" || binding.resourceId !== agent.id) {
+      if (
+        binding.subjectKind !== "identity" ||
+        binding.resourceKind !== "agent" ||
+        binding.resourceId !== agent.id
+      ) {
         continue;
       }
       const operator = roleName.get(binding.roleId) === ROLE_OPERATOR;
@@ -200,7 +205,9 @@ export function renderOaePeople(
               }),
             ),
           )
-        : [element("p", { className: "muted" }, "Nobody has been given access to this Agent yet.")]),
+        : [
+            element("p", { className: "muted" }, "Nobody has been given access to this Agent yet."),
+          ]),
     );
   }
 
@@ -265,7 +272,12 @@ export function renderOaePeople(
     return text(created.id);
   }
 
-  async function bind(principalId: string, roleId: string, resourceKind: string, resourceId: string) {
+  async function bind(
+    principalId: string,
+    roleId: string,
+    resourceKind: string,
+    resourceId: string,
+  ) {
     const exists = state.bindings.some(
       (binding) =>
         binding.subjectId === principalId &&
@@ -315,8 +327,12 @@ export function renderOaePeople(
         throw error;
       }
     }
-    const current = responseFields(await context.request(`/api/auth/accounts/${encodeURIComponent(userId)}`));
-    const methods = Array.isArray(current.methods) ? current.methods.map((m) => responseFields(m)) : [];
+    const current = responseFields(
+      await context.request(`/api/auth/accounts/${encodeURIComponent(userId)}`),
+    );
+    const methods = Array.isArray(current.methods)
+      ? current.methods.map((m) => responseFields(m))
+      : [];
     const sso = methods.filter((m) => text(m.providerId).startsWith("oidc:"));
     if (!sso.some((m) => m.subject === found.subject)) {
       if (sso.length) {
@@ -347,7 +363,9 @@ export function renderOaePeople(
     await load();
     const roleId = await ensureRole(granted);
     // A change of level replaces the other OAE Role's bindings on this Agent.
-    const other = state.roles.find((role) => role.name === ROLE_NAMES[granted === "user" ? "operator" : "user"]);
+    const other = state.roles.find(
+      (role) => role.name === ROLE_NAMES[granted === "user" ? "operator" : "user"],
+    );
     if (other) {
       await unbind(principalId, (binding) => binding.roleId !== other.id);
     }
@@ -364,7 +382,8 @@ export function renderOaePeople(
 
   async function revoke(principalId: string) {
     await unbind(principalId);
-    const who = state.people.find((person) => person.principalId === principalId)?.email ?? principalId;
+    const who =
+      state.people.find((person) => person.principalId === principalId)?.email ?? principalId;
     return `${who} no longer has access to ${agent.name}. Their open sessions and apps are refused within a minute.`;
   }
 
@@ -394,12 +413,19 @@ export function renderOaePeople(
       }
       appsHint.replaceChildren(
         "People connect the OpenClaw mobile app or Hermes Desktop themselves at ",
-        element("a", { href: text(status.appsUrl), target: "_blank", rel: "noopener noreferrer" }, text(status.appsUrl)),
+        element(
+          "a",
+          { href: text(status.appsUrl), target: "_blank", rel: "noopener noreferrer" },
+          text(status.appsUrl),
+        ),
         ".",
       );
       if (status.directory !== true) {
         state.directory = false;
-        say("No SSO directory is configured for lookups, so people cannot be added here yet.", "error");
+        say(
+          "No SSO directory is configured for lookups, so people cannot be added here yet.",
+          "error",
+        );
       }
       await load();
       section.hidden = false;
