@@ -39,10 +39,20 @@ service are against Anthropic's consumer terms).
 
 ## Security notes
 
-- **Embedded**: Claude Code and its built-in tools (shell, file edit) run inside the gateway Pod,
-  next to the gateway's state and the Agent's API key. That is the same exposure as OpenClaw's
-  own `exec` tool in an Embedded Agent; a Dedicated Claude Code Pod, like Codex's, would separate
-  them (about 40 OCE files plus a protocol bridge; not built).
+- **Tools**: OpenClaw turns Claude Code's own tools off. Claude Code sees only `ToolSearch` and
+  OpenClaw's tools over MCP (`mcp__openclaw__exec`, `…__edit`, `…__browser`, …), so every action
+  goes through OpenClaw's tools and their policy. Asked to use its built-in `Bash`, it has none
+  (verified 2026-11-07).
+- **Embedded**: the `claude` process runs inside the gateway Pod, next to the gateway's state and
+  the Agent's API key, as any Embedded OpenClaw Agent's loop does. A Dedicated Claude Code Pod,
+  like Codex's, would separate them (about 40 OCE files plus a protocol bridge; not built).
+
+## Telling Claude Code from OpenClaw's own loop
+
+Ask: "List the exact names of every tool you can call, comma-separated, nothing else." Claude
+Code answers `ToolSearch, mcp__openclaw__…`; OpenClaw's own loop answers plain names (`exec`,
+`edit`, …). The names come from the tool definitions the model receives. Definitive: the gateway
+log's `cli turn: provider=claude-cli` for each turn.
 - The API key stays per Agent (its own OCE Secret, operate-bound to the Agent's service
   principal). Use a workspace key with a spend limit.
 
