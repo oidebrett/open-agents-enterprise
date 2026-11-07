@@ -7,7 +7,7 @@
 #
 #   oae-user add    EMAIL OIDC_SUBJECT          account + attached SSO identity (Keycloak: user ID)
 #   oae-user grant  EMAIL AGENT [user|operator] see the Agent (user) or also edit/deploy/operate it;
-#                                               AGENT may be a Hermes agent (oae-hermes list)
+#                                               AGENT may be an OpenClaw or a Hermes Agent
 #   oae-user revoke EMAIL AGENT                 remove that person's bindings on the Agent
 #   oae-user show   EMAIL                       sign-in methods and grants
 #   oae-user list                               people this tool added

@@ -89,9 +89,9 @@ const names = (agentId: string) => {
 
 /** Model settings for Hermes from the Agent's OCE Configuration (its primary model). */
 export function hermesModelSettings(configuration: Readonly<OpenClawConfigurationDocument>): {
-  readonly provider: "nvidia" | "anthropic" | "openai-api" | "custom";
+  readonly provider: "anthropic" | "openai-api" | "custom";
   readonly model: string;
-  readonly keyEnvironment: "NVIDIA_API_KEY" | "ANTHROPIC_API_KEY" | "OPENAI_API_KEY";
+  readonly keyEnvironment: "ANTHROPIC_API_KEY" | "OPENAI_API_KEY";
   /** An OpenAI-compatible endpoint (provider "custom"). */
   readonly baseUrl?: string;
 } {
@@ -112,14 +112,11 @@ export function hermesModelSettings(configuration: Readonly<OpenClawConfiguratio
   if (providerId === "anthropic") {
     return { provider: "anthropic", model, keyEnvironment: "ANTHROPIC_API_KEY" };
   }
-  if (/^https:\/\/integrate\.api\.nvidia\.com(\/|$)/.test(baseUrl)) {
-    return { provider: "nvidia", model, keyEnvironment: "NVIDIA_API_KEY" };
-  }
   // The console's OpenAI choice (provider "openai" at api.openai.com) is Hermes's "openai-api".
   if (providerId === "openai" && /^https:\/\/api\.openai\.com(\/|$)/.test(baseUrl)) {
     return { provider: "openai-api", model, keyEnvironment: "OPENAI_API_KEY" };
   }
-  // Any other OpenAI-compatible endpoint (OpenRouter, a vLLM gateway, ...) is Hermes's "custom"
+  // Any other OpenAI-compatible endpoint is Hermes's "custom"
   // provider. Hermes sends OPENAI_API_KEY to a custom host only when OPENAI_BASE_URL names it.
   const endpoint = providerId === "openai" ? normalizeOpenAiBaseUrl(baseUrl) : undefined;
   if (endpoint) {

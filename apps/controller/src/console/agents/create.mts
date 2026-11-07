@@ -1073,15 +1073,9 @@ function renderAgentForm(
     autocomplete: "off",
     spellcheck: "false",
   });
-  const initialBaseUrl = initialModel?.startsWith("openai/")
-    ? compatibleBaseUrl(rendered.configuration?.values)
-    : undefined;
-  providerBaseUrl.value = initialBaseUrl ?? "";
-  nativeProvider.value = initialModel?.startsWith("anthropic/")
-    ? "anthropic"
-    : initialBaseUrl
-      ? OPENAI_COMPATIBLE
-      : "openai";
+  // A Configuration's own OpenAI transport (a custom baseUrl) stays OpenAI: OpenAI-compatible is
+  // chosen, never inferred, so Presets keep their Dedicated options.
+  nativeProvider.value = initialModel?.startsWith("anthropic/") ? "anthropic" : "openai";
   const providerName = () =>
     nativeProvider.value === OPENAI_COMPATIBLE ? "An OpenAI-compatible endpoint" : "Anthropic";
   const baseUrlField = field(
@@ -1727,12 +1721,16 @@ function renderAgentForm(
         !credentialRegistration &&
         !hasBoundModelCredential
       ) {
-        const editedBaseUrl = ref.startsWith("openai/") ? compatibleBaseUrl(values) : undefined;
+        // An edited OpenAI baseUrl stays OpenAI (a custom transport); only an OpenAI-compatible
+        // choice follows the JSON's endpoint into its Base URL field.
+        const keepsCompatible =
+          ref.startsWith("openai/") && nativeProvider.value === OPENAI_COMPATIBLE;
         const selectedProvider = ref.startsWith("anthropic/")
           ? "anthropic"
-          : editedBaseUrl
+          : keepsCompatible
             ? OPENAI_COMPATIBLE
             : "openai";
+        const editedBaseUrl = keepsCompatible ? compatibleBaseUrl(values) : undefined;
         if (editedBaseUrl) {
           providerBaseUrl.value = editedBaseUrl;
         }

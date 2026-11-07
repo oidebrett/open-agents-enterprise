@@ -32,8 +32,8 @@ Result (2026-11-06): manidae-cloud branch `oae/strike-1-package` (`14a5b168`):
 same code path as OCE (tests `backend/tests/test_oae_package.py`). On Oracle the
 install block ran unattended in ~3 minutes from `oae@bb04e33`; console at
 `https://oae.ag-6a4baf8a.nemoclaw.dpdns.org/console/` (Let's Encrypt), password
-sign-in through the public URL, Agent `oae-test` (NVIDIA Nemotron via
-`oce-nvidia-agent`) answered.
+sign-in through the public URL, Agent `oae-test` (a hosted OpenAI-compatible model, created
+from the CLI) answered.
 
 Finding — co-hosted host Traefik: the install's console route targets
 `http://127.0.0.1:18480`, which assumes a host-network Traefik (manidae's own boxes).
@@ -89,7 +89,7 @@ Progress (2026-11-06):
   re-render → helm upgrade); native-admin helpers stand down under SSO; `oae-user` installed from
   the checkout; button "Continue with SSO"; co-hosted Traefik detected (by image, following a
   shared network namespace) and forwarded; BYOVPS reuses an existing :443 proxy. Fresh unattended
-  install on Oracle with SSO: 0 warnings, then `oce-nvidia-agent` + `oae-user add/grant` + browser
+  install on Oracle with SSO: 0 warnings, then an Agent from the CLI + `oae-user add/grant` + browser
   SSO sign-in showed exactly the granted Agent. The run exposed a detection bug (`grep -q` under
   pipefail), fixed and re-verified on the box. Not yet automated: creating the Keycloak realm/client
   from the manidae backend at deploy time (done by hand with `oae-realm.sh`).
@@ -150,17 +150,19 @@ grants, revisions, audit and the console).
 
 ### 🟨 5a — Hermes next to OCE (branch `strike/5a-hermes`)
 
+Superseded by 5b; its `oae-hermes` tool was removed in 5c (manidae never installed it).
+
 - `deploy/oae/hermes/oae-hermes create|list|delete`: official `nousresearch/hermes-agent:v0.23.0`
   (by digest), one container per agent in namespace `oae-hermes` (`gateway run` with
   `HERMES_DASHBOARD=1`, dashboard on 9119; two containers left the dashboard blind to the
-  gateway), seeded `config.yaml` (provider `nvidia`, `trusted_proxies`, `public_url`), model key and
+  gateway), seeded `config.yaml` (model provider, `trusted_proxies`, `public_url`), model key and
   dashboard session token in a Secret, NetworkPolicy admitting only k3s Traefik.
 - Access is OCE IAM: a Namespace Role per Hermes agent (`OAE Hermes user|operator: NAME`, via
   `oae-user grant|revoke`); 5b replaces it with per-Agent bindings.
 - Edge: `hermes-<hash>.agents.<host>`; for granted people `oae-edge-authz` injects
   `Authorization: Bearer <session token>` (Hermes's own deployment-token gate: web UI and API).
 - ✅ Browser end to end on Oracle as the SSO demo user: dashboard authenticated "via session-token",
-  chat over WebSocket answered (NVIDIA Nemotron).
+  chat over WebSocket answered (a hosted OpenAI-compatible model).
 - ⬜ Hermes Desktop through `oae-user device add EMAIL HERMES` (needs the user's Desktop app).
 
 ### ✅ 5b — Hermes as a native OCE Agent runtime (branch `strike/5b-hermes-kind`)
@@ -178,8 +180,8 @@ later upstream sync. A runtime needs no schema change.
   Per Agent, in its tenant namespace: Secret `hermes-<h>-env` (model key copied, uid-checked, from
   the revision's Harness authentication Secret; stable dashboard session token), ConfigMap
   `-seed`, PVC `-data`, Deployment, Service :9119, NetworkPolicy (ingress only from k3s Traefik;
-  egress DNS + public 443). Model: NVIDIA (`baseUrl https://integrate.api.nvidia.com/v1`) or
-  Anthropic, or OpenAI (`api.openai.com`, as Hermes's `openai-api`).
+  egress DNS + public 443). Model: Anthropic, OpenAI (`api.openai.com`, as Hermes's
+  `openai-api`), or since 5c any OpenAI-compatible endpoint (Hermes's `custom`).
 - Fits OCE's guard rails as they are:
   - The worker Role may create/replace Secrets but not patch them, so the Secret is not
     server-side applied.
@@ -198,11 +200,11 @@ later upstream sync. A runtime needs no schema change.
   - ✅ On Oracle (controller `sha256:b6738bd2…`, Agent `hermes-native`), revisions deploy
     `succeeded` and in-pod `hermes chat` answers.
   - ✅ Browser as the SSO demo user: Keycloak → edge → dashboard "via session-token" → chat
-    answered (NVIDIA Nemotron).
+    answered (a hosted OpenAI-compatible model).
 - ✅ Console: the create form offers **Hermes** (always Embedded, API key for OpenAI or Anthropic).
   Codex and OpenClaw paths are unchanged. Console browser tests: `console-agents` 31/31 and
-  `console-create-agent-provisioning-400` 53/53, the same as baseline. NVIDIA models are still
-  CLI-only, as they are for OpenClaw.
+  `console-create-agent-provisioning-400` 53/53, the same as baseline. Other OpenAI-compatible
+  endpoints were CLI-only until 5c.
 - ✅ Full conformance on the final runtime commit: 3147 tests, 37 failures, all in the unmodified
   baseline's set (SSH/`gh` environment); none only with 5b.
 - On Oracle: controller `sha256:5851316c…` (commit `a3d33210`).
@@ -220,6 +222,21 @@ later upstream sync. A runtime needs no schema change.
     `OAE_EDGE_AGENTS_DOMAIN`. Hermes otherwise trusts Traefik's X-Forwarded headers, which works.
   - `s6-applyuidgid: unable to set supplementary group list` at start is harmless (nothing to
     drop).
+
+## 🟨 5c — OpenAI-compatible model provider (branch `feat/openai-compatible-provider`)
+
+Upstream candidate: generic, names no model vendor, adds no server contract.
+
+- Console Provider gains **OpenAI-compatible**: Base URL (HTTPS, ending `/v1`) + model ID
+  (entered; there is no list) + API key Secret. It writes OpenClaw's existing `openai` provider
+  with that `baseUrl` and `api: "openai-completions"`, which Embedded OpenClaw already runs.
+  Embedded only and no Codex, like Anthropic (Dedicated OpenClaw keeps `api.openai.com` for API
+  keys). It is chosen, never inferred: a Preset or JSON edit with its own OpenAI `baseUrl` stays
+  OpenAI, so upstream's custom-transport paths are unchanged.
+- Hermes: any endpoint other than `api.openai.com` is Hermes's `custom` provider: `base_url` in
+  `config.yaml`, key in `OPENAI_API_KEY` with `OPENAI_BASE_URL` naming the same URL, which is the
+  only way Hermes sends that key to another host. The vendor-specific Hermes mapping is gone.
+- The vendor-specific 5a `oae-hermes` tool is removed; OAE names no model vendor.
 
 ## ⬜ Strike 6 — Hermes on the Codex and Claude harness Pods
 

@@ -1683,7 +1683,8 @@ test("Agent creation offers mainline Anthropic models before credentials and sav
       .getByLabel("Harness", { exact: true })
       .locator("option:not([disabled])")
       .evaluateAll((options: HTMLOptionElement[]) => options.map((option) => option.value)),
-    ["openclaw"],
+    // OAE: Hermes (Embedded) takes Anthropic too.
+    ["openclaw", "hermes"],
   );
   const apiKeySecret = page.getByLabel("API key Secret", { exact: true });
   await apiKeySecret.waitFor();

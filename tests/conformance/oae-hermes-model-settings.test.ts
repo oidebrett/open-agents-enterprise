@@ -10,7 +10,7 @@ import {
 const configuration = (model: string, providers: Record<string, unknown> = {}) =>
   ({ agents: { defaults: { model } }, models: { providers } }) as never;
 
-test("Hermes maps OpenAI, Anthropic and NVIDIA to its own providers", () => {
+test("Hermes maps OpenAI and Anthropic to its own providers", () => {
   assert.deepEqual(
     hermesModelSettings(
       configuration("openai/gpt-5.1", { openai: { baseUrl: "https://api.openai.com/v1" } }),
@@ -22,36 +22,28 @@ test("Hermes maps OpenAI, Anthropic and NVIDIA to its own providers", () => {
     model: "claude-sonnet-5",
     keyEnvironment: "ANTHROPIC_API_KEY",
   });
-  assert.deepEqual(
-    hermesModelSettings(
-      configuration("openai/nvidia/nemotron", {
-        openai: { baseUrl: "https://integrate.api.nvidia.com/v1" },
-      }),
-    ),
-    { provider: "nvidia", model: "nvidia/nemotron", keyEnvironment: "NVIDIA_API_KEY" },
-  );
 });
 
 test("Hermes runs any other OpenAI-compatible endpoint as its custom provider", () => {
   assert.deepEqual(
     hermesModelSettings(
-      configuration("openai/meta-llama/llama-4-maverick", {
-        openai: { baseUrl: "https://openrouter.ai/api/v1/" },
+      configuration("openai/vendor/model-7b", {
+        openai: { baseUrl: "https://models.example.com/api/v1/" },
       }),
     ),
     {
       provider: "custom",
-      model: "meta-llama/llama-4-maverick",
+      model: "vendor/model-7b",
       keyEnvironment: "OPENAI_API_KEY",
-      baseUrl: "https://openrouter.ai/api/v1",
+      baseUrl: "https://models.example.com/api/v1",
     },
   );
 });
 
 test("Hermes refuses endpoints the OpenAI provider would refuse", () => {
   for (const baseUrl of [
-    "http://openrouter.ai/api/v1",
-    "https://openrouter.ai/api",
+    "http://models.example.com/api/v1",
+    "https://models.example.com/api",
     "https://u:p@example.com/v1",
   ]) {
     assert.throws(

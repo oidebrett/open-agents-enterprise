@@ -2581,8 +2581,8 @@ test("Agent creation configures an OpenAI-compatible endpoint for Embedded OpenC
   const namespace = await fixture.createNamespace("Compatible endpoint", { ready: true });
   const { page } = await newPage(t, fixture);
   const requests = apiRequests(page, fixture.origin);
-  const endpoint = "https://openrouter.ai/api/v1";
-  const modelId = "meta-llama/llama-4-maverick";
+  const endpoint = "https://models.example.com/api/v1";
+  const modelId = "vendor/model-7b";
   await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
   for (const harnessId of ["openclaw", "hermes"] as const) {
     await page.goto(`${fixture.origin}/console/agents/new?namespace=${namespace.id}`);
@@ -2620,7 +2620,7 @@ test("Agent creation configures an OpenAI-compatible endpoint for Embedded OpenC
     await enterManualModel(page, `test-compatible-${harnessId}-key`, modelId);
 
     // An endpoint that is not HTTPS /v1 is refused before anything is written.
-    await baseUrl.fill("http://openrouter.ai/api/v1");
+    await baseUrl.fill("http://models.example.com/api/v1");
     const writesBefore = nonAuthWriteRequests(requests).length;
     await page.getByRole("button", { name: "Create Agent" }).click();
     await page.getByRole("alert").filter({ hasText: "HTTPS endpoint ending in /v1" }).waitFor();
@@ -2634,6 +2634,14 @@ test("Agent creation configures an OpenAI-compatible endpoint for Embedded OpenC
       api: "openai-completions",
       models: [{ id: modelId, name: modelId }],
     });
+    assert.deepEqual(template.agents.defaults.models[`openai/${modelId}`], {
+      agentRuntime: { id: harnessId },
+    });
+    if (harnessId === "hermes") {
+      // The test Compute Driver has no Hermes runtime (OAE wraps the Kubernetes Driver), so it
+      // refuses Hermes bindings at validation; the Configuration above is the console's part.
+      continue;
+    }
     const agent = await createAgentThroughForm(page, fixture, namespace.id);
     assert.equal(agent.executionMode, "embedded");
     const persisted = await fixture.request(
@@ -2641,9 +2649,6 @@ test("Agent creation configures an OpenAI-compatible endpoint for Embedded OpenC
       `/namespaces/${namespace.id}/configurations/${agent.configurationId}`,
     );
     assert.equal(persisted.data.values.agents.defaults.model, `openai/${modelId}`);
-    assert.deepEqual(persisted.data.values.agents.defaults.models[`openai/${modelId}`], {
-      agentRuntime: { id: harnessId },
-    });
     assert.equal(persisted.data.values.models.providers.openai.baseUrl, endpoint);
     assert.equal(persisted.data.values.models.providers.openai.api, "openai-completions");
   }
