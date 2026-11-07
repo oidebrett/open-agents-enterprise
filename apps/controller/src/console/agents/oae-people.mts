@@ -343,7 +343,9 @@ export function renderOaePeople(
     const sso = methods.filter((m) => text(m.providerId).startsWith("oidc:"));
     if (!sso.some((m) => m.subject === found.subject)) {
       if (sso.length) {
-        throw new PanelError(`The OCE account for ${address} is linked to a different SSO identity.`);
+        throw new PanelError(
+          `The OCE account for ${address} is linked to a different SSO identity.`,
+        );
       }
       await context.request(`/api/auth/accounts/${encodeURIComponent(userId)}/providers/oidc`, {
         method: "POST",
@@ -361,7 +363,9 @@ export function renderOaePeople(
       await context.request(`/oae/api/directory?email=${encodeURIComponent(address)}`),
     );
     if (!found.subject) {
-      throw new PanelError(`Nobody with the email ${address} is in the SSO directory. Add them in Keycloak first, then try again.`);
+      throw new PanelError(
+        `Nobody with the email ${address} is in the SSO directory. Add them in Keycloak first, then try again.`,
+      );
     }
     if (found.enabled === false) {
       throw new PanelError(`${address} is disabled in the SSO directory.`);
