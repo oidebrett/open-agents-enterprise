@@ -77,9 +77,11 @@ cmd_install() {
     kubectl -n $EDGE_NS create cm oae-edge-acl --from-literal=acl.json='{}' --from-literal=agents.json='{}' >/dev/null
   kubectl -n $EDGE_NS get secret oae-edge-hermes >/dev/null 2>&1 ||
     kubectl -n $EDGE_NS create secret generic oae-edge-hermes --from-literal=hermes.json='{}' >/dev/null
+  kubectl -n $EDGE_NS get secret oae-edge-pairing >/dev/null 2>&1 ||
+    kubectl -n $EDGE_NS create secret generic oae-edge-pairing --from-literal=pairing.json='{}' >/dev/null
   migrate_records
   kubectl apply -f - >/dev/null <<YAML
-# The edge reads and writes exactly its two record Secrets, nothing else in the cluster.
+# The edge reads and writes exactly its record Secrets, nothing else in the cluster.
 apiVersion: v1
 kind: ServiceAccount
 metadata: { name: oae-edge-authz, namespace: $EDGE_NS }
@@ -91,7 +93,7 @@ metadata: { name: oae-edge-authz-records, namespace: $EDGE_NS }
 rules:
 - apiGroups: [""]
   resources: [secrets]
-  resourceNames: [oae-edge-people, oae-edge-devices]
+  resourceNames: [oae-edge-people, oae-edge-devices, oae-edge-pairing]
   verbs: [get, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -271,13 +273,45 @@ gateway_identities() {  # gateway_identities NS AGENT_ID CONFIG_ID ORIGIN PEOPLE
   return 0
 }
 
+# One unused OpenClaw bootstrap token per shared OpenClaw Agent, for the edge's /apps to put in
+# a person's phone setup code. `openclaw qr --limited`: node + operator without operator.admin;
+# minting needs operator.admin on the gateway, which no person holds (OCE), so the platform mints.
+# A token lives 10 minutes; one with less than 5 left is replaced. The write is conditional on the
+# Secret's resourceVersion, so a token the edge took meanwhile is never put back.
+pairing_refill() {  # pairing_refill "HOST TNS AGENT_ID\n..."
+  local cur data next now host tns aid entry pod code payload
+  cur=$(kubectl -n $EDGE_NS get secret oae-edge-pairing -o json) || return 1
+  data=$(jq -r '.data["pairing.json"] // empty' <<<"$cur" | base64 -d 2>/dev/null); [ -n "$data" ] || data='{}'
+  now=$(( $(date +%s) * 1000 )); next='{}'
+  while read -r host tns aid; do
+    [ -n "$host" ] || continue
+    entry=$(jq -c --arg h "$host" --argjson min $(( now + 300000 )) '.[$h] // empty | select(.expiresAtMs > $min)' <<<"$data")
+    if [ -z "$entry" ]; then
+      pod=$(kubectl -n "$tns" get pod -l "openclaw.dev/agent=$aid,openclaw.dev/workload-role=gateway" \
+        --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+      [ -n "$pod" ] || continue
+      code=$(timeout 60 kubectl -n "$tns" exec "$pod" -c gateway -- openclaw qr --limited --json --url "wss://$host" 2>/dev/null |
+        jq -r '.setupCode // empty' 2>/dev/null) || code=""
+      [ -n "$code" ] || { log "phone pairing token for $host: openclaw qr failed"; continue; }
+      payload=$(printf '%s' "$code" | tr '_-' '/+'); while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload+="="; done
+      entry=$(printf '%s' "$payload" | base64 -d 2>/dev/null |
+        jq -c 'select((.bootstrapToken | type) == "string" and (.expiresAtMs | type) == "number") | {bootstrapToken, expiresAtMs}' 2>/dev/null)
+      [ -n "$entry" ] || { log "phone pairing token for $host: unexpected setup code"; continue; }
+    fi
+    next=$(jq -c --arg h "$host" --argjson e "$entry" '.[$h] = $e' <<<"$next")
+  done <<<"$1"
+  [ "$(jq -S -c . <<<"$next")" = "$(jq -S -c . <<<"$data")" ] && return 0
+  jq --arg d "$(printf '%s' "$next" | base64 -w0)" '.data["pairing.json"] = $d | del(.metadata.managedFields)' <<<"$cur" |
+    kubectl replace -f - >/dev/null 2>&1 || { log "phone pairing tokens: changed meanwhile; next run"; return 0; }
+}
+
 cmd_sync() {
   local ins acl meta routes ns roles bindings agents state subjects
   ins=$($OCC installation get --output json | jq -r .id)
   [ -f "$STATE" ] || echo '{}' > "$STATE"
   state=$(cat "$STATE")
   subjects=$(principal_subjects)
-  acl='{}'; meta='{}'; routes=""; hermes_tokens='{}'
+  acl='{}'; meta='{}'; routes=""; hermes_tokens='{}'; phones=""
   for ns in $($OCC namespace list --output json | jq -r '.[] | select(.status == "ready") | .id'); do
     roles=$($OCC iam role list --namespace "$ns" --output json)
     bindings=$($OCC iam access-binding list --namespace "$ns" --output json)
@@ -314,6 +348,7 @@ cmd_sync() {
       else
         tenant_middlewares "$tns"
         agent_route "$tns" "$short" "$sname" "$sport" "$host" "$aid"
+        [ "$people" = "{}" ] || phones+="$host $tns $aid"$'\n'
       fi
       routes+="$host"$'\n'
       # Agents never shared stay untouched; when the last person goes, their identities leave the
@@ -381,6 +416,7 @@ YAML
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl -n $EDGE_NS create secret generic oae-edge-hermes --from-literal=hermes.json="$hermes_tokens" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  pairing_refill "$phones" || log "phone pairing tokens: not refreshed this run"
   # Host Traefik: the auth host and every Agent host with people, each with its own certificate.
   local rules tmp
   rules=$(rules_dir); [ -n "$rules" ] || { log "no Traefik rules directory"; return 0; }
