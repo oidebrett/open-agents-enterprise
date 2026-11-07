@@ -1683,9 +1683,17 @@ test("Agent creation offers mainline Anthropic models before credentials and sav
       .getByLabel("Harness", { exact: true })
       .locator("option:not([disabled])")
       .evaluateAll((options: HTMLOptionElement[]) => options.map((option) => option.value)),
-    // OAE: Hermes (Embedded) takes Anthropic too.
-    ["openclaw", "hermes"],
+    // OAE: Claude Code (OpenClaw's claude-cli runtime) and Hermes (Embedded) take Anthropic too.
+    ["claude-cli", "openclaw", "hermes"],
   );
+  // OAE: Claude Code runs Embedded and says so; OpenClaw stays the default for Anthropic.
+  await page.getByLabel("Harness", { exact: true }).selectOption("claude-cli");
+  assert.equal(await page.getByLabel("Execution mode").inputValue(), "embedded");
+  assert.match(
+    await page.locator("#agent-harness-hint").innerText(),
+    /This Agent will run Claude Code inside its OpenClaw gateway with Embedded execution\./,
+  );
+  await page.getByLabel("Harness", { exact: true }).selectOption("openclaw");
   const apiKeySecret = page.getByLabel("API key Secret", { exact: true });
   await apiKeySecret.waitFor();
   assert.equal(await apiKeySecret.inputValue(), "");

@@ -11,7 +11,16 @@ USER root
 RUN npm install --global --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force \
     && claude --version
+# The Agent's API key for Claude Code. OpenClaw removes ANTHROPIC_API_KEY when it starts `claude`
+# and passes --setting-sources, which skips user settings; admin-managed settings always apply.
+COPY oae-claude-api-key managed-settings.json /tmp/oae-claude/
+# Explicit modes: COPY --chmod would also give a directory it creates the file's mode (no x bit).
+RUN install -d -m 0755 /etc/claude-code \
+    && install -m 0644 /tmp/oae-claude/managed-settings.json /etc/claude-code/managed-settings.json \
+    && install -m 0755 /tmp/oae-claude/oae-claude-api-key /usr/local/bin/oae-claude-api-key \
+    && rm -rf /tmp/oae-claude
 USER node
+RUN test -r /etc/claude-code/managed-settings.json && test -x /usr/local/bin/oae-claude-api-key
 
 # No self-update in an immutable image; no telemetry, error reporting or other non-essential
 # traffic (the Agent's egress allows the Anthropic API only).

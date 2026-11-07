@@ -243,6 +243,13 @@ function field(label: string, input: HTMLElement, hint?: string, error?: HTMLEle
 // self-hosted server). It is OpenClaw's "openai" provider with its own baseUrl, so the model key
 // stays an OpenAI-style bearer key and the Agent runs Embedded, as with Anthropic.
 const OPENAI_COMPATIBLE = "openai-compatible";
+// OAE: OpenClaw's Claude Code runtime. The gateway is OpenClaw, so the form treats it as OpenClaw
+// except that it needs Anthropic and Embedded execution.
+const CLAUDE_CODE = "claude-cli";
+/** Whether a Harness choice runs in the OpenClaw gateway: OpenClaw itself or its Claude Code. */
+function openclawGateway(harnessId: string) {
+  return harnessId === "openclaw" || harnessId === CLAUDE_CODE;
+}
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 /** The OpenClaw provider ID a console provider choice configures. */
@@ -1018,14 +1025,28 @@ function renderAgentForm(
   const embeddedOption = element("option", { value: "embedded" }, "Embedded");
   const mode = element("select", { id: "execution-mode" }, dedicatedOption, embeddedOption);
   const codexOption = element("option", { value: "codex" }, "Codex");
+  // OAE: Claude Code, as OpenClaw's claude-cli runtime inside the OpenClaw gateway: Anthropic only,
+  // Embedded (docs/oae/claude-harness.md).
+  const claudeCodeOption = element("option", { value: CLAUDE_CODE }, "Claude Code");
   const harness = element(
     "select",
     { id: "agent-harness", "aria-describedby": "agent-harness-hint" },
     codexOption,
+    claudeCodeOption,
     element("option", { value: "openclaw" }, "OpenClaw"),
     // OAE: Hermes runs embedded, with an API key for OpenAI or Anthropic.
     element("option", { value: "hermes" }, "Hermes"),
   );
+  // Whether a provider change keeps the Harness: Hermes takes either provider, Claude Code stays
+  // with Anthropic; an operator-managed (runtime) binding keeps its own rules.
+  function keepsHarness() {
+    return (
+      harness.value === "hermes" ||
+      (harness.value === CLAUDE_CODE &&
+        nativeProvider.value === "anthropic" &&
+        binding?.method !== "runtime")
+    );
+  }
   const harnessHint = element("p", { id: "agent-harness-hint", className: "hint" });
   const nativeHarnessWarning = statusBlock(
     "warning",
@@ -1369,7 +1390,7 @@ function renderAgentForm(
     harness.value = "codex";
     mode.value = "dedicated";
   } else if (
-    harness.value !== "hermes" &&
+    !keepsHarness() &&
     (embeddedOnlyProvider(nativeProvider.value) || binding?.method === "runtime")
   ) {
     harness.value = "openclaw";
@@ -1378,7 +1399,7 @@ function renderAgentForm(
   if (harness.value === "codex") {
     mode.value = "dedicated";
   }
-  if (harness.value === "hermes") {
+  if (harness.value === "hermes" || harness.value === CLAUDE_CODE) {
     mode.value = "embedded";
   }
   const currentTemplate = () =>
@@ -1625,8 +1646,8 @@ function renderAgentForm(
   }
   nativeProvider.addEventListener("change", () => {
     // Operator-managed Presets retain the embedded harness required by their fixed binding.
-    // Hermes takes either provider; it stays selected.
-    if (harness.value !== "hermes") {
+    // Hermes takes either provider; it stays selected. Claude Code stays with Anthropic.
+    if (!keepsHarness()) {
       harness.value =
         embeddedOnlyProvider(nativeProvider.value) || binding?.method === "runtime"
           ? "openclaw"
@@ -1659,7 +1680,7 @@ function renderAgentForm(
     mode.value =
       harness.value === "codex"
         ? "dedicated"
-        : harness.value === "hermes"
+        : harness.value === "hermes" || harness.value === CLAUDE_CODE
           ? "embedded"
           : defaultOpenClawMode();
     modeDefaulted = true;
@@ -1710,7 +1731,7 @@ function renderAgentForm(
       if (selectedHarness === "codex") {
         mode.value = "dedicated";
       }
-      if (selectedHarness === "hermes") {
+      if (selectedHarness === "hermes" || selectedHarness === CLAUDE_CODE) {
         mode.value = "embedded";
       }
     }
@@ -1737,13 +1758,13 @@ function renderAgentForm(
         if (
           !binding &&
           (selectedProvider !== nativeProvider.value ||
-            (harness.value === "openclaw" && authMethod.value === "codex_pat"))
+            (openclawGateway(harness.value) && authMethod.value === "codex_pat"))
         ) {
           authMethod.value = "api_key";
           clearModelCredential();
         }
         nativeProvider.value = selectedProvider;
-        if (embeddedOnlyProvider(selectedProvider) && harness.value !== "hermes") {
+        if (embeddedOnlyProvider(selectedProvider) && !keepsHarness()) {
           harness.value = "openclaw";
           mode.value = "embedded";
         }
@@ -2690,7 +2711,7 @@ function renderAgentForm(
     }
     return !text.startsWith(PLACEMENT_REFUSAL) ||
       (!(capabilityDiscoveryDone && !openclawModeUsable("embedded")) &&
-        (harness.value === "openclaw" || !(savedConfiguration || credentialLocksHarness())))
+        (openclawGateway(harness.value) || !(savedConfiguration || credentialLocksHarness())))
       ? text
       : `${settingRequirement(text)} Ask an operator to configure it.`;
   };
@@ -2802,6 +2823,7 @@ function renderAgentForm(
     mode.disabled ||=
       harness.value === "codex" ||
       harness.value === "hermes" ||
+      harness.value === CLAUDE_CODE ||
       embeddedOnlyProvider(nativeProvider.value) ||
       binding?.method === "runtime";
     // Why the harness choice is locked, without the request in flight: the hint must not change
@@ -2812,7 +2834,7 @@ function renderAgentForm(
     const dedicatedRefused = capabilityDiscoveryDone && !openclawModeUsable("dedicated");
     const nativeRefused = dedicatedRefused && harness.value === "openclaw";
     const embeddedRefused = capabilityDiscoveryDone && !openclawModeUsable("embedded");
-    const openclawEmbeddedRefused = embeddedRefused && harness.value === "openclaw";
+    const openclawEmbeddedRefused = embeddedRefused && openclawGateway(harness.value);
     const noOpenClawMode = nativeRefused && openclawEmbeddedRefused;
     const sandboxDriverOutage = capabilityDiscoveryDone && sandboxDriverUnavailable;
     // A selected Sandbox Driver refuses Embedded execution, so an Installation that lists Embedded
@@ -2924,6 +2946,13 @@ function renderAgentForm(
           ? "This Agent cannot run Hermes on this installation: Hermes requires Embedded execution."
           : "This Agent will run Hermes with Embedded execution.";
       }
+      if (harness.value === CLAUDE_CODE) {
+        return nativeProvider.value !== "anthropic"
+          ? "This Agent cannot run Claude Code: Claude Code requires Anthropic."
+          : embeddedRefused
+            ? "This Agent cannot run Claude Code on this installation: Claude Code requires Embedded execution."
+            : "This Agent will run Claude Code inside its OpenClaw gateway with Embedded execution.";
+      }
       if (harness.value === "codex") {
         // "Will run" only once the Installation's capabilities are known.
         return anthropic
@@ -2960,6 +2989,8 @@ function renderAgentForm(
       harness.value !== "openclaw" || mode.value !== "dedicated" || nativeRefused;
     codexOption.hidden = embeddedOnlyProvider(nativeProvider.value);
     codexOption.disabled = embeddedOnlyProvider(nativeProvider.value);
+    claudeCodeOption.hidden = nativeProvider.value !== "anthropic";
+    claudeCodeOption.disabled = nativeProvider.value !== "anthropic";
     const compatible = nativeProvider.value === OPENAI_COMPATIBLE;
     baseUrlField.hidden = !compatible;
     providerBaseUrl.required = compatible;
