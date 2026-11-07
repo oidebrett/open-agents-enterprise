@@ -250,7 +250,9 @@ const PAGE_HEADERS = {
   "content-type": "text/html; charset=utf-8",
   "content-security-policy":
     "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-  "referrer-policy": "no-referrer",
+  // Not "no-referrer": under it browsers send "Origin: null" on this page's own form posts.
+  // same-origin still sends nothing to other sites.
+  "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
 };
 const STYLE =
@@ -460,8 +462,13 @@ async function appsPage(req, res, notice = "") {
   );
 }
 
+// A form post from this host's own pages: the browser's Origin, or, where a browser sends
+// "Origin: null", its Sec-Fetch-Site (set by the browser; a page cannot forge it).
 function sameOriginPost(req, origin) {
-  return req.method === "POST" && req.headers.origin === origin;
+  if (req.method !== "POST") return false;
+  const sent = req.headers.origin;
+  if (sent === origin) return true;
+  return (sent === undefined || sent === "null") && req.headers["sec-fetch-site"] === "same-origin";
 }
 
 async function appsConnect(req, res) {
