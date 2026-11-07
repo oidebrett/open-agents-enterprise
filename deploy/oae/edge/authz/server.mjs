@@ -5,10 +5,20 @@
 // a signed-in person granted the Agent gets 200 with the two headers the Agent's gateway trusts
 // (x-occ-identity, x-openclaw-scopes); anyone else gets 403. Traefik copies only those two headers
 // to the upstream request, after stripping any client-supplied copies.
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+//
+// Two more surfaces, each on its own host (docs/oae/edge-design.md § Access without a shell):
+// - https://auth.agents.<host>/apps: a signed-in person connects the OpenClaw mobile app or Hermes
+//   Desktop to an Agent they are granted (a revocable app token bound to that Agent).
+// - https://<console host>/oae/api/: the console's People panel. Only for a human Installation
+//   administrator, proven by OCE itself from the administrator's own console session; the panel
+//   makes every OCE change (accounts, SSO identity, AccessBindings) with that session, and the edge
+//   only looks people up in the directory and records which SSO subject an OCE Principal is.
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
+import { request as httpsRequest } from "node:https";
 import * as oidc from "openid-client";
+import qrcode from "qrcode-generator";
 
 const env = (name, fallback) => {
   const value = process.env[name] ?? fallback;
@@ -20,31 +30,42 @@ const CLIENT_ID = env("OAE_EDGE_CLIENT_ID");
 const CLIENT_SECRET = env("OAE_EDGE_CLIENT_SECRET");
 const AGENTS_DOMAIN = env("OAE_EDGE_AGENTS_DOMAIN").toLowerCase(); // agents.<host>
 const AUTH_HOST = env("OAE_EDGE_AUTH_HOST", `auth.${AGENTS_DOMAIN}`).toLowerCase();
+// The OCE console host (agents.<host> without "agents."): /oae/api/ is served there, so the
+// browser sends the administrator's own console session with it.
+const CONSOLE_HOST = env("OAE_EDGE_CONSOLE_HOST", AGENTS_DOMAIN.replace(/^agents\./, "")).toLowerCase();
+const OCE_URL = `https://${CONSOLE_HOST}`;
 const IDENTITY_PREFIX = env("OAE_EDGE_IDENTITY_PREFIX"); // issuer-qualified identities: <prefix>:<sub>
 const SESSION_KEY = Buffer.from(env("OAE_EDGE_SESSION_KEY"), "hex");
+// Written by oae-edge sync from OCE: { "<agent host>": { "<sub>": "user" | "operator" } } and
+// { "<agent host>": { "name", "runtime": "openclaw" | "hermes" } }.
 const ACL_FILE = env("OAE_EDGE_ACL_FILE", "/acl/acl.json");
-// Device tokens (mobile/desktop apps that cannot do a browser sign-in): { "<sha256 hex>": { "sub" } },
-// written by oae-edge-sync from `oae-user device add`. The token rides in the URL path
-// (wss://agent-…/d/oaed_<token>), which OpenClaw's apps keep as the gateway context path.
-const DEVICES_FILE = env("OAE_EDGE_DEVICES_FILE", "/devices/devices.json");
+const AGENTS_FILE = env("OAE_EDGE_AGENTS_FILE", "/acl/agents.json");
 // Hermes agents (single-owner, no proxy identity): { "<host>": "<dashboard session token>" }. For a
 // granted person the edge presents the agent's session token, as Hermes Desktop would.
 const HERMES_FILE = env("OAE_EDGE_HERMES_FILE", "/hermes/hermes.json");
 // The OCE installation, for /open: an Agent's host is agent-<sha256(installation\0namespace\0agent)
 // [:32]>.<agents domain>, as oae-edge sync names it. Unset: /open is not offered.
 const INSTALLATION_ID = process.env.OAE_EDGE_INSTALLATION_ID ?? "";
+// The People panel's directory lookups (email -> SSO subject): a Keycloak client of the same realm
+// that holds only realm-management view-users, never the sign-in client. Unset: no lookups.
+const DIRECTORY_CLIENT_ID = process.env.OAE_EDGE_DIRECTORY_CLIENT_ID ?? "";
+const DIRECTORY_CLIENT_SECRET = process.env.OAE_EDGE_DIRECTORY_CLIENT_SECRET ?? "";
+const EDGE_NAMESPACE = env("OAE_EDGE_NAMESPACE", "oae-edge");
 const SESSION_SECONDS = Number(env("OAE_EDGE_SESSION_SECONDS", String(8 * 3600)));
 const PORT = Number(env("PORT", "8080"));
 if (SESSION_KEY.length < 32) throw new Error("OAE_EDGE_SESSION_KEY must be at least 32 bytes of hex");
 
-// Scope sets per grant level (oae-user grant … user|operator).
+// Scope sets per grant level. Operators also approve the devices and nodes that ask to join the
+// Agent, in the Agent's own Devices page (operator.pairing; never operator.admin).
 const SCOPES = {
   user: "operator.read,operator.write",
-  operator: "operator.read,operator.write,operator.approvals",
+  operator: "operator.read,operator.write,operator.approvals,operator.pairing",
 };
 const SESSION_COOKIE = "oae_edge";
 const TX_COOKIE = "oae_edge_tx";
 const REDIRECT_URI = `https://${AUTH_HOST}/callback`;
+const APPS_URL = `https://${AUTH_HOST}/apps`;
+const MAX_APP_TOKENS_PER_PERSON = 20;
 
 // --- signed cookies -------------------------------------------------------------------------
 const b64 = (buf) => Buffer.from(buf).toString("base64url");
@@ -77,53 +98,133 @@ function cookies(req) {
 }
 const cookie = (name, value, attrs) => `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; ${attrs}`;
 
-// --- ACL (written by oae-edge-sync: { "<agent host>": { "<sub>": "user" | "operator" } }) -----
-let acl = {};
-let aclMtime = 0;
-function grants() {
-  try {
-    const m = statSync(ACL_FILE).mtimeMs;
-    if (m !== aclMtime) {
-      acl = JSON.parse(readFileSync(ACL_FILE, "utf8"));
-      aclMtime = m;
+// --- files written by oae-edge sync (mounted; re-read when they change) -----------------------
+function watchedJson(file) {
+  let value = {};
+  let mtime = 0;
+  return () => {
+    try {
+      const m = statSync(file).mtimeMs;
+      if (m !== mtime) {
+        value = JSON.parse(readFileSync(file, "utf8"));
+        mtime = m;
+      }
+    } catch (error) {
+      if (mtime !== 0) console.error(JSON.stringify({ event: "file.read_failed", file, message: error.message }));
+      value = {}; // fail closed
+      mtime = 0;
     }
-  } catch (error) {
-    console.error(JSON.stringify({ event: "acl.read_failed", message: error.message }));
-    acl = {}; // fail closed
-  }
-  return acl;
+    return value;
+  };
+}
+const grants = watchedJson(ACL_FILE);
+const agentsMeta = watchedJson(AGENTS_FILE);
+const hermesTokens = watchedJson(HERMES_FILE);
+const hermesToken = (host) => (Object.hasOwn(hermesTokens(), host) ? hermesTokens()[host] : null);
+
+// --- records the edge keeps itself: Kubernetes Secrets in its own namespace -----------------
+// Its ServiceAccount may get and update exactly these two Secrets (oae-edge install).
+const SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount";
+let k8sCa;
+function k8s(method, path, body) {
+  const token = readFileSync(`${SA_DIR}/token`, "utf8"); // projected; rotates
+  k8sCa ??= readFileSync(`${SA_DIR}/ca.crt`);
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      {
+        host: process.env.KUBERNETES_SERVICE_HOST ?? "kubernetes.default.svc",
+        port: Number(process.env.KUBERNETES_SERVICE_PORT ?? 443),
+        method,
+        path,
+        ca: k8sCa,
+        timeout: 10_000,
+        headers: {
+          authorization: `Bearer ${token.trim()}`,
+          accept: "application/json",
+          ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {}),
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          let json = null;
+          try {
+            json = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          } catch {}
+          resolve({ status: res.statusCode, json });
+        });
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("Kubernetes API timeout")));
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
 }
 
-let devices = {};
-let devicesMtime = 0;
-function deviceRecord(token) {
-  try {
-    const m = statSync(DEVICES_FILE).mtimeMs;
-    if (m !== devicesMtime) {
-      devices = JSON.parse(readFileSync(DEVICES_FILE, "utf8"));
-      devicesMtime = m;
-    }
-  } catch {
-    devices = {}; // no file yet: no devices (fail closed)
+// secretStore(NAME, KEY): one JSON object in Secret NAME, key KEY. Reads are cached for a few
+// seconds (a revocation takes effect within that); when the API cannot be read, the last good
+// copy serves for up to five minutes, then requests fail closed.
+function secretStore(name, key) {
+  const path = `/api/v1/namespaces/${EDGE_NAMESPACE}/secrets/${name}`;
+  let value = {};
+  let version = "";
+  let loadedAt = 0;
+  let inflight = null;
+  async function read() {
+    const { status, json } = await k8s("GET", path);
+    if (status !== 200) throw new Error(`reading ${name}: HTTP ${status}`);
+    const raw = json?.data?.[key];
+    value = raw ? JSON.parse(Buffer.from(raw, "base64").toString("utf8")) : {};
+    version = json.metadata.resourceVersion;
+    loadedAt = Date.now();
+    return value;
   }
-  const hash = createHash("sha256").update(token).digest("hex");
-  return Object.hasOwn(devices, hash) ? devices[hash] : null;
-}
-let hermes = {};
-let hermesMtime = 0;
-function hermesToken(host) {
-  try {
-    const m = statSync(HERMES_FILE).mtimeMs;
-    if (m !== hermesMtime) {
-      hermes = JSON.parse(readFileSync(HERMES_FILE, "utf8"));
-      hermesMtime = m;
+  async function load({ fresh = false } = {}) {
+    if (!fresh && Date.now() - loadedAt < 5_000) return value;
+    try {
+      inflight ??= read().finally(() => {
+        inflight = null;
+      });
+      return await inflight;
+    } catch (error) {
+      log("store.read_failed", { name, message: error.message });
+      if (!fresh && loadedAt && Date.now() - loadedAt < 300_000) return value;
+      throw error;
     }
-  } catch {
-    hermes = {};
   }
-  return Object.hasOwn(hermes, host) ? hermes[host] : null;
+  // update(change): change(copy) returns the new object; retried on a concurrent write.
+  async function update(change) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const next = change(structuredClone(await load({ fresh: true })));
+      const body = {
+        apiVersion: "v1",
+        kind: "Secret",
+        type: "Opaque",
+        metadata: { name, namespace: EDGE_NAMESPACE, resourceVersion: version },
+        data: { [key]: Buffer.from(JSON.stringify(next)).toString("base64") },
+      };
+      const { status, json } = await k8s("PUT", path, body);
+      if (status === 200) {
+        value = next;
+        version = json.metadata.resourceVersion;
+        loadedAt = Date.now();
+        return next;
+      }
+      if (status !== 409) throw new Error(`writing ${name}: HTTP ${status}`);
+    }
+    throw new Error(`writing ${name}: too many concurrent changes`);
+  }
+  return { load, update };
 }
-const DEVICE_PATH = /^\/d\/(oaed_[A-Za-z0-9_-]{32,64})(?:[/?#]|$)/;
+// App tokens: { "<sha256 hex>": { sub, email, host, id, label, created } }. A token without
+// `host` (made before tokens were bound to one Agent) reaches every Agent its person is granted.
+const devices = secretStore("oae-edge-devices", "devices.json");
+// Who an OCE Principal is: { "<prn_ id>": { email, userId, subject } }, recorded only from OCE's
+// own account record (read with an administrator's session) and the directory.
+const people = secretStore("oae-edge-people", "people.json");
 
 // --- helpers --------------------------------------------------------------------------------
 const isAgentHost = (host) =>
@@ -132,7 +233,9 @@ const isAgentHost = (host) =>
 function safeReturnUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && isAgentHost(url.hostname) ? url.toString() : null;
+    if (url.protocol !== "https:") return null;
+    if (url.hostname === AUTH_HOST && url.pathname === "/apps" && !url.search) return url.toString();
+    return isAgentHost(url.hostname) ? url.toString() : null;
   } catch {
     return null;
   }
@@ -141,9 +244,35 @@ function send(res, status, headers = {}, body = "") {
   res.writeHead(status, { "cache-control": "no-store", ...headers });
   res.end(body);
 }
-const page = (title, text) =>
-  `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;margin:3rem;max-width:40rem"><h1>${title}</h1><p>${text}</p></body>`;
-const log = (event, fields = {}) => console.log(JSON.stringify({ event, ...fields }));
+const esc = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const PAGE_HEADERS = {
+  "content-type": "text/html; charset=utf-8",
+  "content-security-policy":
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+};
+const STYLE =
+  "body{font-family:system-ui;margin:2rem auto;max-width:46rem;padding:0 1rem;line-height:1.45}" +
+  "table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.4rem .5rem;border-bottom:1px solid #ddd;vertical-align:top}" +
+  "form{display:inline}input[type=text]{width:9rem}code,.secret{font-family:ui-monospace,monospace;word-break:break-all}" +
+  ".secret{background:#f4f4f4;padding:.5rem;border-radius:4px;display:block}.muted{color:#666}.qr{max-width:16rem}";
+const page = (title, html) =>
+  `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${STYLE}</style><body><h1>${esc(title)}</h1>${html}</body>`;
+const textPage = (title, text) => page(title, `<p>${esc(text)}</p>`);
+const log = (event, fields = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields }));
+
+async function readBody(req, limit = 16_384) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw Object.assign(new Error("request too large"), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
 
 let config;
 async function oidcConfig() {
@@ -151,7 +280,7 @@ async function oidcConfig() {
   return config;
 }
 
-// --- handlers -------------------------------------------------------------------------------
+// --- Agent requests (forwardAuth) -------------------------------------------------------------
 function grant(res, host, sub, via) {
   const scopes = SCOPES[grants()[host]?.[sub]];
   if (!scopes) {
@@ -164,15 +293,26 @@ function grant(res, host, sub, via) {
   return send(res, 200, headers);
 }
 
-function check(req, res) {
+const DEVICE_PATH = /^\/d\/(oaed_[A-Za-z0-9_-]{32,64})(?:[/?#]|$)/;
+const tokenHash = (token) => createHash("sha256").update(token).digest("hex");
+
+async function check(req, res) {
   const host = String(req.headers["x-forwarded-host"] ?? "").toLowerCase().split(":")[0];
   if (!isAgentHost(host)) return send(res, 403, {}, "unknown host");
-  // An app's device token in the path: never a redirect, only allowed or refused.
+  // An app's token in the path: never a redirect, only allowed or refused.
   const device = DEVICE_PATH.exec(String(req.headers["x-forwarded-uri"] ?? ""));
   if (device) {
-    const record = deviceRecord(device[1]);
-    if (!record?.sub) return send(res, 401, {}, "unknown device token");
-    return grant(res, host, record.sub, "device") ?? send(res, 403, {}, "no access to this Agent");
+    let record;
+    try {
+      const all = await devices.load();
+      const hash = tokenHash(device[1]);
+      record = Object.hasOwn(all, hash) ? all[hash] : null;
+    } catch {
+      return send(res, 503, {}, "try again");
+    }
+    if (!record?.sub) return send(res, 401, {}, "unknown app token");
+    if (record.host && record.host !== host) return send(res, 403, {}, "this app token is for another Agent");
+    return grant(res, host, record.sub, "app") ?? send(res, 403, {}, "no access to this Agent");
   }
   const session = unseal(cookies(req)[SESSION_COOKIE]);
   if (!session) {
@@ -183,11 +323,13 @@ function check(req, res) {
     const rd = encodeURIComponent(`https://${host}${uri.startsWith("/") ? uri : "/"}`);
     return send(res, 302, { location: `https://${AUTH_HOST}/login?rd=${rd}` });
   }
-  return grant(res, host, session.sub, "session") ??
-    send(res, 403, { "content-type": "text/html; charset=utf-8" },
-      page("No access", `You are signed in as ${session.email ?? session.sub}, but you have not been given access to this Agent. Ask an administrator.`));
+  return (
+    grant(res, host, session.sub, "session") ??
+    send(res, 403, PAGE_HEADERS, textPage("No access", `You are signed in as ${session.email ?? session.sub}, but you have not been given access to this Agent. Ask an administrator.`))
+  );
 }
 
+// --- sign-in --------------------------------------------------------------------------------
 async function login(req, res, url) {
   const rd = safeReturnUrl(url.searchParams.get("rd") ?? "");
   if (!rd) return send(res, 400, {}, "invalid return address");
@@ -231,7 +373,7 @@ async function callback(req, res, url) {
     return res.end();
   } catch (error) {
     log("login.failed", { message: error.message });
-    return send(res, 400, { "content-type": "text/html; charset=utf-8" }, page("Sign-in failed", "Please try again."));
+    return send(res, 400, PAGE_HEADERS, textPage("Sign-in failed", "Please try again."));
   }
 }
 
@@ -249,27 +391,277 @@ function open(res, url) {
 }
 
 function logout(req, res) {
-  return send(res, 200, {
-    "content-type": "text/html; charset=utf-8",
-    "set-cookie": cookie(SESSION_COOKIE, "", `Domain=.${AGENTS_DOMAIN}; Max-Age=0`),
-  }, page("Signed out", "You are signed out of your Agents."));
+  return send(
+    res,
+    200,
+    { ...PAGE_HEADERS, "set-cookie": cookie(SESSION_COOKIE, "", `Domain=.${AGENTS_DOMAIN}; Max-Age=0`) },
+    textPage("Signed out", "You are signed out of your Agents."),
+  );
 }
 
+// --- /apps: a person connects their own apps ----------------------------------------------------
+// Each app token is bound to the person and to one Agent, works only while that person is
+// granted the Agent (checked on every request), and is shown once; only its SHA-256 is kept.
+function myAgents(sub) {
+  const meta = agentsMeta();
+  return Object.entries(grants())
+    .filter(([, levels]) => levels && Object.hasOwn(levels, sub))
+    .map(([host, levels]) => ({
+      host,
+      level: levels[sub],
+      name: meta[host]?.name ?? host.split(".")[0],
+      runtime: meta[host]?.runtime === "hermes" ? "hermes" : "openclaw",
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function signInFirst(res) {
+  return send(res, 302, { location: `https://${AUTH_HOST}/login?rd=${encodeURIComponent(APPS_URL)}` });
+}
+
+async function appsPage(req, res, notice = "") {
+  const session = unseal(cookies(req)[SESSION_COOKIE]);
+  if (!session) return signInFirst(res);
+  const agents = myAgents(session.sub);
+  const names = Object.fromEntries(agents.map((a) => [a.host, a.name]));
+  const tokens = Object.values(await devices.load())
+    .filter((d) => d.sub === session.sub)
+    .sort((a, b) => String(b.created).localeCompare(String(a.created)));
+  const agentRows = agents.length
+    ? agents
+        .map(
+          (a) => `<tr><td><a href="https://${esc(a.host)}/" target="_blank" rel="noopener">${esc(a.name)}</a><div class="muted">${a.runtime === "hermes" ? "Hermes" : "OpenClaw"} · ${esc(a.level)}</div></td>
+<td><form method="post" action="/apps/connect"><input type="hidden" name="host" value="${esc(a.host)}">
+<input type="text" name="label" maxlength="40" placeholder="${a.runtime === "hermes" ? "e.g. laptop" : "e.g. my phone"}" required pattern="[A-Za-z0-9 ._-]{1,40}" aria-label="Name for this app">
+<button type="submit">${a.runtime === "hermes" ? "Connect Hermes Desktop" : "Connect the mobile app"}</button></form></td></tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="2" class="muted">You have not been given access to any Agent yet. Ask an administrator.</td></tr>`;
+  const tokenRows = tokens.length
+    ? tokens
+        .map(
+          (t) => `<tr><td>${esc(t.label)}<div class="muted">${esc(t.host ? (names[t.host] ?? "an Agent you no longer have") : "all your Agents")} · created ${esc(String(t.created).slice(0, 10))}</div></td>
+<td><form method="post" action="/apps/revoke"><input type="hidden" name="id" value="${esc(t.id)}"><button type="submit">Disconnect</button></form></td></tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="2" class="muted">No apps connected.</td></tr>`;
+  return send(
+    res,
+    200,
+    PAGE_HEADERS,
+    page(
+      "Your Agents",
+      `${notice}<p class="muted">Signed in as ${esc(session.email ?? session.sub)} · <a href="/logout">Sign out</a></p>
+<table><tr><th>Agent</th><th>Connect an app</th></tr>${agentRows}</table>
+<h2>Connected apps</h2><table>${tokenRows}</table>
+<p class="muted">An app keeps working only while you have access to its Agent. Disconnect any app you no longer use.</p>`,
+    ),
+  );
+}
+
+function sameOriginPost(req, origin) {
+  return req.method === "POST" && req.headers.origin === origin;
+}
+
+async function appsConnect(req, res) {
+  const session = unseal(cookies(req)[SESSION_COOKIE]);
+  if (!session) return signInFirst(res);
+  if (!sameOriginPost(req, `https://${AUTH_HOST}`)) return send(res, 403, {}, "cross-origin request refused");
+  const form = new URLSearchParams(await readBody(req));
+  const host = String(form.get("host") ?? "").toLowerCase();
+  const label = String(form.get("label") ?? "").trim();
+  const agent = myAgents(session.sub).find((a) => a.host === host);
+  if (!agent) return send(res, 403, PAGE_HEADERS, textPage("No access", "You do not have access to that Agent."));
+  if (!/^[A-Za-z0-9 ._-]{1,40}$/.test(label)) return appsPage(req, res, `<p class="error">Name the app with up to 40 letters, digits, spaces or . _ -</p>`);
+  const token = `oaed_${randomBytes(32).toString("base64url")}`;
+  const hash = tokenHash(token);
+  const id = hash.slice(0, 12);
+  await devices.update((all) => {
+    if (Object.values(all).filter((d) => d.sub === session.sub).length >= MAX_APP_TOKENS_PER_PERSON) {
+      throw Object.assign(new Error("too many apps"), { status: 409 });
+    }
+    all[hash] = { sub: session.sub, email: session.email ?? "", host, id, label, created: new Date().toISOString() };
+    return all;
+  });
+  log("app.connected", { sub: session.sub, host, id, label });
+  let body;
+  if (agent.runtime === "hermes") {
+    const url = `https://${host}/d/${token}`;
+    body = `<p>In Hermes Desktop open <b>Settings → Remote gateway</b> and enter this URL. If the app also asks for a session token, enter anything: the edge supplies the real one.</p>
+<code class="secret">${esc(url)}</code>`;
+  } else {
+    const url = `wss://${host}/d/${token}`;
+    // OpenClaw's setup code: base64url JSON. No bootstrap token: the edge authenticates the app as
+    // you, and the Agent's operators approve the phone's node access in the Agent's Devices page.
+    const setupCode = Buffer.from(JSON.stringify({ url })).toString("base64url");
+    const qr = qrcode(0, "M");
+    qr.addData(setupCode);
+    qr.make();
+    const svg = Buffer.from(qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true })).toString("base64");
+    body = `<p>In the OpenClaw app open <b>Settings → Gateway</b> and scan this code, or paste the setup code.</p>
+<img class="qr" alt="Setup code QR" src="data:image/svg+xml;base64,${svg}">
+<p>Setup code:</p><code class="secret">${esc(setupCode)}</code>
+<p>Gateway URL (for manual setup):</p><code class="secret">${esc(url)}</code>
+<p class="muted">The app chats as you. If it also asks the Agent to use the phone (notifications, location…), an operator of the Agent approves that in the Agent's Devices page.</p>`;
+  }
+  return send(
+    res,
+    200,
+    PAGE_HEADERS,
+    page(
+      `Connect ${agent.name}`,
+      `<p><b>Shown once.</b> Anyone with this can use ${esc(agent.name)} as you, so treat it like a password. It stops working when you disconnect it or lose access to the Agent.</p>
+${body}<p><a href="/apps">Done</a></p>`,
+    ),
+  );
+}
+
+async function appsRevoke(req, res) {
+  const session = unseal(cookies(req)[SESSION_COOKIE]);
+  if (!session) return signInFirst(res);
+  if (!sameOriginPost(req, `https://${AUTH_HOST}`)) return send(res, 403, {}, "cross-origin request refused");
+  const id = String(new URLSearchParams(await readBody(req)).get("id") ?? "");
+  let removed = 0;
+  await devices.update((all) => {
+    for (const [hash, d] of Object.entries(all)) {
+      if (d.sub === session.sub && d.id === id) {
+        delete all[hash];
+        removed += 1;
+      }
+    }
+    return all;
+  });
+  log("app.disconnected", { sub: session.sub, id, removed });
+  return send(res, 303, { location: "/apps" });
+}
+
+// --- /oae/api/: the console's People panel (console host only) ---------------------------------
+// Calls OCE with the administrator's own console session, exactly as the console itself would.
+async function oce(req, method, path) {
+  const headers = { cookie: String(req.headers.cookie ?? ""), accept: "application/json", origin: OCE_URL };
+  const key = req.headers["x-occ-session-key"];
+  if (typeof key === "string") headers["x-occ-session-key"] = key;
+  const res = await fetch(`${OCE_URL}${path}`, { method, headers, redirect: "manual", signal: AbortSignal.timeout(10_000) });
+  let json = null;
+  try {
+    json = await res.json();
+  } catch {}
+  return { status: res.status, data: json?.data };
+}
+
+// A human Installation administrator: OCE answers the account read only for one.
+async function consoleAdministrator(req) {
+  if (!req.headers.cookie) return null;
+  const session = await oce(req, "GET", "/api/auth/session");
+  const user = session.status === 200 ? session.data?.user : null;
+  if (typeof user?.id !== "string") return null;
+  const account = await oce(req, "GET", `/api/auth/accounts/${encodeURIComponent(user.id)}`);
+  return account.status === 200 ? { userId: user.id, email: user.email } : null;
+}
+
+// Keycloak's admin REST API, read-only, as the directory client (view-users).
+const DIRECTORY_BASE = /^(https:\/\/.+)\/realms\/([^/]+)\/?$/.exec(ISSUER);
+let directoryConfig;
+let directoryToken = { value: "", exp: 0 };
+async function directory(path) {
+  if (!DIRECTORY_CLIENT_ID || !DIRECTORY_BASE) throw Object.assign(new Error("No directory is configured for lookups."), { status: 503 });
+  if (directoryToken.exp < Date.now() / 1000 + 30) {
+    directoryConfig ??= await oidc.discovery(new URL(ISSUER), DIRECTORY_CLIENT_ID, DIRECTORY_CLIENT_SECRET);
+    const tokens = await oidc.clientCredentialsGrant(directoryConfig);
+    directoryToken = { value: tokens.access_token, exp: Date.now() / 1000 + (tokens.expires_in ?? 60) };
+  }
+  const res = await fetch(`${DIRECTORY_BASE[1]}/admin/realms/${DIRECTORY_BASE[2]}${path}`, {
+    headers: { authorization: `Bearer ${directoryToken.value}`, accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`directory: HTTP ${res.status}`);
+  return res.json();
+}
+const personName = (u) => [u.firstName, u.lastName].filter(Boolean).join(" ") || u.username || u.email;
+
+async function consoleApi(req, res, url) {
+  const json = (status, body) => send(res, status, { "content-type": "application/json" }, JSON.stringify(body));
+  const fail = (status, message) => json(status, { error: { code: status === 403 ? "FORBIDDEN" : "OAE_EDGE", message } });
+  if (req.method !== "GET" && (req.headers.origin !== OCE_URL || !/^application\/json\b/.test(String(req.headers["content-type"] ?? "")))) {
+    return fail(403, "Cross-origin request refused.");
+  }
+  const admin = await consoleAdministrator(req);
+  if (!admin) return fail(403, "Managing people requires Installation administration.");
+  const route = `${req.method} ${url.pathname}`;
+  if (route === "GET /oae/api/status") {
+    return json(200, { data: { appsUrl: APPS_URL, directory: Boolean(DIRECTORY_CLIENT_ID && DIRECTORY_BASE) } });
+  }
+  if (route === "GET /oae/api/people") {
+    const all = await people.load({ fresh: true });
+    return json(200, { data: Object.entries(all).map(([principalId, p]) => ({ principalId, ...p })) });
+  }
+  if (route === "GET /oae/api/directory") {
+    const email = String(url.searchParams.get("email") ?? "").trim().toLowerCase();
+    if (!/^[^@\s]{1,128}@[^@\s]{1,253}\.[^@\s]{1,63}$/.test(email)) return fail(400, "Enter an email address.");
+    const found = ((await directory(`/users?email=${encodeURIComponent(email)}&exact=true&briefRepresentation=true`)) ?? []).find(
+      (u) => String(u.email ?? "").toLowerCase() === email,
+    );
+    log("console.directory.lookup", { by: admin.email, email, found: Boolean(found) });
+    if (!found) return json(200, { data: null });
+    const known = Object.entries(await people.load({ fresh: true })).find(([, p]) => p.subject === found.id);
+    return json(200, {
+      data: {
+        subject: found.id,
+        email,
+        name: personName(found),
+        enabled: found.enabled !== false,
+        ...(known ? { principalId: known[0], userId: known[1].userId } : {}),
+      },
+    });
+  }
+  if (route === "POST /oae/api/people") {
+    let userId;
+    try {
+      userId = JSON.parse(await readBody(req)).userId;
+    } catch {
+      return fail(400, "Invalid request.");
+    }
+    if (typeof userId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(userId)) return fail(400, "Invalid account ID.");
+    // Everything recorded comes from OCE's account and the directory, never from the request.
+    const account = await oce(req, "GET", `/api/auth/accounts/${encodeURIComponent(userId)}`);
+    if (account.status !== 200) return fail(404, "No such account.");
+    const principalId = account.data?.principalId;
+    const subject = (account.data?.methods ?? []).find((m) => String(m.providerId ?? "").startsWith("oidc:"))?.subject;
+    if (typeof principalId !== "string" || typeof subject !== "string") return fail(409, "The account has no SSO identity yet.");
+    const person = await directory(`/users/${encodeURIComponent(subject)}`);
+    if (!person?.email) return fail(409, "The SSO identity is not in the directory.");
+    const record = { email: String(person.email).toLowerCase(), userId, subject };
+    await people.update((all) => ({ ...all, [principalId]: record }));
+    log("console.people.recorded", { by: admin.email, principalId, email: record.email, subject });
+    return json(200, { data: { principalId, ...record } });
+  }
+  return fail(404, "Not found.");
+}
+
+// --- server ---------------------------------------------------------------------------------
 createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", "http://local");
     if (url.pathname === "/healthz") return send(res, 200, {}, "ok");
-    if (url.pathname === "/check") return check(req, res);
-    // The remaining routes are served on the auth host only.
+    if (url.pathname === "/check") return await check(req, res);
     const host = String(req.headers.host ?? "").toLowerCase().split(":")[0];
+    if (host === CONSOLE_HOST && url.pathname.startsWith("/oae/api/")) return await consoleApi(req, res, url);
+    // The remaining routes are served on the auth host only.
     if (host !== AUTH_HOST) return send(res, 404, {}, "not found");
     if (url.pathname === "/login" && req.method === "GET") return await login(req, res, url);
     if (url.pathname === "/callback" && req.method === "GET") return await callback(req, res, url);
     if (url.pathname === "/logout") return logout(req, res);
+    if (url.pathname === "/apps" && req.method === "GET") return await appsPage(req, res);
+    if (url.pathname === "/apps/connect") return await appsConnect(req, res);
+    if (url.pathname === "/apps/revoke") return await appsRevoke(req, res);
     if (url.pathname.startsWith("/open/") && req.method === "GET") return open(res, url);
     return send(res, 404, {}, "not found");
   } catch (error) {
     log("request.failed", { message: error.message });
-    if (!res.headersSent) send(res, 500, {}, "error");
+    if (!res.headersSent) {
+      const status = error.status ?? 500;
+      send(res, status, { "content-type": "application/json" }, JSON.stringify({ error: { code: "OAE_EDGE", message: status === 500 ? "The request failed." : error.message } }));
+    }
   }
-}).listen(PORT, () => log("listening", { port: PORT, authHost: AUTH_HOST, agentsDomain: AGENTS_DOMAIN }));
+}).listen(PORT, () => log("listening", { port: PORT, authHost: AUTH_HOST, agentsDomain: AGENTS_DOMAIN, consoleHost: CONSOLE_HOST }));

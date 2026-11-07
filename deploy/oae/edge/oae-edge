@@ -7,9 +7,13 @@
 #   oae-edge sync      grants -> ACL, per-Agent Ingress/NetworkPolicy, gateway identities, routes
 #                      (the oae-edge-sync timer runs this every minute)
 #
+# This is platform automation (install and the sync timer), not an administrator's tool: people
+# are managed in the console's People panel and connect their own apps at auth.agents.<host>/apps.
+#
 # Settings: /opt/oce/prod/edge.env (OAE_EDGE_IMAGE, OAE_EDGE_ISSUER, OAE_EDGE_CLIENT_ID,
-# OAE_EDGE_IDENTITY_PREFIX, OAE_HOST); secrets in /opt/oce/prod/secure/edge-client-secret and
-# edge-session-key.
+# OAE_EDGE_IDENTITY_PREFIX, OAE_HOST, optional OAE_EDGE_DIRECTORY_CLIENT_ID); secrets in
+# /opt/oce/prod/secure/edge-client-secret, edge-session-key and (optional)
+# edge-directory-client-secret.
 set -euo pipefail
 . /opt/oce/env.sh
 export PATH=/opt/oce/tools/bin:$PATH KUBECONFIG=${KUBECONFIG:-/opt/oce/prod/kubeconfig}
@@ -20,29 +24,82 @@ SECURE=$PROD/secure
 AGENTS="agents.$OAE_HOST"
 AUTH_HOST="auth.$AGENTS"
 EDGE_NS=oae-edge
-REGISTRY=$PROD/oae-users.json
-DEVICES=$PROD/oae-devices.json   # app device tokens (hashes only), written by `oae-user device`
+# Before the edge kept these itself (oae-edge-people / oae-edge-devices Secrets): migrated once.
+LEGACY_REGISTRY=$PROD/oae-users.json
+LEGACY_DEVICES=$PROD/oae-devices.json
 HERMES=$PROD/oae-hermes.json     # Strike 5a Hermes agents (its tool is retired; boxes may keep the file)
 HERMES_NS=oae-hermes
 STATE=$PROD/edge-state.json
 ROLE_OPERATOR="OAE Agent operator"
 log() { echo "oae-edge: $*"; }
 
+# The edge's own records (Secrets it reads and writes): people (OCE Principal -> SSO subject) and app
+# tokens. Created once; the root-owned files earlier versions kept are imported, then set aside.
+migrate_records() {
+  local people='{}' devs='{}'
+  if ! kubectl -n $EDGE_NS get secret oae-edge-people >/dev/null 2>&1; then
+    [ -f "$LEGACY_REGISTRY" ] && people=$(jq -c 'to_entries | map(select(.value.principalId and .value.subject))
+      | map({key: .value.principalId, value: {email: .key, userId: .value.userId, subject: .value.subject}}) | from_entries' "$LEGACY_REGISTRY")
+    kubectl -n $EDGE_NS create secret generic oae-edge-people --from-literal=people.json="$people" >/dev/null
+    log "people records created ($(jq length <<<"$people") imported)"
+  fi
+  if [ -f "$LEGACY_DEVICES" ] && [ -f "$LEGACY_REGISTRY" ]; then
+    devs=$(jq -c --slurpfile reg "$LEGACY_REGISTRY" '
+      with_entries(select($reg[0][.value.email].subject)
+        | .value = {sub: $reg[0][.value.email].subject, email: .value.email, id: .value.id, label: .value.label, created: .value.created})' "$LEGACY_DEVICES")
+    kubectl -n $EDGE_NS create secret generic oae-edge-devices --from-literal=devices.json="$devs" \
+      --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    mv "$LEGACY_DEVICES" "$LEGACY_DEVICES.migrated"
+    log "app tokens moved to the edge ($(jq length <<<"$devs"))"
+  fi
+  kubectl -n $EDGE_NS get secret oae-edge-devices >/dev/null 2>&1 ||
+    kubectl -n $EDGE_NS create secret generic oae-edge-devices --from-literal=devices.json='{}' >/dev/null
+}
+
+# principal_subjects: { "<prn_ id>": "<SSO subject>" } from the edge's people records.
+principal_subjects() {
+  kubectl -n $EDGE_NS get secret oae-edge-people -o jsonpath='{.data.people\.json}' 2>/dev/null | base64 -d 2>/dev/null |
+    jq -c 'map_values(.subject // empty)' 2>/dev/null || echo '{}'
+}
+
 rules_dir() { ls -d /etc/komodo/stacks/*/config/traefik/rules 2>/dev/null | head -1; }
 
 cmd_install() {
   kubectl get ns $EDGE_NS >/dev/null 2>&1 || kubectl create ns $EDGE_NS >/dev/null
+  local directory=()
+  [ -s "$SECURE/edge-directory-client-secret" ] &&
+    directory=(--from-file=OAE_EDGE_DIRECTORY_CLIENT_SECRET=$SECURE/edge-directory-client-secret)
   kubectl -n $EDGE_NS create secret generic oae-edge-authz \
     --from-file=OAE_EDGE_CLIENT_SECRET=$SECURE/edge-client-secret \
-    --from-file=OAE_EDGE_SESSION_KEY=$SECURE/edge-session-key \
+    --from-file=OAE_EDGE_SESSION_KEY=$SECURE/edge-session-key "${directory[@]}" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl -n $EDGE_NS get cm oae-edge-acl >/dev/null 2>&1 ||
-    kubectl -n $EDGE_NS create cm oae-edge-acl --from-literal=acl.json='{}' >/dev/null
-  kubectl -n $EDGE_NS get secret oae-edge-devices >/dev/null 2>&1 ||
-    kubectl -n $EDGE_NS create secret generic oae-edge-devices --from-literal=devices.json='{}' >/dev/null
+    kubectl -n $EDGE_NS create cm oae-edge-acl --from-literal=acl.json='{}' --from-literal=agents.json='{}' >/dev/null
   kubectl -n $EDGE_NS get secret oae-edge-hermes >/dev/null 2>&1 ||
     kubectl -n $EDGE_NS create secret generic oae-edge-hermes --from-literal=hermes.json='{}' >/dev/null
+  migrate_records
   kubectl apply -f - >/dev/null <<YAML
+# The edge reads and writes exactly its two record Secrets, nothing else in the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: oae-edge-authz, namespace: $EDGE_NS }
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: oae-edge-authz-records, namespace: $EDGE_NS }
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [oae-edge-people, oae-edge-devices]
+  verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: oae-edge-authz-records, namespace: $EDGE_NS }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: oae-edge-authz-records }
+subjects: [{ kind: ServiceAccount, name: oae-edge-authz, namespace: $EDGE_NS }]
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: oae-edge-authz, namespace: $EDGE_NS, labels: { app.kubernetes.io/name: oae-edge-authz } }
@@ -53,7 +110,8 @@ spec:
     metadata: { labels: { app.kubernetes.io/name: oae-edge-authz } }
     spec:
       nodeSelector: { oce-role: control }
-      automountServiceAccountToken: false
+      serviceAccountName: oae-edge-authz
+      automountServiceAccountToken: true
       securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
       containers:
       - name: authz
@@ -63,22 +121,22 @@ spec:
         - { name: OAE_EDGE_ISSUER, value: "$OAE_EDGE_ISSUER" }
         - { name: OAE_EDGE_CLIENT_ID, value: "$OAE_EDGE_CLIENT_ID" }
         - { name: OAE_EDGE_AGENTS_DOMAIN, value: "$AGENTS" }
+        - { name: OAE_EDGE_CONSOLE_HOST, value: "$OAE_HOST" }
+        - { name: OAE_EDGE_DIRECTORY_CLIENT_ID, value: "${OAE_EDGE_DIRECTORY_CLIENT_ID:-}" }
         - { name: OAE_EDGE_INSTALLATION_ID, value: "$($OCC installation get --output json | jq -r .id)" }
         - { name: OAE_EDGE_IDENTITY_PREFIX, value: "$OAE_EDGE_IDENTITY_PREFIX" }
         - { name: OAE_EDGE_ACL_FILE, value: /acl/acl.json }
-        - { name: OAE_EDGE_DEVICES_FILE, value: /devices/devices.json }
+        - { name: OAE_EDGE_AGENTS_FILE, value: /acl/agents.json }
         - { name: OAE_EDGE_HERMES_FILE, value: /hermes/hermes.json }
         envFrom: [{ secretRef: { name: oae-edge-authz } }]
         volumeMounts:
         - { name: acl, mountPath: /acl, readOnly: true }
-        - { name: devices, mountPath: /devices, readOnly: true }
         - { name: hermes, mountPath: /hermes, readOnly: true }
         readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
         resources: { requests: { cpu: 20m, memory: 64Mi }, limits: { memory: 192Mi } }
         securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
       volumes:
       - { name: acl, configMap: { name: oae-edge-acl } }
-      - { name: devices, secret: { secretName: oae-edge-devices } }
       - { name: hermes, secret: { secretName: oae-edge-hermes } }
 ---
 apiVersion: v1
@@ -96,6 +154,17 @@ spec:
   rules:
   - host: "$AUTH_HOST"
     http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: oae-edge-authz, port: { number: 8080 } } } }] }
+---
+# The console's People panel calls /oae/api/ on the console host, with the administrator's own
+# console session (the longer path wins over OCE's own / route).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: oae-edge-console-api, namespace: $EDGE_NS }
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: "$OAE_HOST"
+    http: { paths: [{ path: /oae/api/, pathType: Prefix, backend: { service: { name: oae-edge-authz, port: { number: 8080 } } } }] }
 YAML
   kubectl -n $EDGE_NS rollout restart deploy/oae-edge-authz >/dev/null
   kubectl -n $EDGE_NS rollout status deploy/oae-edge-authz --timeout=300s >/dev/null
@@ -125,6 +194,15 @@ spec:
     trustForwardHeader: true
     authResponseHeaders: $authh
 ---
+# After the check: the Agent never sees the person's edge session cookie (OCE's own Gateway
+# routes drop Cookie too), so an Agent cannot replay it against the person's other Agents.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: { name: oae-edge-nocookie, namespace: $1 }
+spec:
+  headers:
+    customRequestHeaders: { Cookie: "" }
+---
 # Apps reach the gateway at wss://agent-…/d/oaed_<token>: after the check, drop that prefix.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -145,7 +223,7 @@ metadata:
   namespace: $1
   labels: { app.kubernetes.io/managed-by: oae-edge }
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: "$1-$mw-strip@kubernetescrd,$1-$mw-auth@kubernetescrd,$1-oae-edge-device-path@kubernetescrd"
+    traefik.ingress.kubernetes.io/router.middlewares: "$1-$mw-strip@kubernetescrd,$1-$mw-auth@kubernetescrd,$1-oae-edge-nocookie@kubernetescrd,$1-oae-edge-device-path@kubernetescrd"
 spec:
   ingressClassName: traefik
   rules:
@@ -177,7 +255,7 @@ gateway_identities() {  # gateway_identities NS AGENT_ID CONFIG_ID ORIGIN PEOPLE
   cfg=$($OCC configuration get "$3" --namespace "$1" --output json)
   want=$(jq -c --arg o "$4" --argjson people "$5" --arg prefix "$OAE_EDGE_IDENTITY_PREFIX" '
     .values as $v
-    | ($people | to_entries | map({id: "\($prefix):\(.key)", scopes: (if .value == "operator" then ["operator.read","operator.write","operator.approvals"] else ["operator.read","operator.write"] end)})) as $p
+    | ($people | to_entries | map({id: "\($prefix):\(.key)", scopes: (if .value == "operator" then ["operator.read","operator.write","operator.approvals","operator.pairing"] else ["operator.read","operator.write"] end)})) as $p
     | $v
     | .gateway.auth.trustedProxy.allowUsers = (["occ-workspace-files"] + ($p | map(.id)) | unique)
     | .gateway.auth.identityScopes = ({"occ-workspace-files": ["operator.admin"]} + ($p | map({(.id): .scopes}) | add // {}))
@@ -194,12 +272,12 @@ gateway_identities() {  # gateway_identities NS AGENT_ID CONFIG_ID ORIGIN PEOPLE
 }
 
 cmd_sync() {
-  local ins acl routes ns roles bindings agents state
+  local ins acl meta routes ns roles bindings agents state subjects
   ins=$($OCC installation get --output json | jq -r .id)
-  [ -f "$REGISTRY" ] || echo '{}' > "$REGISTRY"
   [ -f "$STATE" ] || echo '{}' > "$STATE"
   state=$(cat "$STATE")
-  acl='{}'; routes=""; hermes_tokens='{}'
+  subjects=$(principal_subjects)
+  acl='{}'; meta='{}'; routes=""; hermes_tokens='{}'
   for ns in $($OCC namespace list --output json | jq -r '.[] | select(.status == "ready") | .id'); do
     roles=$($OCC iam role list --namespace "$ns" --output json)
     bindings=$($OCC iam access-binding list --namespace "$ns" --output json)
@@ -210,9 +288,8 @@ cmd_sync() {
       aid=$(jq -r .id <<<"$agent"); cfgid=$(jq -r .configurationId <<<"$agent"); rev=$(jq -r '.activeRevisionId // ""' <<<"$agent")
       hash=$(printf '%s\0%s\0%s' "$ins" "$ns" "$aid" | sha256sum | cut -c1-32)
       host="agent-$hash.$AGENTS"; short=${hash:0:12}
-      # People granted this Agent (OCE AccessBindings) who have an SSO subject (oae-user registry).
-      people=$(jq -c --arg a "$aid" --arg op "$ROLE_OPERATOR" --argjson roles "$roles" --slurpfile reg "$REGISTRY" '
-        ($reg[0] | to_entries | map(select(.value.subject and .value.principalId) | {(.value.principalId): .value.subject}) | add // {}) as $sub
+      # People granted this Agent (OCE AccessBindings) whose SSO subject the edge has recorded.
+      people=$(jq -c --arg a "$aid" --arg op "$ROLE_OPERATOR" --argjson roles "$roles" --argjson sub "$subjects" '
         | ($roles | map({(.id): .name}) | add // {}) as $rname
         | map(select(.resourceKind == "agent" and .resourceId == $a and $sub[.subjectId]))
         | map({sub: $sub[.subjectId], level: (if $rname[.roleId] == $op then "operator" else "user" end)})
@@ -223,6 +300,8 @@ cmd_sync() {
       tns=$(jq -r .metadata.namespace <<<"$svc"); sname=$(jq -r .metadata.name <<<"$svc")
       sport=$(jq -r '[.spec.ports[] | select(.name == "http")][0].port // .spec.ports[0].port' <<<"$svc")
       ish=""
+      meta=$(jq -c --arg h "$host" --arg n "$(jq -r .name <<<"$agent")" --arg r "$(jq -r '.metadata.labels["oae.dev/runtime"] // "openclaw"' <<<"$svc")" \
+        '.[$h] = {name: $n, runtime: $r}' <<<"$meta")
       if [ "$(jq -r '.metadata.labels["oae.dev/runtime"] // ""' <<<"$svc")" = hermes ]; then
         ish=1
         # OCE-native Hermes Agent (strike 5b): the edge presents its session token; no OpenClaw
@@ -264,14 +343,14 @@ cmd_sync() {
       [ -n "$hname" ] || continue
       local hhost hpeople htoken
       hhost=$(jq -r --arg n "$hname" '.[$n].host' "$HERMES")
-      hpeople=$(jq -c --arg n "$hname" --arg ns "$ns" --argjson roles "$roles" --slurpfile reg "$REGISTRY" '
-        ($reg[0] | to_entries | map(select(.value.subject and .value.principalId) | {(.value.principalId): .value.subject}) | add // {}) as $sub
+      hpeople=$(jq -c --arg n "$hname" --arg ns "$ns" --argjson roles "$roles" --argjson sub "$subjects" '
         | ($roles | map({(.id): .name}) | add // {}) as $rname
         | map(select(.resourceKind == "namespace" and .resourceId == $ns and $sub[.subjectId]
                      and ($rname[.roleId] == "OAE Hermes user: \($n)" or $rname[.roleId] == "OAE Hermes operator: \($n)")))
         | map({sub: $sub[.subjectId], level: (if ($rname[.roleId] | startswith("OAE Hermes operator")) then "operator" else "user" end)})
         | reduce .[] as $e ({}; .[$e.sub] = (if .[$e.sub] == "operator" or $e.level == "operator" then "operator" else "user" end))' <<<"$bindings")
       acl=$(jq -c --arg h "$hhost" --argjson p "$hpeople" '.[$h] = $p' <<<"$acl")
+      meta=$(jq -c --arg h "$hhost" --arg n "$hname" '.[$h] = {name: $n, runtime: "hermes"}' <<<"$meta")
       htoken=$(kubectl -n $HERMES_NS get secret "hermes-$hname" -o jsonpath='{.data.HERMES_DASHBOARD_SESSION_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true)
       [ -n "$htoken" ] || continue
       hermes_tokens=$(jq -c --arg h "$hhost" --arg t "$htoken" '.[$h] = $t' <<<"$hermes_tokens")
@@ -284,7 +363,7 @@ metadata:
   namespace: $HERMES_NS
   labels: { app.kubernetes.io/managed-by: oae-edge, oae.dev/hermes: "$hname" }
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: "$HERMES_NS-oae-edge-strip@kubernetescrd,$HERMES_NS-oae-edge-auth@kubernetescrd,$HERMES_NS-oae-edge-device-path@kubernetescrd"
+    traefik.ingress.kubernetes.io/router.middlewares: "$HERMES_NS-oae-edge-strip@kubernetescrd,$HERMES_NS-oae-edge-auth@kubernetescrd,$HERMES_NS-oae-edge-nocookie@kubernetescrd,$HERMES_NS-oae-edge-device-path@kubernetescrd"
 spec:
   ingressClassName: traefik
   rules:
@@ -295,14 +374,10 @@ YAML
     done < <(jq -r --arg ns "$ns" 'to_entries[] | select(.value.namespaceId == $ns) | .key' "$HERMES")
   done
   printf '%s' "$state" > "$STATE"
-  # ACL for oae-edge-authz (mounted ConfigMap; picked up within the kubelet's sync period).
-  kubectl -n $EDGE_NS create cm oae-edge-acl --from-literal=acl.json="$acl" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  # App device tokens: hash -> subject, only for people the registry still knows with a subject.
-  local devs
-  devs=$(jq -c --slurpfile reg "$REGISTRY" '
-    ($reg[0] | with_entries(select(.value.subject)) | map_values(.subject)) as $sub
-    | with_entries(select($sub[.value.email]) | .value = {sub: $sub[.value.email]})' "${DEVICES:-/dev/null}" 2>/dev/null || echo '{}')
-  kubectl -n $EDGE_NS create secret generic oae-edge-devices --from-literal=devices.json="$devs" \
+  # ACL and Agent names for oae-edge-authz (mounted ConfigMap; picked up within the kubelet's sync
+  # period). App tokens are the edge's own records: a token works only while this ACL grants its
+  # person the Agent.
+  kubectl -n $EDGE_NS create cm oae-edge-acl --from-literal=acl.json="$acl" --from-literal=agents.json="$meta" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl -n $EDGE_NS create secret generic oae-edge-hermes --from-literal=hermes.json="$hermes_tokens" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null

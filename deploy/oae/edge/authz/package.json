@@ -5,5 +5,5 @@
   "description": "Sign-in and per-Agent authorization for Open Agents Enterprise's human ingress",
   "license": "MIT",
   "engines": { "node": ">=24.22.1" },
-  "dependencies": { "openid-client": "6.8.9" }
+  "dependencies": { "openid-client": "6.8.9", "qrcode-generator": "2.0.4" }
 }
