@@ -225,6 +225,12 @@ const devices = secretStore("oae-edge-devices", "devices.json");
 // Who an OCE Principal is: { "<prn_ id>": { email, userId, subject } }, recorded only from OCE's
 // own account record (read with an administrator's session) and the directory.
 const people = secretStore("oae-edge-people", "people.json");
+// One unused OpenClaw bootstrap token per Agent, minted by the sync with `openclaw qr --limited`
+// (node + operator without operator.admin; minting needs operator.admin, which no person holds):
+// { "<agent host>": { bootstrapToken, expiresAtMs } }. Connect takes it; the sync mints the next.
+const pairing = secretStore("oae-edge-pairing", "pairing.json");
+// A taken token must outlive the person's scan.
+const PAIRING_MIN_LIFE_MS = 120_000;
 
 // --- helpers --------------------------------------------------------------------------------
 const isAgentHost = (host) =>
@@ -250,7 +256,9 @@ const PAGE_HEADERS = {
   "content-type": "text/html; charset=utf-8",
   "content-security-policy":
     "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-  "referrer-policy": "no-referrer",
+  // Not "no-referrer": under it browsers send "Origin: null" on this page's own form posts.
+  // same-origin still sends nothing to other sites.
+  "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
 };
 const STYLE =
@@ -460,8 +468,13 @@ async function appsPage(req, res, notice = "") {
   );
 }
 
+// A form post from this host's own pages: the browser's Origin, or, where a browser sends
+// "Origin: null", its Sec-Fetch-Site (set by the browser; a page cannot forge it).
 function sameOriginPost(req, origin) {
-  return req.method === "POST" && req.headers.origin === origin;
+  if (req.method !== "POST") return false;
+  const sent = req.headers.origin;
+  if (sent === origin) return true;
+  return (sent === undefined || sent === "null") && req.headers["sec-fetch-site"] === "same-origin";
 }
 
 async function appsConnect(req, res) {
@@ -474,6 +487,24 @@ async function appsConnect(req, res) {
   const agent = myAgents(session.sub).find((a) => a.host === host);
   if (!agent) return send(res, 403, PAGE_HEADERS, textPage("No access", "You do not have access to that Agent."));
   if (!/^[A-Za-z0-9 ._-]{1,40}$/.test(label)) return appsPage(req, res, `<p class="error">Name the app with up to 40 letters, digits, spaces or . _ -</p>`);
+  // OpenClaw: take this Agent's bootstrap token first, so the phone pairs on its own.
+  let bootstrap = null;
+  if (agent.runtime !== "hermes") {
+    try {
+      await pairing.update((all) => {
+        const entry = Object.hasOwn(all, host) ? all[host] : null;
+        if (!entry?.bootstrapToken || !(entry.expiresAtMs > Date.now() + PAIRING_MIN_LIFE_MS)) {
+          throw Object.assign(new Error("no pairing token"), { code: "NO_PAIRING" });
+        }
+        bootstrap = entry;
+        delete all[host];
+        return all;
+      });
+    } catch (error) {
+      if (error.code !== "NO_PAIRING") throw error;
+      return appsPage(req, res, `<p class="error">The phone setup for ${esc(agent.name)} is being prepared. Try again in a minute.</p>`);
+    }
+  }
   const token = `oaed_${randomBytes(32).toString("base64url")}`;
   const hash = tokenHash(token);
   const id = hash.slice(0, 12);
@@ -488,13 +519,24 @@ async function appsConnect(req, res) {
   let body;
   if (agent.runtime === "hermes") {
     const url = `https://${host}/d/${token}`;
-    body = `<p>In Hermes Desktop open <b>Settings → Remote gateway</b> and enter this URL. If the app also asks for a session token, enter anything: the edge supplies the real one.</p>
-<code class="secret">${esc(url)}</code>`;
+    // Hermes Desktop puts its session token in the chat WebSocket's ?token=, which the edge cannot
+    // set, so the person enters the Agent's own one. It opens nothing alone: every request still
+    // needs this app token (or a signed-in session) at the edge.
+    const sessionToken = hermesToken(host);
+    body = sessionToken
+      ? `<p>In Hermes Desktop open <b>Settings → Remote gateway</b> and enter:</p>
+<p>Gateway URL:</p><code class="secret">${esc(url)}</code>
+<p>Session token:</p><code class="secret">${esc(sessionToken)}</code>
+<p class="muted">The session token belongs to the Agent and works only together with the URL above, which is yours alone.</p>`
+      : `<p>This Agent is still starting, so Hermes Desktop cannot connect yet. Disconnect this app below and connect again in a few minutes.</p>`;
   } else {
     const url = `wss://${host}/d/${token}`;
-    // OpenClaw's setup code: base64url JSON. No bootstrap token: the edge authenticates the app as
-    // you, and the Agent's operators approve the phone's node access in the Agent's Devices page.
-    const setupCode = Buffer.from(JSON.stringify({ url })).toString("base64url");
+    // OpenClaw's setup code: base64url JSON. The bootstrap token pairs the phone at once, with
+    // limited access (no operator.admin); the edge authenticates every request as you.
+    const setupCode = Buffer.from(
+      JSON.stringify({ url, bootstrapToken: bootstrap.bootstrapToken, expiresAtMs: bootstrap.expiresAtMs }),
+    ).toString("base64url");
+    const minutes = Math.max(1, Math.floor((bootstrap.expiresAtMs - Date.now()) / 60_000));
     const qr = qrcode(0, "M");
     qr.addData(setupCode);
     qr.make();
@@ -503,7 +545,8 @@ async function appsConnect(req, res) {
 <img class="qr" alt="Setup code QR" src="data:image/svg+xml;base64,${svg}">
 <p>Setup code:</p><code class="secret">${esc(setupCode)}</code>
 <p>Gateway URL (for manual setup):</p><code class="secret">${esc(url)}</code>
-<p class="muted">The app chats as you. If it also asks the Agent to use the phone (notifications, location…), an operator of the Agent approves that in the Agent's Devices page.</p>`;
+<p><b>Scan within ${minutes} minutes.</b> After that, disconnect this app below and connect again.</p>
+<p class="muted">The app chats as you and pairs on its own, with limited access (it cannot change the Agent's settings).</p>`;
   }
   return send(
     res,

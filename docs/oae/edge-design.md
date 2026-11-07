@@ -77,10 +77,25 @@ cookie comes with it):
 
 App tokens (`/apps`): created by the person for one Agent they are granted, bound to that Agent's
 host, shown once (only the SHA-256 is kept), refused when the grant goes (every request is checked
-against the ACL), and listed and disconnected by the person. The OpenClaw setup code carries only
-the gateway URL (`wss://agent-…/d/<token>`); the official apps accept that (no bootstrap token): the
-edge authenticates the app as the person and new operator devices pair automatically, while node
-access waits for an operator's approval in the Agent's Devices page.
+against the ACL), and listed and disconnected by the person.
+
+Phones pair on their own. Without a bootstrap token the OpenClaw app asks to pair as node +
+operator **including `operator.admin`**, and the gateway lets only a caller holding every requested
+scope approve that, so under OCE (no person holds `operator.admin`) nobody could. The sync therefore
+keeps one unused `openclaw qr --limited` bootstrap token per shared OpenClaw Agent in Secret
+`oae-edge-pairing` (minting needs `operator.admin`, so the platform mints; 10-minute life, replaced
+under 5; written conditionally so a token the edge took is never put back). **Connect** takes the
+Agent's token and puts it in the person's setup code `{url: wss://agent-…/d/<app token>,
+bootstrapToken, expiresAtMs}`. The gateway accepts a valid bootstrap token ahead of the edge's
+trusted-proxy identity and, for the official Android/iOS apps only, pairs the phone with the limited
+profile: roles node + operator, scopes `operator.read/write/approvals/questions/talk.secrets`, never
+`operator.admin` (verified on a Pixel, 2026-11-07).
+
+Hermes Desktop gets `https://agent-…/d/<token>` **and the Agent's Hermes session token**. Its REST
+calls would work with any token (the edge sets `Authorization: Bearer`), but its chat and terminal
+WebSockets (`/api/ws`, `/api/pty`) carry the token as `?token=`, which Hermes compares with its own
+and the edge cannot set. The token is per Agent and opens nothing alone: without the person's app
+token or a signed-in session the edge answers 401, so disconnecting the app still cuts them off.
 
 Agents no longer see the person's edge session cookie: after the check, Traefik drops `Cookie`
 before the gateway (as OCE's own Gateway routes do), so one Agent cannot replay it against the
