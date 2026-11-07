@@ -30,6 +30,9 @@ const DEVICES_FILE = env("OAE_EDGE_DEVICES_FILE", "/devices/devices.json");
 // Hermes agents (single-owner, no proxy identity): { "<host>": "<dashboard session token>" }. For a
 // granted person the edge presents the agent's session token, as Hermes Desktop would.
 const HERMES_FILE = env("OAE_EDGE_HERMES_FILE", "/hermes/hermes.json");
+// The OCE installation, for /open: an Agent's host is agent-<sha256(installation\0namespace\0agent)
+// [:32]>.<agents domain>, as oae-edge sync names it. Unset: /open is not offered.
+const INSTALLATION_ID = process.env.OAE_EDGE_INSTALLATION_ID ?? "";
 const SESSION_SECONDS = Number(env("OAE_EDGE_SESSION_SECONDS", String(8 * 3600)));
 const PORT = Number(env("PORT", "8080"));
 if (SESSION_KEY.length < 32) throw new Error("OAE_EDGE_SESSION_KEY must be at least 32 bytes of hex");
@@ -232,6 +235,19 @@ async function callback(req, res, url) {
   }
 }
 
+// GET /open/<namespace>/<agent>: the console's "Open Agent" link. Redirects to that Agent's host,
+// which signs the person in and checks their grant as any visit does. Only ever redirects to a host
+// it computes under the agents domain; IDs are OCE's own formats.
+function open(res, url) {
+  const match = /^\/open\/(ns_[0-9a-f-]{36})\/(agt_[0-9a-f-]{36})$/.exec(url.pathname);
+  if (!INSTALLATION_ID || !match) return send(res, 404, {}, "not found");
+  const hash = createHash("sha256")
+    .update(`${INSTALLATION_ID}\0${match[1]}\0${match[2]}`)
+    .digest("hex")
+    .slice(0, 32);
+  return send(res, 302, { location: `https://agent-${hash}.${AGENTS_DOMAIN}/`, "cache-control": "no-store" });
+}
+
 function logout(req, res) {
   return send(res, 200, {
     "content-type": "text/html; charset=utf-8",
@@ -250,6 +266,7 @@ createServer(async (req, res) => {
     if (url.pathname === "/login" && req.method === "GET") return await login(req, res, url);
     if (url.pathname === "/callback" && req.method === "GET") return await callback(req, res, url);
     if (url.pathname === "/logout") return logout(req, res);
+    if (url.pathname.startsWith("/open/") && req.method === "GET") return open(res, url);
     return send(res, 404, {}, "not found");
   } catch (error) {
     log("request.failed", { message: error.message });

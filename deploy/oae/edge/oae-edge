@@ -63,6 +63,7 @@ spec:
         - { name: OAE_EDGE_ISSUER, value: "$OAE_EDGE_ISSUER" }
         - { name: OAE_EDGE_CLIENT_ID, value: "$OAE_EDGE_CLIENT_ID" }
         - { name: OAE_EDGE_AGENTS_DOMAIN, value: "$AGENTS" }
+        - { name: OAE_EDGE_INSTALLATION_ID, value: "$($OCC installation get --output json | jq -r .id)" }
         - { name: OAE_EDGE_IDENTITY_PREFIX, value: "$OAE_EDGE_IDENTITY_PREFIX" }
         - { name: OAE_EDGE_ACL_FILE, value: /acl/acl.json }
         - { name: OAE_EDGE_DEVICES_FILE, value: /devices/devices.json }

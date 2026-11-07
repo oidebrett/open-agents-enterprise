@@ -41,6 +41,7 @@ import {
 } from "./harness-auth.mjs";
 import { renderAgentAccess } from "./access.mjs";
 import { renderNativeAdminAccess } from "./native-admin.mjs";
+import { renderOaeOpenAgent } from "./oae-open-agent.mjs";
 import { createAgentDeletion } from "./deletion.mjs";
 import { createAgentStop } from "./stop.mjs";
 import { gatewaySafetyControls } from "./gateway-safety.mjs";
@@ -1549,7 +1550,12 @@ export async function renderAgentDetail(
       },
     },
   );
-  headerActions.append(nativeAdmin.launch, nativeAdmin.unavailable);
+  headerActions.append(
+    nativeAdmin.launch,
+    nativeAdmin.unavailable,
+    // OAE: SSO installations open Agents through the edge.
+    renderOaeOpenAgent(context, namespaceId, agentId),
+  );
   const recovery = createDeploymentRecovery(context, {
     path,
     selected,
