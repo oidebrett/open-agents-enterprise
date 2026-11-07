@@ -79,6 +79,9 @@ const CONSOLE_ASSETS = new Map([
       "agents/deletion.mts",
       "agents/stop.mts",
       "agents/native-admin.mts",
+      // OAE: the edge's "Open Agent" link (SSO installations).
+      "agents/oae-open-agent.mts",
+      "agents/oae-people.mts",
       "agents/harness-auth.mts",
       "agents/device-login.mts",
       "agents/credential-access.mts",

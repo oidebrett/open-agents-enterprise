@@ -155,6 +155,8 @@ test("Agent creation stores its API key separately, grants exact access, and sav
   assert.deepEqual(await optionValues(page.getByLabel("Provider", { exact: true })), [
     { value: "openai", text: "OpenAI" },
     { value: "anthropic", text: "Anthropic" },
+    // OAE: any OpenAI-compatible endpoint (its own Base URL), Embedded like Anthropic.
+    { value: "openai-compatible", text: "OpenAI-compatible" },
   ]);
   const harness = page.getByLabel("Harness", { exact: true });
   assert.deepEqual(await optionValues(harness), [
@@ -2571,6 +2573,85 @@ test("Agent creation blocks an incompatible fallback after changing provider unt
   assert.equal(pathRequests(requests, "POST", `/namespaces/${namespace.id}/secrets`).length, 2);
   assert.equal(configurationPostRequests(requests, namespace.id).length, 1);
   assert.equal(agentPostRequests(requests, namespace.id).length, 1);
+});
+
+test("Agent creation configures an OpenAI-compatible endpoint for Embedded OpenClaw and Hermes", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Compatible endpoint", { ready: true });
+  const { page } = await newPage(t, fixture);
+  const requests = apiRequests(page, fixture.origin);
+  const endpoint = "https://models.example.com/api/v1";
+  const modelId = "vendor/model-7b";
+  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+  for (const harnessId of ["openclaw", "hermes"] as const) {
+    await page.goto(`${fixture.origin}/console/agents/new?namespace=${namespace.id}`);
+    await page.getByRole("heading", { name: "Create Agent" }).waitFor();
+    await page.getByRole("button", { name: "Start with default Preset" }).click();
+    const baseUrl = page.getByLabel("Base URL", { exact: true });
+    assert.equal(await baseUrl.isVisible(), false);
+    await page.getByLabel("Provider", { exact: true }).selectOption("openai-compatible");
+    const harness = page.getByLabel("Harness", { exact: true });
+    assert.equal(await harness.inputValue(), "openclaw");
+    assert.equal(
+      await harness
+        .locator('option[value="codex"]')
+        .evaluate((node: HTMLOptionElement) => node.hidden),
+      true,
+    );
+    await harness.selectOption(harnessId);
+    assert.equal(await page.getByLabel("Execution mode").inputValue(), "embedded");
+    assert.equal(await page.getByLabel("Execution mode").isDisabled(), true);
+    assert.equal(await baseUrl.isVisible(), true);
+    assert.equal(
+      await page
+        .getByLabel("Authentication method", { exact: true })
+        .locator('option[value="api_key"]')
+        .textContent(),
+      "API key",
+    );
+    // Compatible endpoints have no model list: the ID is entered.
+    assert.equal(
+      await page.getByRole("button", { name: "Enter model ID manually", exact: true }).isVisible(),
+      false,
+    );
+    assert.equal(await page.getByLabel("Model ID", { exact: true }).isVisible(), true);
+    await page.getByLabel("Agent name").fill(`compatible-${harnessId}`);
+    await enterManualModel(page, `test-compatible-${harnessId}-key`, modelId);
+
+    // An endpoint that is not HTTPS /v1 is refused before anything is written.
+    await baseUrl.fill("http://models.example.com/api/v1");
+    const writesBefore = nonAuthWriteRequests(requests).length;
+    await page.getByRole("button", { name: "Create Agent" }).click();
+    await page.getByRole("alert").filter({ hasText: "HTTPS endpoint ending in /v1" }).waitFor();
+    assert.equal(nonAuthWriteRequests(requests).length, writesBefore);
+
+    await baseUrl.fill(endpoint);
+    await openAdvancedSettings(page);
+    const template = JSON.parse(await page.getByLabel("Configuration JSON").inputValue());
+    assert.deepEqual(template.models.providers.openai, {
+      baseUrl: endpoint,
+      api: "openai-completions",
+      models: [{ id: modelId, name: modelId }],
+    });
+    assert.deepEqual(template.agents.defaults.models[`openai/${modelId}`], {
+      agentRuntime: { id: harnessId },
+    });
+    if (harnessId === "hermes") {
+      // The test Compute Driver has no Hermes runtime (OAE wraps the Kubernetes Driver), so it
+      // refuses Hermes bindings at validation; the Configuration above is the console's part.
+      continue;
+    }
+    const agent = await createAgentThroughForm(page, fixture, namespace.id);
+    assert.equal(agent.executionMode, "embedded");
+    const persisted = await fixture.request(
+      "GET",
+      `/namespaces/${namespace.id}/configurations/${agent.configurationId}`,
+    );
+    assert.equal(persisted.data.values.agents.defaults.model, `openai/${modelId}`);
+    assert.equal(persisted.data.values.models.providers.openai.baseUrl, endpoint);
+    assert.equal(persisted.data.values.models.providers.openai.api, "openai-completions");
+  }
 });
 
 test("Agent creation saves native models for dedicated and embedded harnesses", async (t) => {

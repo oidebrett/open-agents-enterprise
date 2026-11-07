@@ -41,6 +41,8 @@ import {
 } from "./harness-auth.mjs";
 import { renderAgentAccess } from "./access.mjs";
 import { renderNativeAdminAccess } from "./native-admin.mjs";
+import { renderOaeOpenAgent } from "./oae-open-agent.mjs";
+import { renderOaePeople } from "./oae-people.mjs";
 import { createAgentDeletion } from "./deletion.mjs";
 import { createAgentStop } from "./stop.mjs";
 import { gatewaySafetyControls } from "./gateway-safety.mjs";
@@ -1549,7 +1551,12 @@ export async function renderAgentDetail(
       },
     },
   );
-  headerActions.append(nativeAdmin.launch, nativeAdmin.unavailable);
+  headerActions.append(
+    nativeAdmin.launch,
+    nativeAdmin.unavailable,
+    // OAE: SSO installations open Agents through the edge.
+    renderOaeOpenAgent(context, namespaceId, agentId),
+  );
   const recovery = createDeploymentRecovery(context, {
     path,
     selected,
@@ -1791,6 +1798,8 @@ export async function renderAgentDetail(
   let mountedTab: MountedTab | null = null;
   // The Access tab's sharing panel, built the first time the tab opens.
   let accessPanel: ReturnType<typeof renderAgentAccess> | null = null;
+  // OAE: the People panel above it (SSO installations, Installation administrators only).
+  let oaePeoplePanel: ReturnType<typeof renderOaePeople> | null = null;
   // Replaces an Access tab whose policy read was refused with Configuration, in place, once the
   // page shows (a page still behind its loading stand-in would rebuild instead) and the
   // navigation that opened the tab has finished. It says why, as a link to the tab would for a
@@ -4175,7 +4184,8 @@ export async function renderAgentDetail(
         // Back to a tab whose policy read was refused.
         leaveDeniedAccess();
       } else {
-        content.append(accessPanel.section);
+        oaePeoplePanel ??= renderOaePeople(context, agent);
+        content.append(oaePeoplePanel.section, accessPanel.section);
         if (returning) {
           accessPanel.recheck();
         }

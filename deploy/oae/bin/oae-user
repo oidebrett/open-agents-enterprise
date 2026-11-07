@@ -1,23 +1,19 @@
 #!/bin/bash
-# oae-user — people on an Open Agents Enterprise installation: SSO accounts and Agent access.
-# Installed on the OAE server by manidae-cloud; run as root. Uses only OCE's own APIs:
-# account provisioning, OIDC identity attachment, and Namespace Roles + AccessBindings
-# (docs/guides/topics/iam.md). Writes run under the recovery administrator's session, so OCE's
-# audit log attributes them to a human administrator; reads use the installation's service key.
+# oae-user — break-glass people management for the platform operator on the OAE server.
+#
+# Day to day, an Installation administrator manages people in the console (Agent page > Access >
+# People, signed in with their own SSO session, so OCE checks and audits every change as them),
+# and each person connects their own mobile app or Hermes Desktop at https://auth.agents.<host>/apps.
+# Use this tool only when the console path is unavailable (for example SSO is down): its writes run
+# under the recovery administrator's session, so OCE's audit log names the recovery account.
+# Run as root. Uses only OCE's own APIs plus the edge's people records (oae-edge-people Secret).
 #
 #   oae-user add    EMAIL OIDC_SUBJECT          account + attached SSO identity (Keycloak: user ID)
-#   oae-user grant  EMAIL AGENT [user|operator] see the Agent (user) or also edit/deploy/operate it;
-#                                               AGENT may be a Hermes agent (oae-hermes list)
+#   oae-user grant  EMAIL AGENT [user|operator] see the Agent (user) or also edit/deploy/operate it
+#                                               and approve its devices; AGENT: OpenClaw or Hermes
 #   oae-user revoke EMAIL AGENT                 remove that person's bindings on the Agent
 #   oae-user show   EMAIL                       sign-in methods and grants
-#   oae-user list                               people this tool added
-#   oae-user device add    EMAIL [AGENT] [LABEL] app token (OpenClaw mobile/desktop); with AGENT,
-#                                                 its wss:// URL and a pairing QR / setup code
-#   oae-user device list   [EMAIL]              app tokens (never the tokens themselves)
-#   oae-user device revoke EMAIL ID|all         stop an app token (within ~2 minutes)
-#   oae-user device nodes        AGENT          phones/computers asking for (or given) node access
-#   oae-user device approve-node AGENT REQUEST  let the Agent use that device (shows what, then asks)
-#   oae-user device remove-node  AGENT NODE     take node access away again
+#   oae-user list                               people the edge knows
 #
 # Options (env): OAE_NAMESPACE (name or ns_ ID, default "default").
 set -euo pipefail
@@ -25,8 +21,7 @@ set -euo pipefail
 OCC=/opt/oce/src/bin/occ
 PROD=/opt/oce/prod
 SECURE=$PROD/secure
-REGISTRY=$PROD/oae-users.json   # OCE has no API that lists accounts; this keeps email -> IDs.
-DEVICES=$PROD/oae-devices.json   # app tokens: sha256(token) -> {email, id, label, created}
+export KUBECONFIG=$PROD/kubeconfig PATH=/opt/oce/tools/bin:$PATH
 ACCESS=/root/oce-access.txt
 URL=${OAE_URL:-$(sed -nE 's#^Console: +(https://[^/]+)/console/.*#\1#p' "$ACCESS")}
 ADMIN=${OAE_ADMIN_EMAIL:-$(sed -nE 's/^Sign in: +([^ ]+).*/\1/p' "$ACCESS")}
@@ -35,9 +30,8 @@ ROLE_USER="OAE Agent user"
 ROLE_OPERATOR="OAE Agent operator"
 
 die() { echo "oae-user: $*" >&2; exit 1; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 [ -n "$URL" ] && [ -n "$ADMIN" ] || die "cannot read the console URL and admin email from $ACCESS"
-[ -f "$REGISTRY" ] || { umask 077; echo '{}' > "$REGISTRY"; }
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 JAR=$W/session
@@ -66,10 +60,19 @@ api() {
 namespace_id() {
   $OCC namespace list --output json | jq -r --arg n "$WANT_NS" '[.[] | select(.name == $n or .id == $n)][0].id // empty'
 }
-registry_get() { jq -c --arg e "$1" '.[$e] // empty' "$REGISTRY"; }
-registry_put() {
-  local tmp; tmp=$(mktemp "$REGISTRY.XXXX")
-  jq --arg e "$1" --argjson v "$2" '.[$e] = $v' "$REGISTRY" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$REGISTRY"
+# The edge's people records ({ "<prn_ id>": { email, userId, subject } }); OCE has no API that
+# lists accounts. The console's People panel writes the same records through the edge.
+people() {
+  kubectl -n oae-edge get secret oae-edge-people -o jsonpath='{.data.people\.json}' | base64 -d
+}
+registry_get() {  # registry_get EMAIL -> { userId, principalId, subject? }
+  people | jq -c --arg e "$1" '[to_entries[] | select(.value.email == $e) | .value + {principalId: .key}][0] // empty'
+}
+registry_put() {  # registry_put EMAIL { userId, principalId, subject? }
+  local next
+  next=$(people | jq -c --arg e "$1" --argjson v "$2" '.[$v.principalId] = ({email: $e} + ($v | del(.principalId)))')
+  kubectl -n oae-edge create secret generic oae-edge-people --from-literal=people.json="$next" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 }
 norm_email() { tr '[:upper:]' '[:lower:]' <<<"$1"; }
 
@@ -169,6 +172,7 @@ cmd_grant() {
   [ "$level" = operator ] && ensure_binding "$ns" "$pid" "$role" configuration "$cfg"
   [ -n "$rev" ] && ensure_binding "$ns" "$pid" "$role" agent_revision "$rev"
   [ "$level" = operator ] && echo "Note: deploying also needs 'operate' on the Agent's Secrets; an administrator grants those." || true
+  echo "They open it from the console's Open Agent link and connect apps at https://auth.agents.${URL#https://}/apps."
   if systemctl is-enabled -q oae-edge-sync.timer 2>/dev/null; then
     echo "Done. The edge picks this up within a minute (and re-binds new revisions after each deploy)."
   else
@@ -210,114 +214,13 @@ cmd_show() {
   bindings "$ns" | jq -r --arg p "$pid" '.[] | select(.subjectId == $p) | "  \(.resourceKind) \(.resourceId)  role \(.roleId)"'
 }
 
-cmd_list() { jq -r 'to_entries[] | "\(.key)\t\(.value.userId)\tsubject=\(.value.subject // "-")"' "$REGISTRY"; }
-
-edge_resync() { systemctl start --no-block oae-edge-sync.service 2>/dev/null || true; }
-
-devices_put() {  # devices_put JQ_FILTER [ARGS...]: atomic update of the device file
-  local filter=$1 tmp; shift
-  [ -f "$DEVICES" ] || { umask 077; echo '{}' > "$DEVICES"; }
-  tmp=$(mktemp "$DEVICES.XXXX")
-  jq "$@" "$filter" "$DEVICES" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$DEVICES"
-}
+cmd_list() { people | jq -r 'to_entries[] | "\(.value.email)\t\(.value.userId)\tsubject=\(.value.subject // "-")"'; }
 
 cmd_device() {
-  local sub=${1:-}; shift || true
-  case $sub in
-    add)
-      local email agent label rec token hash id ns a aid ins h host url pod
-      email=$(norm_email "${1:-}"); agent=${2:-}; label=${3:-app}
-      rec=$(registry_get "$email"); [ -n "$rec" ] || die "$email is not known here; run: oae-user add $email <subject>"
-      jq -e .subject <<<"$rec" >/dev/null || die "$email has no SSO subject"
-      [[ $label =~ ^[A-Za-z0-9\ ._-]{1,40}$ ]] || die "label: up to 40 letters, digits, spaces or ._-"
-      token="oaed_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
-      hash=$(printf %s "$token" | sha256sum | cut -d' ' -f1); id=${hash:0:8}
-      devices_put '.[$h] = {email: $e, id: $i, label: $l, created: $c}' \
-        --arg h "$hash" --arg e "$email" --arg i "$id" --arg l "$label" --arg c "$(date -u +%FT%TZ)"
-      edge_resync
-      echo "App token $id for $email ($label). Shown once; anyone with it acts as $email on their granted Agents:"
-      echo "  $token"
-      if [ -n "$agent" ] && [ -n "$(hermes_ns "$agent")" ]; then
-        host=$(jq -r --arg n "$agent" '.[$n].host' "$HERMES_REGISTRY")
-        echo; echo "Hermes Desktop: Settings > Remote gateway URL:"
-        echo "  https://$host/d/$token"
-        echo "(Any session token the app asks for is replaced by the edge; the URL is the credential.)"
-        agent=""
-      fi
-      if [ -n "$agent" ]; then
-        ns=$(namespace_id); a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent"
-        aid=$(jq -r .id <<<"$a"); ins=$($OCC installation get --output json | jq -r .id)
-        h=$(printf '%s\0%s\0%s' "$ins" "$ns" "$aid" | sha256sum | cut -c1-32)
-        host="agent-$h.agents.$(sed -nE 's#^https://##p' <<<"$URL")"
-        if KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl get svc -A -l "openclaw.dev/agent=$aid,oae.dev/runtime=hermes" -o name 2>/dev/null | grep -q .; then
-          # OCE-native Hermes Agent (strike 5b): Hermes Desktop, not an OpenClaw pairing QR.
-          echo; echo "Hermes Desktop: Settings > Remote gateway URL:"
-          echo "  https://$host/d/$token"
-          echo "(Any session token the app asks for is replaced by the edge; the URL is the credential.)"
-          return 0
-        fi
-        url="wss://$host/d/$token"
-        echo; echo "Gateway URL for the OpenClaw app (Settings > Gateway, or scan below):"
-        echo "  $url"
-        pod=$(KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl get pods -A -l "openclaw.dev/agent=$aid,openclaw.dev/workload-role=gateway" \
-          -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}')
-        if [ -n "$pod" ]; then
-          set -- $pod
-          echo; echo "Pairing QR / setup code (works for ~10 minutes; usable within ~2 minutes, once the edge has the token):"
-          # The gateway logs as JSON lines; print the human message (QR + setup code) as text.
-          # --limited: the pairing never carries operator.admin (the edge caps every connection anyway).
-          KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl -n "$1" exec "$2" -c gateway -- openclaw qr --limited --url "$url" 2>&1 |
-            jq -Rr '(fromjson? // .) | if type == "object" then (.message // tostring) else . end' || true
-        fi
-      fi ;;
-    list)
-      local email; email=$(norm_email "${1:-}")
-      [ -f "$DEVICES" ] || { echo "no app tokens"; return 0; }
-      jq -r --arg e "$email" 'to_entries[] | select($e == "" or .value.email == $e) | "\(.value.id)\t\(.value.email)\t\(.value.label)\t\(.value.created)"' "$DEVICES" ;;
-    revoke)
-      local email id n; email=$(norm_email "${1:-}"); id=${2:-}
-      [ -n "$email" ] && [ -n "$id" ] || usage
-      [ -f "$DEVICES" ] || die "no app tokens"
-      n=$(jq --arg e "$email" --arg i "$id" '[to_entries[] | select(.value.email == $e and ($i == "all" or .value.id == $i))] | length' "$DEVICES")
-      [ "$n" -gt 0 ] || die "no matching app token for $email"
-      devices_put 'with_entries(select((.value.email == $e and ($i == "all" or .value.id == $i)) | not))' --arg e "$email" --arg i "$id"
-      edge_resync
-      echo "Revoked $n app token(s) for $email; the edge refuses them within ~2 minutes." ;;
-    nodes|approve-node|remove-node)
-      local agent ns a aid pod; agent=${1:-}; [ -n "$agent" ] || usage
-      ns=$(namespace_id); a=$(agent_json "$ns" "$agent"); [ -n "$a" ] || die "no Agent $agent"
-      aid=$(jq -r .id <<<"$a")
-      pod=$(KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl get pods -A -l "openclaw.dev/agent=$aid,openclaw.dev/workload-role=gateway" \
-        -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}')
-      [ -n "$pod" ] || die "Agent $agent has no running gateway"
-      gw() { set -- $pod "$@"; local n=$1 p=$2; shift 2; KUBECONFIG=$PROD/kubeconfig /opt/oce/tools/bin/kubectl -n "$n" exec "$p" -c gateway -- openclaw "$@"; }
-      case $sub in
-        nodes)
-          echo "Waiting for approval:"
-          gw nodes pending --json 2>/dev/null | jq -r '.[]? | "  \(.requestId)  \(.displayName // "?") (\(.platform // "?"))  wants: \((.commands // []) | join(", "))"'
-          echo "Approved:"
-          gw nodes status --json 2>/dev/null | jq -r '(.nodes // .)[]? | "  \(.displayName // .name // .nodeId)  connected=\(.connected)  commands=\((.commands // []) | length)"' ;;
-        approve-node)
-          local req=${2:-} yes=${3:-} r
-          [ -n "$req" ] || usage
-          r=$(gw nodes pending --json 2>/dev/null | jq -c --arg r "$req" '[.[]? | select(.requestId == $r)][0] // empty')
-          [ -n "$r" ] || die "no pending node request $req on $agent (see: oae-user device nodes $agent)"
-          jq -r '"\(.displayName) (\(.platform), \(.modelIdentifier // "?")) asks to let the Agent use:",
-                 "  commands:    \((.commands // []) | join(", "))",
-                 "  permissions: \((.permissions // {}) | to_entries | map(select(.value == true) | .key) | join(", "))"' <<<"$r"
-          if [ "$yes" != "--yes" ]; then
-            read -rp "Approve? The Agent can then use these on that device. [y/N] " ans
-            [[ $ans =~ ^[Yy]$ ]] || { echo "Not approved."; return 0; }
-          fi
-          gw nodes approve "$req" >/dev/null 2>&1 || die "approval failed"
-          echo "Approved. Undo with: oae-user device remove-node $agent \"$(jq -r .displayName <<<"$r")\"" ;;
-        remove-node)
-          local node=${2:-}; [ -n "$node" ] || usage
-          gw nodes remove --node "$node" >/dev/null 2>&1 || die "could not remove node $node"
-          echo "Removed $node from $agent: the Agent can no longer use it." ;;
-      esac ;;
-    *) usage ;;
-  esac
+  echo "oae-user device is retired. People connect their own apps (OpenClaw mobile, Hermes Desktop) at" >&2
+  echo "  https://auth.agents.${URL#https://}/apps" >&2
+  echo "and an Agent's operators approve a phone's node access in that Agent's own Devices page." >&2
+  exit 2
 }
 
 case ${1:-} in

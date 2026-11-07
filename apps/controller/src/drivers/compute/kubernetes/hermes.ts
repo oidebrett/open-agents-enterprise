@@ -23,6 +23,7 @@ import type {
 } from "@openclaw-enterprise/contracts";
 import type { KubernetesObjectApi, V1Deployment } from "@kubernetes/client-node";
 import { numericErrorStatus } from "@openclaw-enterprise/utils";
+import { normalizeOpenAiBaseUrl } from "../../openai-endpoint.ts";
 
 /** Harness id selected by `agentRuntime.id: "hermes"`. */
 export const HERMES_HARNESS_ID = "hermes";
@@ -38,18 +39,31 @@ const CONTAINER_SECURITY = {
   capabilities: { drop: ["ALL"] },
 };
 // The edge's proxies (k3s Traefik Pods) — the Pod CIDR, as gatewayTrustedProxyCidrs.
-const TRUSTED_PROXY_CIDRS = (process.env.OAE_HERMES_TRUSTED_PROXY_CIDRS ?? "10.42.0.0/16").split(",");
+const TRUSTED_PROXY_CIDRS = (process.env.OAE_HERMES_TRUSTED_PROXY_CIDRS ?? "10.42.0.0/16").split(
+  ",",
+);
 
 type NamespaceAddress = { readonly name: string; readonly plane: "control" | "execution" };
-type Clients = { readonly objects: KubernetesObjectApi; readonly core: CoreReader; readonly apps: AppsReader };
+type Clients = {
+  readonly objects: KubernetesObjectApi;
+  readonly core: CoreReader;
+  readonly apps: AppsReader;
+};
 type SecretObject = {
   metadata?: { uid?: string; deletionTimestamp?: unknown; resourceVersion?: string };
   data?: Record<string, string>;
 };
 type CoreReader = {
   readNamespacedSecret(args: { name: string; namespace: string }): Promise<SecretObject>;
-  createNamespacedSecret(args: { namespace: string; body: Record<string, unknown> }): Promise<unknown>;
-  replaceNamespacedSecret(args: { name: string; namespace: string; body: Record<string, unknown> }): Promise<unknown>;
+  createNamespacedSecret(args: {
+    namespace: string;
+    body: Record<string, unknown>;
+  }): Promise<unknown>;
+  replaceNamespacedSecret(args: {
+    name: string;
+    namespace: string;
+    body: Record<string, unknown>;
+  }): Promise<unknown>;
 };
 type AppsReader = {
   readNamespacedDeployment(args: { name: string; namespace: string }): Promise<V1Deployment>;
@@ -75,53 +89,71 @@ const names = (agentId: string) => {
 
 /** Model settings for Hermes from the Agent's OCE Configuration (its primary model). */
 export function hermesModelSettings(configuration: Readonly<OpenClawConfigurationDocument>): {
-  readonly provider: "nvidia" | "anthropic" | "openai-api";
+  readonly provider: "anthropic" | "openai-api" | "custom";
   readonly model: string;
-  readonly keyEnvironment: "NVIDIA_API_KEY" | "ANTHROPIC_API_KEY" | "OPENAI_API_KEY";
+  readonly keyEnvironment: "ANTHROPIC_API_KEY" | "OPENAI_API_KEY";
+  /** An OpenAI-compatible endpoint (provider "custom"). */
+  readonly baseUrl?: string;
 } {
   const agents = configuration.agents as { defaults?: { model?: unknown } } | undefined;
   const selected = agents?.defaults?.model;
-  const primary = typeof selected === "string" ? selected : (selected as { primary?: unknown })?.primary;
+  const primary =
+    typeof selected === "string" ? selected : (selected as { primary?: unknown })?.primary;
   if (typeof primary !== "string" || !primary.includes("/")) {
     throw new HermesConfigurationError("Hermes needs agents.defaults.model as <provider>/<model>.");
   }
   const slash = primary.indexOf("/");
   const providerId = primary.slice(0, slash);
   const model = primary.slice(slash + 1);
-  const providers = (configuration.models as { providers?: Record<string, { baseUrl?: unknown }> } | undefined)
-    ?.providers;
+  const providers = (
+    configuration.models as { providers?: Record<string, { baseUrl?: unknown }> } | undefined
+  )?.providers;
   const baseUrl = String(providers?.[providerId]?.baseUrl ?? "");
   if (providerId === "anthropic") {
     return { provider: "anthropic", model, keyEnvironment: "ANTHROPIC_API_KEY" };
-  }
-  if (/^https:\/\/integrate\.api\.nvidia\.com(\/|$)/.test(baseUrl)) {
-    return { provider: "nvidia", model, keyEnvironment: "NVIDIA_API_KEY" };
   }
   // The console's OpenAI choice (provider "openai" at api.openai.com) is Hermes's "openai-api".
   if (providerId === "openai" && /^https:\/\/api\.openai\.com(\/|$)/.test(baseUrl)) {
     return { provider: "openai-api", model, keyEnvironment: "OPENAI_API_KEY" };
   }
+  // Any other OpenAI-compatible endpoint is Hermes's "custom"
+  // provider. Hermes sends OPENAI_API_KEY to a custom host only when OPENAI_BASE_URL names it.
+  const endpoint = providerId === "openai" ? normalizeOpenAiBaseUrl(baseUrl) : undefined;
+  if (endpoint) {
+    return { provider: "custom", model, keyEnvironment: "OPENAI_API_KEY", baseUrl: endpoint };
+  }
   throw new HermesConfigurationError(
-    "Hermes Agents support OpenAI, Anthropic and NVIDIA (baseUrl https://integrate.api.nvidia.com/v1) models so far.",
+    "Hermes Agents support Anthropic models and OpenAI-compatible models (models.providers.openai.baseUrl: an HTTPS endpoint ending in /v1).",
   );
 }
 
-function hermesConfigYaml(settings: ReturnType<typeof hermesModelSettings>, publicUrl?: string): string {
+function hermesConfigYaml(
+  settings: ReturnType<typeof hermesModelSettings>,
+  publicUrl?: string,
+): string {
   const lines = [
     "model:",
     `  provider: ${settings.provider}`,
     `  default: ${JSON.stringify(settings.model)}`,
+    ...(settings.baseUrl ? [`  base_url: ${JSON.stringify(settings.baseUrl)}`] : []),
     "dashboard:",
     `  trusted_proxies: ${JSON.stringify(TRUSTED_PROXY_CIDRS)}`,
   ];
-  if (publicUrl) lines.push(`  public_url: ${JSON.stringify(publicUrl)}`);
+  if (publicUrl) {
+    lines.push(`  public_url: ${JSON.stringify(publicUrl)}`);
+  }
   return `${lines.join("\n")}\n`;
 }
 
 /** The Agent's public host, as OAE's edge derives it (oae-edge sync). */
-export function hermesPublicUrl(installationId: string | undefined, revision: AgentRevision): string | undefined {
+export function hermesPublicUrl(
+  installationId: string | undefined,
+  revision: AgentRevision,
+): string | undefined {
   const host = process.env.OAE_EDGE_AGENTS_DOMAIN;
-  if (!installationId || !host) return undefined;
+  if (!installationId || !host) {
+    return undefined;
+  }
   const hash = createHash("sha256")
     .update(`${installationId}\0${revision.namespaceId}\0${revision.agentId}`)
     .digest("hex")
@@ -157,24 +189,39 @@ class HermesWorkloads {
   /** The model key, copied from the source Secret the revision's binding resolved (uid-checked). */
   private async modelKey(revision: AgentRevision, context: ComputeRevisionContext | undefined) {
     const auth = context?.harnessAuth as
-      | { method?: string; backendRef?: { name: string; key: string; uid: string } }
-      | undefined;
+      { method?: string; backendRef?: { name: string; key: string; uid: string } } | undefined;
     if (!auth || auth.method !== "api_key" || !auth.backendRef) {
-      throw new HermesConfigurationError("Hermes Agents need an api_key Harness authentication from a Secret.");
+      throw new HermesConfigurationError(
+        "Hermes Agents need an api_key Harness authentication from a Secret.",
+      );
     }
     const source = await this.driver.controlNamespace(revision.namespaceId);
     const control = await this.driver.clients(source.plane);
-    const secret = await control.core.readNamespacedSecret({ name: auth.backendRef.name, namespace: source.name });
+    const secret = await control.core.readNamespacedSecret({
+      name: auth.backendRef.name,
+      namespace: source.name,
+    });
     if (secret.metadata?.deletionTimestamp || secret.metadata?.uid !== auth.backendRef.uid) {
-      throw new HermesConfigurationError("The Hermes model key Secret changed identity or is being deleted.");
+      throw new HermesConfigurationError(
+        "The Hermes model key Secret changed identity or is being deleted.",
+      );
     }
     const value = secret.data?.[auth.backendRef.key];
-    if (!value) throw new HermesConfigurationError("The Hermes model key Secret has no value.");
+    if (!value) {
+      throw new HermesConfigurationError("The Hermes model key Secret has no value.");
+    }
     return value; // base64, as Secret data
   }
 
-  async prepare(revision: AgentRevision, context?: ComputeRevisionContext): Promise<ComputeReadiness> {
-    const result = { namespaceId: revision.namespaceId, agentId: revision.agentId, revisionId: revision.id };
+  async prepare(
+    revision: AgentRevision,
+    context?: ComputeRevisionContext,
+  ): Promise<ComputeReadiness> {
+    const result = {
+      namespaceId: revision.namespaceId,
+      agentId: revision.agentId,
+      revisionId: revision.id,
+    };
     const settings = hermesModelSettings(revision.configuration);
     const { namespace, clients } = await this.target(revision);
     const n = names(revision.agentId);
@@ -190,27 +237,48 @@ class HermesWorkloads {
     // The worker may create and replace Secrets but not patch them (OCE's tenant Role), so no apply.
     let existing: SecretObject | undefined;
     try {
-      existing = await clients.core.readNamespacedSecret({ name: n.env, namespace: namespace.name });
+      existing = await clients.core.readNamespacedSecret({
+        name: n.env,
+        namespace: namespace.name,
+      });
     } catch (error) {
-      if (numericErrorStatus(error) !== 404) throw error;
+      if (numericErrorStatus(error) !== 404) {
+        throw error;
+      }
     }
     const token =
-      existing?.data?.HERMES_DASHBOARD_SESSION_TOKEN ?? Buffer.from(randomBytes(32).toString("hex")).toString("base64");
+      existing?.data?.HERMES_DASHBOARD_SESSION_TOKEN ??
+      Buffer.from(randomBytes(32).toString("hex")).toString("base64");
     const secret = {
       apiVersion: "v1",
       kind: "Secret",
       metadata: { ...meta(n.env), resourceVersion: existing?.metadata?.resourceVersion },
       type: "Opaque",
-      data: { [settings.keyEnvironment]: await this.modelKey(revision, context), HERMES_DASHBOARD_SESSION_TOKEN: token },
+      data: {
+        [settings.keyEnvironment]: await this.modelKey(revision, context),
+        ...(settings.baseUrl
+          ? { OPENAI_BASE_URL: Buffer.from(settings.baseUrl).toString("base64") }
+          : {}),
+        HERMES_DASHBOARD_SESSION_TOKEN: token,
+      },
     };
     await (existing
-      ? clients.core.replaceNamespacedSecret({ name: n.env, namespace: namespace.name, body: secret })
+      ? clients.core.replaceNamespacedSecret({
+          name: n.env,
+          namespace: namespace.name,
+          body: secret,
+        })
       : clients.core.createNamespacedSecret({ namespace: namespace.name, body: secret }));
     await this.apply(clients, {
       apiVersion: "v1",
       kind: "ConfigMap",
       metadata: meta(n.seed),
-      data: { "config.yaml": hermesConfigYaml(settings, hermesPublicUrl(process.env.OAE_INSTALLATION_ID, revision)) },
+      data: {
+        "config.yaml": hermesConfigYaml(
+          settings,
+          hermesPublicUrl(process.env.OAE_INSTALLATION_ID, revision),
+        ),
+      },
     });
     await this.apply(clients, {
       apiVersion: "v1",
@@ -263,6 +331,8 @@ class HermesWorkloads {
                     "for section in ('model', 'dashboard'):\n" +
                     "    cur.setdefault(section, {})\n" +
                     "    cur[section] = cur[section] or {}\n" +
+                    "    if section == 'model':\n" +
+                    "        cur[section].pop('base_url', None)\n" +
                     "    cur[section].update(seed[section])\n" +
                     "y.dump(cur, open('/volume/home/config.yaml', 'w'))\n" +
                     "PY\nelse cp /seed/config.yaml /volume/home/config.yaml; fi",
@@ -287,13 +357,19 @@ class HermesWorkloads {
                 ],
                 envFrom: [{ secretRef: { name: n.env } }],
                 ports: [{ name: "http", containerPort: DASHBOARD_PORT }],
-                readinessProbe: { httpGet: { path: "/api/status", port: "http" }, periodSeconds: 10 },
+                readinessProbe: {
+                  httpGet: { path: "/api/status", port: "http" },
+                  periodSeconds: 10,
+                },
                 securityContext: CONTAINER_SECURITY,
                 volumeMounts: [
                   { name: "data", mountPath: "/opt/data", subPath: "home" },
                   { name: "run", mountPath: "/run" },
                 ],
-                resources: { requests: { cpu: "100m", memory: "768Mi" }, limits: { memory: "4Gi" } },
+                resources: {
+                  requests: { cpu: "100m", memory: "768Mi" },
+                  limits: { memory: "4Gi" },
+                },
               },
             ],
             volumes: [
@@ -323,7 +399,9 @@ class HermesWorkloads {
           {
             from: [
               {
-                namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } },
+                namespaceSelector: {
+                  matchLabels: { "kubernetes.io/metadata.name": "kube-system" },
+                },
                 podSelector: { matchLabels: { "app.kubernetes.io/name": "traefik" } },
               },
             ],
@@ -333,14 +411,23 @@ class HermesWorkloads {
         // DNS, and HTTPS anywhere public (model API, channels).
         egress: [
           {
-            to: [{ namespaceSelector: {}, podSelector: { matchLabels: { "k8s-app": "kube-dns" } } }],
+            to: [
+              { namespaceSelector: {}, podSelector: { matchLabels: { "k8s-app": "kube-dns" } } },
+            ],
             ports: [
               { protocol: "UDP", port: 53 },
               { protocol: "TCP", port: 53 },
             ],
           },
           {
-            to: [{ ipBlock: { cidr: "0.0.0.0/0", except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] } }],
+            to: [
+              {
+                ipBlock: {
+                  cidr: "0.0.0.0/0",
+                  except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+                },
+              },
+            ],
             ports: [{ protocol: "TCP", port: 443 }],
           },
         ],
@@ -367,18 +454,27 @@ class HermesWorkloads {
     const { namespace, clients } = await this.target(revision);
     const n = names(revision.agentId);
     try {
-      const deployment = await clients.apps.readNamespacedDeployment({ name: n.base, namespace: namespace.name });
+      const deployment = await clients.apps.readNamespacedDeployment({
+        name: n.base,
+        namespace: namespace.name,
+      });
       // Only the revision the workload currently serves may stop it.
-      if (deployment.metadata?.annotations?.["openclaw.dev/revision"] !== revision.id) return;
+      if (deployment.metadata?.annotations?.["openclaw.dev/revision"] !== revision.id) {
+        return;
+      }
     } catch {
       return;
     }
-    await this.apply(clients, {
-      apiVersion: "apps/v1",
-      kind: "Deployment",
-      metadata: { name: n.base, namespace: namespace.name },
-      spec: { replicas },
-    }, `${MANAGER}-scale`);
+    await this.apply(
+      clients,
+      {
+        apiVersion: "apps/v1",
+        kind: "Deployment",
+        metadata: { name: n.base, namespace: namespace.name },
+        spec: { replicas },
+      },
+      `${MANAGER}-scale`,
+    );
   }
 
   stop(revision: AgentRevision) {
@@ -390,14 +486,19 @@ class HermesWorkloads {
   async retire(revision: AgentRevision) {
     const { namespace, clients } = await this.target(revision);
     const n = names(revision.agentId);
-    let serving = false;
+    let serving: boolean;
     try {
-      const deployment = await clients.apps.readNamespacedDeployment({ name: n.base, namespace: namespace.name });
+      const deployment = await clients.apps.readNamespacedDeployment({
+        name: n.base,
+        namespace: namespace.name,
+      });
       serving = deployment.metadata?.annotations?.["openclaw.dev/revision"] === revision.id;
     } catch {
       return;
     }
-    if (!serving) return;
+    if (!serving) {
+      return;
+    }
     for (const [apiVersion, kind, name] of [
       ["apps/v1", "Deployment", n.base],
       ["v1", "Service", n.base],
@@ -406,7 +507,11 @@ class HermesWorkloads {
       ["v1", "Secret", n.env],
     ] as const) {
       try {
-        await clients.objects.delete({ apiVersion, kind, metadata: { name, namespace: namespace.name } } as never);
+        await clients.objects.delete({
+          apiVersion,
+          kind,
+          metadata: { name, namespace: namespace.name },
+        } as never);
       } catch {
         // already gone
       }
@@ -422,7 +527,9 @@ export function withHermesRuntime<T extends ComputeDriver>(driver: T): T {
   const hermes = new HermesWorkloads(driver as unknown as DriverInternals);
   const overrides: Partial<Record<keyof ComputeDriver, unknown>> = {
     prepareRevision: (revision: AgentRevision, context?: ComputeRevisionContext) =>
-      isHermesRevision(revision) ? hermes.prepare(revision, context) : driver.prepareRevision(revision, context),
+      isHermesRevision(revision)
+        ? hermes.prepare(revision, context)
+        : driver.prepareRevision(revision, context),
     activateRevision: (revision: AgentRevision, context?: ComputeRevisionContext) =>
       isHermesRevision(revision) ? Promise.resolve() : driver.activateRevision?.(revision, context),
     deactivateRevision: (revision: AgentRevision) =>
@@ -434,19 +541,30 @@ export function withHermesRuntime<T extends ComputeDriver>(driver: T): T {
     admitRevision: (revision: Readonly<AgentRevision>) =>
       isHermesRevision(revision) ? undefined : driver.admitRevision?.(revision),
     requiresStoppedPredecessors: (revision: AgentRevision) =>
-      isHermesRevision(revision) ? false : (driver.requiresStoppedPredecessors?.(revision) ?? false),
+      isHermesRevision(revision)
+        ? false
+        : (driver.requiresStoppedPredecessors?.(revision) ?? false),
     getRuntimeImages: (revision: AgentRevision) =>
-      isHermesRevision(revision) ? Promise.resolve([]) : (driver.getRuntimeImages?.(revision) ?? Promise.resolve([])),
+      isHermesRevision(revision)
+        ? Promise.resolve([])
+        : (driver.getRuntimeImages?.(revision) ?? Promise.resolve([])),
     getGatewayEndpoint: (revision: AgentRevision) =>
       isHermesRevision(revision) ? undefined : driver.getGatewayEndpoint?.(revision),
     validateHarnessAuth: (harness: { id: string }, ...rest: unknown[]) =>
       harness.id === HERMES_HARNESS_ID
         ? undefined
-        : (driver.validateHarnessAuth as (...args: unknown[]) => unknown)?.call(driver, harness, ...rest),
+        : (driver.validateHarnessAuth as (...args: unknown[]) => unknown)?.call(
+            driver,
+            harness,
+            ...rest,
+          ),
   };
   return new Proxy(driver, {
     get(target, property, receiver) {
-      if (Object.hasOwn(overrides, property) && typeof Reflect.get(target, property) === "function") {
+      if (
+        Object.hasOwn(overrides, property) &&
+        typeof Reflect.get(target, property) === "function"
+      ) {
         return overrides[property as keyof ComputeDriver];
       }
       const value = Reflect.get(target, property, receiver);
