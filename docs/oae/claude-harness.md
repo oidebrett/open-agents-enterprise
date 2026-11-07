@@ -25,17 +25,37 @@ through Claude Code instead of OpenClaw's own loop. Verified on Oracle, 2026-11-
   `runtime.image`. Every OpenClaw Agent uses it from its next deployment; it differs from the
   base only by Claude Code.
 
-## The API key
+## The credential: API key or (personal) Claude subscription token
 
-The Agent's Anthropic key reaches the gateway as `ANTHROPIC_API_KEY`, exactly as for Anthropic on
-OpenClaw (OCE's `api_key` binding to an Agent-only Secret). OpenClaw deliberately removes that
-variable when it starts `claude` and passes an empty `--setting-sources` (user settings ignored),
-so Claude CLI never silently bills an API key. Admin-managed Claude settings always apply, so the
-image ships `/etc/claude-code/managed-settings.json` with
-`apiKeyHelper: /usr/local/bin/oae-claude-api-key`, which prints the key from the gateway's own
-environment (PID 1, same user). `claude auth status` then reports `api_key_helper`, and usage is
-billed to the API key, never a Claude subscription (subscription logins in a shared hosted
-service are against Anthropic's consumer terms).
+The Agent's credential reaches the gateway as `ANTHROPIC_API_KEY`, through OCE's `api_key`
+binding to an Agent-only Secret. OpenClaw deliberately removes `ANTHROPIC_API_KEY` and
+`CLAUDE_CODE_OAUTH_TOKEN` when it starts `claude` (Claude CLI keeps native-login semantics), and
+passes an empty `--setting-sources`. So the image's `/usr/local/bin/claude` is a wrapper
+(`deploy/oae/runtime-claude/claude-wrapper`) that reads the credential from the gateway's own
+environment (PID 1, same user) and starts the real binary with:
+
+- an **Anthropic API key** as `ANTHROPIC_API_KEY` (`claude auth status`: `api_key`), billed to API
+  credits; or
+- a **Claude subscription setup token** (`claude setup-token`, `sk-ant-oat…`) as
+  `CLAUDE_CODE_OAUTH_TOKEN` (`oauth_token`), on that person's own Claude plan.
+
+The gateway's own startup probe and utility calls accept either. A wrapper rather than an
+`apiKeyHelper`: Claude Code ranks a configured `apiKeyHelper` above a subscription token.
+
+### Personal Agents
+
+A setup token is one person's Claude plan, so such an Agent is for that person only (Anthropic's
+consumer terms; OAE also keeps per-person audit). There is no "Sign in with Claude" button:
+third-party sign-in with claude.ai accounts is not offered to other products. The person runs
+`claude setup-token` themselves and pastes the token as the Agent's API key.
+
+- `oae-edge sync` reads only the prefix of each OpenClaw gateway's Anthropic credential and marks
+  the Agent `personal` in the edge's `agents.json`.
+- The edge refuses **everyone** on a personal Agent that more than one person is granted, until an
+  administrator removes the others (verified: one person 200; two people 403/403; back to one 200).
+- The People panel (`GET /oae/api/agent`) shows a note and refuses a second person; Create Agent's
+  Claude Code help says a setup token makes the Agent personal.
+- Tokens last about a year. Agent use spends the person's plan limits quickly.
 
 ## Security notes
 
