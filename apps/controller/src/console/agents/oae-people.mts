@@ -328,7 +328,8 @@ export function renderOaePeople(
       }
     }
     const current = responseFields(
-      await context.request(`/api/auth/accounts/${encodeURIComponent(userId)}`),
+      // Through the edge: OCE needs an Origin header on account reads, which a browser GET lacks.
+      await context.request(`/oae/api/account?userId=${encodeURIComponent(userId)}`),
     );
     const methods = Array.isArray(current.methods)
       ? current.methods.map((m) => responseFields(m))

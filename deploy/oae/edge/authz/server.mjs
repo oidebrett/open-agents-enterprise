@@ -616,6 +616,17 @@ async function consoleApi(req, res, url) {
       },
     });
   }
+  // OCE answers account reads only with an Origin header, which browsers omit on same-origin GETs:
+  // the panel reads one account here, with the same administrator session, and gets only what
+  // linking an SSO identity needs.
+  if (route === "GET /oae/api/account") {
+    const userId = String(url.searchParams.get("userId") ?? "");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(userId)) return fail(400, "Invalid account ID.");
+    const account = await oce(req, "GET", `/api/auth/accounts/${encodeURIComponent(userId)}`);
+    if (account.status !== 200) return fail(404, "No such account.");
+    const methods = (account.data?.methods ?? []).map((m) => ({ providerId: m.providerId, subject: m.subject }));
+    return json(200, { data: { principalId: account.data?.principalId, version: account.data?.version, methods } });
+  }
   if (route === "POST /oae/api/people") {
     let userId;
     try {
