@@ -10,12 +10,12 @@ Design background: [edge-design.md](edge-design.md) (access), [claude-harness.md
 
 ## 1. The pieces
 
-| Address | What it is | Who uses it |
-|---|---|---|
-| `https://<console host>/console/` | The OCE console: Agents, Configurations, Secrets, People | Administrators |
-| `https://auth.agents.<console host>/apps` | "My apps": a person's Agents, and their phone / desktop connections | Everyone |
-| `https://agent-<id>.agents.<console host>/` | One Agent's own web UI (OpenClaw Control UI or Hermes dashboard) | People granted that Agent |
-| Your SSO provider (Keycloak, Entra ID, …) | Who people are | Administrators manage users there |
+| Address                                     | What it is                                                          | Who uses it                       |
+| ------------------------------------------- | ------------------------------------------------------------------- | --------------------------------- |
+| `https://<console host>/console/`           | The OCE console: Agents, Configurations, Secrets, People            | Administrators                    |
+| `https://auth.agents.<console host>/apps`   | "My apps": a person's Agents, and their phone / desktop connections | Everyone                          |
+| `https://agent-<id>.agents.<console host>/` | One Agent's own web UI (OpenClaw Control UI or Hermes dashboard)    | People granted that Agent         |
+| Your SSO provider (Keycloak, Entra ID, …)   | Who people are                                                      | Administrators manage users there |
 
 Two kinds of sign-in:
 
@@ -27,7 +27,7 @@ Two kinds of sign-in:
 
 ## 2. Add a person
 
-1. **Create them in your SSO directory** (for Keycloak: the realm's *Users → Add user*, with a
+1. **Create them in your SSO directory** (for Keycloak: the realm's _Users → Add user_, with a
    verified email). OAE's directory client can only read users, never create them.
 2. In the console open the **Agent → Access** tab. The **People** card lists who can use it.
 3. Enter their **email**, choose a level and select **Give access**:
@@ -48,12 +48,12 @@ client (see section 8); the platform operator can still grant with `oae-user` (b
 
 Console → **Agents → Create Agent**. Choose a **Provider**, then a **Harness**:
 
-| Provider | Harness | What runs |
-|---|---|---|
-| OpenAI | **Codex** | OpenAI's Codex agent in its own Pod (Dedicated) |
-| OpenAI / Anthropic / OpenAI-compatible | **OpenClaw** | OpenClaw's own agent loop with that model (Embedded) |
-| Anthropic | **Claude Code** | OpenClaw's gateway with every turn run by Claude Code (Embedded) |
-| OpenAI / Anthropic / OpenAI-compatible | **Hermes** | Hermes Agent (Embedded) |
+| Provider                               | Harness         | What runs                                                        |
+| -------------------------------------- | --------------- | ---------------------------------------------------------------- |
+| OpenAI                                 | **Codex**       | OpenAI's Codex agent in its own Pod (Dedicated)                  |
+| OpenAI / Anthropic / OpenAI-compatible | **OpenClaw**    | OpenClaw's own agent loop with that model (Embedded)             |
+| Anthropic                              | **Claude Code** | OpenClaw's gateway with every turn run by Claude Code (Embedded) |
+| OpenAI / Anthropic / OpenAI-compatible | **Hermes**      | Hermes Agent (Embedded)                                          |
 
 - **API key**: paste it, or pick an existing Secret. Each Agent may use only the Secrets granted
   to it; the console grants the one you pick.
@@ -93,23 +93,23 @@ Teams works for OpenClaw (Embedded and Dedicated) and Hermes Agents.
 
 **In Microsoft Azure** (once per bot):
 
-1. *Create a resource* → **Azure Bot**: pricing **F0** (free), type **Single Tenant**, *Create new
-   Microsoft App ID*.
-2. *Settings → Configuration*: note the **Microsoft App ID** and **App Tenant ID**.
-3. *Manage Password → Certificates & secrets → New client secret*: copy the **Value** (shown once).
+1. _Create a resource_ → **Azure Bot**: pricing **F0** (free), type **Single Tenant**, _Create new
+   Microsoft App ID_.
+2. _Settings → Configuration_: note the **Microsoft App ID** and **App Tenant ID**.
+3. _Manage Password → Certificates & secrets → New client secret_: copy the **Value** (shown once).
 
 **In the console**, Agent → **Configuration → Channels → Microsoft Teams**:
 
 1. Enable it; enter the App ID and Tenant ID.
 2. **Teams app password**: create a Secret with the client secret value (or pick one).
-3. **Direct messages**: *Anyone in the bot's tenant*, *only listed Entra user IDs*, *pairing*
-   (approve each new person in the Agent), or *disabled*.
+3. **Direct messages**: _Anyone in the bot's tenant_, _only listed Entra user IDs_, _pairing_
+   (approve each new person in the Agent), or _disabled_.
 4. Save, then **Deploy** the new version.
 5. Copy the **messaging endpoint** the card shows (`https://agent-…/api/messages`) into the Azure
-   Bot's *Settings → Configuration → Messaging endpoint*, and Apply.
+   Bot's _Settings → Configuration → Messaging endpoint_, and Apply.
 
 **Test**: the Azure Bot's **Test in Web Chat** (OpenClaw answers there; Hermes answers only in the
-Teams app). **In Teams**: add the *Microsoft Teams* channel to the Azure Bot and install the bot
+Teams app). **In Teams**: add the _Microsoft Teams_ channel to the Azure Bot and install the bot
 for your users. That needs a Microsoft 365 licence that includes Teams and custom apps allowed by
 your Teams administrator (Teams admin center → Teams apps).
 
@@ -137,7 +137,7 @@ the card and choose channels and people. See the OCE guide `docs/guides/integrat
 
 These need a server shell and are not part of daily administration.
 
-- **Installation** (manidae-cloud's *Open Agents Enterprise* package) needs: a console host name;
+- **Installation** (manidae-cloud's _Open Agents Enterprise_ package) needs: a console host name;
   an OIDC issuer with a client for the console and one for the edge (redirect
   `https://auth.agents.<host>/callback`); optionally a **read-only directory client**
   (`client_credentials`, Keycloak `realm-management` → `view-users`) for the People card's email

@@ -7,13 +7,13 @@ what OAE adds and how the fork is kept close to upstream.
 
 ## What OAE adds
 
-| Capability | OCE today | OAE adds |
-|---|---|---|
-| Front door (gateway) | OpenClaw only | Hermes as a second Agent kind |
-| Harness behind the gateway | Embedded OpenClaw, dedicated Codex | Dedicated Claude Code; Hermes on the Codex and Claude harness pods |
-| People's access to Agents | Password/GitHub/Google/OIDC sign-in; native admin UI for `administer` holders, not under OIDC | Email (OIDC) access to granted Agents' own UIs through an edge that uses OCE's trusted-proxy gateway auth |
-| Remote clients | None (gateways are private) | OpenClaw mobile app and Hermes Desktop through the same edge, with per-device tokens |
-| Installation | Helm chart and installation profiles | The same, packaged by manidae-cloud for cloud VPS and BYOVPS |
+| Capability                 | OCE today                                                                                     | OAE adds                                                                                                  |
+| -------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Front door (gateway)       | OpenClaw only                                                                                 | Hermes as a second Agent kind                                                                             |
+| Harness behind the gateway | Embedded OpenClaw, dedicated Codex                                                            | Dedicated Claude Code; Hermes on the Codex and Claude harness pods                                        |
+| People's access to Agents  | Password/GitHub/Google/OIDC sign-in; native admin UI for `administer` holders, not under OIDC | Email (OIDC) access to granted Agents' own UIs through an edge that uses OCE's trusted-proxy gateway auth |
+| Remote clients             | None (gateways are private)                                                                   | OpenClaw mobile app and Hermes Desktop through the same edge, with per-device tokens                      |
+| Installation               | Helm chart and installation profiles                                                          | The same, packaged by manidae-cloud for cloud VPS and BYOVPS                                              |
 
 Delivery is split into strikes: [docs/oae/strikes.md](docs/oae/strikes.md).
 
@@ -44,12 +44,12 @@ upstream file is a recurring merge conflict, so:
 
 ## Branches and remotes
 
-| Branch | Purpose |
-|---|---|
-| `main` | Mirror of `upstream/main`. Never commit here. |
-| `oae` | Integration branch: upstream plus OAE. Deployed builds come from here. |
-| `strike/<n>-<topic>` | Work for one strike; merged to `oae` with `--no-ff`. |
-| `sync/upstream-YYYY-MM-DD` | One upstream merge, tested before it lands on `oae`. |
+| Branch                     | Purpose                                                                |
+| -------------------------- | ---------------------------------------------------------------------- |
+| `main`                     | Mirror of `upstream/main`. Never commit here.                          |
+| `oae`                      | Integration branch: upstream plus OAE. Deployed builds come from here. |
+| `strike/<n>-<topic>`       | Work for one strike; merged to `oae` with `--no-ff`.                   |
+| `sync/upstream-YYYY-MM-DD` | One upstream merge, tested before it lands on `oae`.                   |
 
 Remotes: `origin` = `github.com/oidebrett/open-agents-enterprise`,
 `upstream` = `github.com/openclaw/openclaw-enterprise`.
