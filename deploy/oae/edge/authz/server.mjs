@@ -290,7 +290,8 @@ function grant(res, host, sub, via) {
   const headers = { "x-occ-identity": `${IDENTITY_PREFIX}:${sub}`, "x-openclaw-scopes": scopes };
   const token = hermesToken(host);
   if (token) headers.authorization = `Bearer ${token}`;
-  return send(res, 200, headers);
+  send(res, 200, headers);
+  return true; // callers fall back to a refusal only on null
 }
 
 const DEVICE_PATH = /^\/d\/(oaed_[A-Za-z0-9_-]{32,64})(?:[/?#]|$)/;
