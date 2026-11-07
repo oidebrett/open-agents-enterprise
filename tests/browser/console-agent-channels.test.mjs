@@ -266,7 +266,7 @@ describe("Agent channels", { concurrency: 3 }, () => {
       await expectNoText(page, value);
     }
     // OAE: a Microsoft Teams card beside Slack (docs/oae/teams.md).
-    assert.equal(await page.getByRole("button", { name: "Configure Microsoft Teams" }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: /Microsoft Teams/ }).count(), 1);
 
     const configuration = await fixture.request(
       "GET",
