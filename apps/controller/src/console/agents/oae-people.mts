@@ -67,7 +67,13 @@ function randomPassword() {
   return btoa(String.fromCharCode(...bytes));
 }
 
+// A message this panel words itself, shown as written.
+class PanelError extends Error {}
+
 function problem(error: unknown) {
+  if (error instanceof PanelError) {
+    return error.message;
+  }
   const { status, serverMessage } = requestFailure(error);
   return serverMessage ?? (status ? `The request failed (HTTP ${status}).` : "The request failed.");
 }
@@ -319,7 +325,7 @@ export function renderOaePeople(
         userId = text(created.id);
       } catch (error) {
         if (requestFailure(error).status === 409) {
-          throw new Error(
+          throw new PanelError(
             `An OCE account for ${address} already exists, but it is not linked to this person’s SSO identity here. The platform operator links it once with: oae-user add ${address} ${text(found.subject)}`,
             { cause: error },
           );
@@ -337,7 +343,7 @@ export function renderOaePeople(
     const sso = methods.filter((m) => text(m.providerId).startsWith("oidc:"));
     if (!sso.some((m) => m.subject === found.subject)) {
       if (sso.length) {
-        throw new Error(`The OCE account for ${address} is linked to a different SSO identity.`);
+        throw new PanelError(`The OCE account for ${address} is linked to a different SSO identity.`);
       }
       await context.request(`/api/auth/accounts/${encodeURIComponent(userId)}/providers/oidc`, {
         method: "POST",
@@ -355,10 +361,10 @@ export function renderOaePeople(
       await context.request(`/oae/api/directory?email=${encodeURIComponent(address)}`),
     );
     if (!found.subject) {
-      throw new Error(`Nobody with the email ${address} is in the SSO directory.`);
+      throw new PanelError(`Nobody with the email ${address} is in the SSO directory. Add them in Keycloak first, then try again.`);
     }
     if (found.enabled === false) {
-      throw new Error(`${address} is disabled in the SSO directory.`);
+      throw new PanelError(`${address} is disabled in the SSO directory.`);
     }
     const principalId = await account(found, address);
     await load();
