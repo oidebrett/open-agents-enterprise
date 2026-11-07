@@ -290,7 +290,7 @@ cmd_sync() {
       host="agent-$hash.$AGENTS"; short=${hash:0:12}
       # People granted this Agent (OCE AccessBindings) whose SSO subject the edge has recorded.
       people=$(jq -c --arg a "$aid" --arg op "$ROLE_OPERATOR" --argjson roles "$roles" --argjson sub "$subjects" '
-        | ($roles | map({(.id): .name}) | add // {}) as $rname
+        ($roles | map({(.id): .name}) | add // {}) as $rname
         | map(select(.resourceKind == "agent" and .resourceId == $a and $sub[.subjectId]))
         | map({sub: $sub[.subjectId], level: (if $rname[.roleId] == $op then "operator" else "user" end)})
         | reduce .[] as $e ({}; .[$e.sub] = (if .[$e.sub] == "operator" or $e.level == "operator" then "operator" else "user" end))' <<<"$bindings")
@@ -344,7 +344,7 @@ cmd_sync() {
       local hhost hpeople htoken
       hhost=$(jq -r --arg n "$hname" '.[$n].host' "$HERMES")
       hpeople=$(jq -c --arg n "$hname" --arg ns "$ns" --argjson roles "$roles" --argjson sub "$subjects" '
-        | ($roles | map({(.id): .name}) | add // {}) as $rname
+        ($roles | map({(.id): .name}) | add // {}) as $rname
         | map(select(.resourceKind == "namespace" and .resourceId == $ns and $sub[.subjectId]
                      and ($rname[.roleId] == "OAE Hermes user: \($n)" or $rname[.roleId] == "OAE Hermes operator: \($n)")))
         | map({sub: $sub[.subjectId], level: (if ($rname[.roleId] | startswith("OAE Hermes operator")) then "operator" else "user" end)})
