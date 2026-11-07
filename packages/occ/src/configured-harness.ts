@@ -8,6 +8,11 @@ import { canSpell } from "./configuration-settings.ts";
 import { agentEntryMessage, ConfigurationHarnessError, modelProviderMessage } from "./errors.ts";
 import { providerModelsListError } from "./model-provider-settings.ts";
 
+// OAE: OpenClaw's Claude Code backend. It is a CLI backend of the OpenClaw gateway, not an
+// AgentHarness (OpenClaw docs: "claude-cli is not an embedded harness id"), so the Agent's Harness
+// is OpenClaw and it is placed as OpenClaw is.
+export const CLAUDE_CLI_RUNTIME = "claude-cli";
+
 function configuredRuntime(value: unknown): string | undefined {
   const runtimeValue = asRecord(value)?.agentRuntime;
   if (runtimeValue === undefined) {
@@ -15,9 +20,14 @@ function configuredRuntime(value: unknown): string | undefined {
   }
   const runtime = asRecord(runtimeValue);
   // OAE: "hermes" — Hermes as the Agent's gateway and harness (embedded; docs/oae/strikes.md 5b).
+  // OAE: "claude-cli" — OpenClaw's Claude Code CLI backend, run by the OpenClaw gateway itself
+  // (docs/oae/claude-harness.md).
   if (
     runtime === undefined ||
-    (runtime.id !== "openclaw" && runtime.id !== "codex" && runtime.id !== "hermes")
+    (runtime.id !== "openclaw" &&
+      runtime.id !== "codex" &&
+      runtime.id !== "hermes" &&
+      runtime.id !== CLAUDE_CLI_RUNTIME)
   ) {
     throw new ConfigurationHarnessError(
       "The configured model Harness runtime identity is unsupported.",
@@ -530,6 +540,14 @@ export function resolveConfiguredHarnessId(
       throw new ConfigurationHarnessError(
         "The Codex Harness requires the native codex model provider.",
       );
+    }
+    if (selected === CLAUDE_CLI_RUNTIME) {
+      if (providerId !== "anthropic") {
+        throw new ConfigurationHarnessError(
+          "The Claude Code runtime (claude-cli) requires the anthropic model provider.",
+        );
+      }
+      return "openclaw";
     }
     return selected ?? "openclaw";
   };
