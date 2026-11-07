@@ -239,18 +239,82 @@ function field(label: string, input: HTMLElement, hint?: string, error?: HTMLEle
   return node;
 }
 
-function configurationTemplate(harnessId: string, nativeProvider: string, providerModel: string) {
-  const providerId = harnessId === "codex" ? "codex" : nativeProvider;
+// Any other endpoint that speaks OpenAI's Chat Completions API (a hosted model gateway, a
+// self-hosted server). It is OpenClaw's "openai" provider with its own baseUrl, so the model key
+// stays an OpenAI-style bearer key and the Agent runs Embedded, as with Anthropic.
+const OPENAI_COMPATIBLE = "openai-compatible";
+const OPENAI_BASE_URL = "https://api.openai.com/v1";
+
+/** The OpenClaw provider ID a console provider choice configures. */
+function providerConfigId(nativeProvider: string) {
+  return nativeProvider === OPENAI_COMPATIBLE ? "openai" : nativeProvider;
+}
+
+/** Providers whose API keys OpenClaw can use only with Embedded execution. */
+function embeddedOnlyProvider(nativeProvider: string) {
+  return nativeProvider === "anthropic" || nativeProvider === OPENAI_COMPATIBLE;
+}
+
+/** The baseUrl of a Configuration's own OpenAI provider when it is not OpenAI's API. */
+function compatibleBaseUrl(values: LaunchValues | undefined): string | undefined {
+  const openai: unknown = values?.models?.providers?.openai;
+  const baseUrl =
+    typeof openai === "object" && openai !== null
+      ? (openai as { baseUrl?: unknown }).baseUrl
+      : undefined;
+  return typeof baseUrl === "string" && baseUrl.replace(/\/+$/, "") !== OPENAI_BASE_URL
+    ? baseUrl
+    : undefined;
+}
+
+/** The written endpoint problem for an OpenAI-compatible Base URL, or "" when usable. */
+function compatibleBaseUrlProblem(value: string): string {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    return "Enter the endpoint's full URL, such as https://example.com/v1.";
+  }
+  if (
+    /[\0- \x7f]/u.test(value) ||
+    endpoint.protocol !== "https:" ||
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.search ||
+    endpoint.hash ||
+    !endpoint.pathname.replace(/\/$/, "").endsWith("/v1")
+  ) {
+    return "The Base URL must be an HTTPS endpoint ending in /v1, without credentials, query or fragment.";
+  }
+  return "";
+}
+
+function configurationTemplate(
+  harnessId: string,
+  nativeProvider: string,
+  providerModel: string,
+  compatibleUrl = "",
+) {
+  const providerId = harnessId === "codex" ? "codex" : providerConfigId(nativeProvider);
   const modelReference = `${providerId}/${providerModel}`;
   let baseUrl =
-    nativeProvider === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1";
+    nativeProvider === "anthropic"
+      ? "https://api.anthropic.com"
+      : nativeProvider === OPENAI_COMPATIBLE
+        ? compatibleUrl.trim().replace(/\/+$/, "")
+        : OPENAI_BASE_URL;
   if (harnessId === "codex") {
     baseUrl = "http://127.0.0.1:9";
   }
   const provider = {
     [providerId]: {
       baseUrl,
-      api: nativeProvider === "anthropic" ? "anthropic-messages" : "openai-responses",
+      api:
+        nativeProvider === "anthropic"
+          ? "anthropic-messages"
+          : nativeProvider === OPENAI_COMPATIBLE
+            ? "openai-completions"
+            : "openai-responses",
       models: [
         {
           id: providerModel,
@@ -1000,10 +1064,38 @@ function renderAgentForm(
     { id: "model-provider" },
     element("option", { value: "openai" }, "OpenAI"),
     element("option", { value: "anthropic" }, "Anthropic"),
+    element("option", { value: OPENAI_COMPATIBLE }, "OpenAI-compatible"),
   );
-  nativeProvider.value = initialModel?.startsWith("anthropic/") ? "anthropic" : "openai";
+  const providerBaseUrl = element("input", {
+    id: "provider-base-url",
+    type: "url",
+    placeholder: "https://…/v1",
+    autocomplete: "off",
+    spellcheck: "false",
+  });
+  const initialBaseUrl = initialModel?.startsWith("openai/")
+    ? compatibleBaseUrl(rendered.configuration?.values)
+    : undefined;
+  providerBaseUrl.value = initialBaseUrl ?? "";
+  nativeProvider.value = initialModel?.startsWith("anthropic/")
+    ? "anthropic"
+    : initialBaseUrl
+      ? OPENAI_COMPATIBLE
+      : "openai";
+  const providerName = () =>
+    nativeProvider.value === OPENAI_COMPATIBLE ? "An OpenAI-compatible endpoint" : "Anthropic";
+  const baseUrlField = field(
+    "Base URL",
+    providerBaseUrl,
+    "The endpoint's OpenAI-compatible API, ending in /v1.",
+  );
+  // Compatible endpoints serve their own models; their IDs are entered, not chosen.
   const modelChoices = (provider = nativeProvider.value) =>
-    provider === "anthropic" ? MODEL_CHOICES.anthropic : MODEL_CHOICES.openai;
+    provider === "anthropic"
+      ? MODEL_CHOICES.anthropic
+      : provider === OPENAI_COMPATIBLE
+        ? []
+        : MODEL_CHOICES.openai;
   const useModelChoices = !binding && typeof initialModel !== "string";
   const model = element("input", {
     id: useModelChoices ? "agent-model-manual" : "agent-model",
@@ -1100,7 +1192,7 @@ function renderAgentForm(
     modelField,
   );
   function resetModelChoices(resetTransport = false, selectedModel = "") {
-    manualModel = !useModelChoices;
+    manualModel = !useModelChoices || nativeProvider.value === OPENAI_COMPATIBLE;
     model.value = modelChoices().includes(selectedModel) ? selectedModel : "";
     modelChoice.replaceChildren(
       element("option", { value: "" }, "Choose a model"),
@@ -1243,6 +1335,7 @@ function renderAgentForm(
     element("legend", {}, "Model provider"),
     field("Provider", nativeProvider),
     field("Harness", harness),
+    baseUrlField,
     harnessHint,
     nativeHarnessWarning,
     nativeWorkersUnavailable,
@@ -1283,7 +1376,7 @@ function renderAgentForm(
     mode.value = "dedicated";
   } else if (
     harness.value !== "hermes" &&
-    (nativeProvider.value === "anthropic" || binding?.method === "runtime")
+    (embeddedOnlyProvider(nativeProvider.value) || binding?.method === "runtime")
   ) {
     harness.value = "openclaw";
     mode.value = "embedded";
@@ -1296,7 +1389,12 @@ function renderAgentForm(
   }
   const currentTemplate = () =>
     JSON.stringify(
-      configurationTemplate(harness.value, nativeProvider.value, model.value.trim()),
+      configurationTemplate(
+        harness.value,
+        nativeProvider.value,
+        model.value.trim(),
+        providerBaseUrl.value,
+      ),
       null,
       2,
     );
@@ -1324,7 +1422,12 @@ function renderAgentForm(
       return;
     }
     retainPendingModel(values);
-    const next = configurationTemplate(harness.value, nativeProvider.value, model.value.trim());
+    const next = configurationTemplate(
+      harness.value,
+      nativeProvider.value,
+      model.value.trim(),
+      providerBaseUrl.value,
+    );
     const previous = values.agents?.defaults?.model;
     const previousModel = modelPrimary(configuredModelSelection(values)) ?? pendingPrimaryModel;
     const modelSettings = { ...values.agents?.defaults?.models };
@@ -1454,7 +1557,8 @@ function renderAgentForm(
       delete providers.codex;
       Object.assign(providers, next.models?.providers);
     } else if (selectedModel) {
-      const providerId = harness.value === "codex" ? "codex" : nativeProvider.value;
+      const providerId =
+        harness.value === "codex" ? "codex" : providerConfigId(nativeProvider.value);
       const templateProvider = next.models?.providers[providerId];
       const existingProvider = providers[providerId] ?? templateProvider;
       const existingModels: ProviderModel[] = existingProvider?.models ?? [];
@@ -1530,7 +1634,9 @@ function renderAgentForm(
     // Hermes takes either provider; it stays selected.
     if (harness.value !== "hermes") {
       harness.value =
-        nativeProvider.value === "anthropic" || binding?.method === "runtime" ? "openclaw" : "codex";
+        embeddedOnlyProvider(nativeProvider.value) || binding?.method === "runtime"
+          ? "openclaw"
+          : "codex";
     }
     mode.value = harness.value === "codex" ? "dedicated" : "embedded";
     // A provider change must not send the previous provider's key to a different service.
@@ -1541,6 +1647,11 @@ function renderAgentForm(
     } else {
       updateModelConfiguration(true);
     }
+  });
+  // A new endpoint replaces the provider's transport; its key and model ID are kept.
+  providerBaseUrl.addEventListener("input", () => {
+    providerBaseUrl.setCustomValidity("");
+    updateModelConfiguration(true);
   });
   authMethod.addEventListener("change", () => {
     clearModelCredential();
@@ -1616,7 +1727,15 @@ function renderAgentForm(
         !credentialRegistration &&
         !hasBoundModelCredential
       ) {
-        const selectedProvider = ref.startsWith("anthropic/") ? "anthropic" : "openai";
+        const editedBaseUrl = ref.startsWith("openai/") ? compatibleBaseUrl(values) : undefined;
+        const selectedProvider = ref.startsWith("anthropic/")
+          ? "anthropic"
+          : editedBaseUrl
+            ? OPENAI_COMPATIBLE
+            : "openai";
+        if (editedBaseUrl) {
+          providerBaseUrl.value = editedBaseUrl;
+        }
         if (
           !binding &&
           (selectedProvider !== nativeProvider.value ||
@@ -1626,7 +1745,7 @@ function renderAgentForm(
           clearModelCredential();
         }
         nativeProvider.value = selectedProvider;
-        if (selectedProvider === "anthropic" && harness.value !== "hermes") {
+        if (embeddedOnlyProvider(selectedProvider) && harness.value !== "hermes") {
           harness.value = "openclaw";
           mode.value = "embedded";
         }
@@ -1832,7 +1951,7 @@ function renderAgentForm(
       : "embedded";
   // Anthropic and operator-managed Preset credentials fix OpenClaw to Embedded.
   const embeddedRequired = () =>
-    nativeProvider.value === "anthropic" || binding?.method === "runtime";
+    embeddedOnlyProvider(nativeProvider.value) || binding?.method === "runtime";
   let credentialSourceTypes: readonly CredentialSourceType[] | undefined;
   // A draft kept after a refused Create resumes the resources that attempt saved (finding 1934).
   let savedCredentialSource = draft.savedCredentialSource;
@@ -2189,6 +2308,7 @@ function renderAgentForm(
     mode,
     harness,
     nativeProvider,
+    providerBaseUrl,
     authMethod,
     model,
     modelChoice,
@@ -2450,7 +2570,7 @@ function renderAgentForm(
   function modelSourceType() {
     const candidates = (credentialSourceTypes ?? []).filter(
       (type) =>
-        type.harnessAuth?.modelProvider === nativeProvider.value &&
+        type.harnessAuth?.modelProvider === providerConfigId(nativeProvider.value) &&
         type.harnessAuth.loginMode === (binding?.method ?? authMethod.value) &&
         !type.config.some((field) => field.required) &&
         type.secrets.length === 1 &&
@@ -2656,6 +2776,7 @@ function renderAgentForm(
     for (const node of [
       configuration,
       nativeProvider,
+      providerBaseUrl,
       authMethod,
       model,
       modelChoice,
@@ -2683,7 +2804,7 @@ function renderAgentForm(
     mode.disabled ||=
       harness.value === "codex" ||
       harness.value === "hermes" ||
-      nativeProvider.value === "anthropic" ||
+      embeddedOnlyProvider(nativeProvider.value) ||
       binding?.method === "runtime";
     // Why the harness choice is locked, without the request in flight: the hint must not change
     // while Create is pending, or it shifts the refusal the form just scrolled into view.
@@ -2715,7 +2836,7 @@ function renderAgentForm(
     // requirement when this form cannot select Codex: a Preset's binding locks the harness, or
     // Anthropic hides it (finding 2392). A saved or bound model credential also locks the
     // provider, so switching to OpenAI is not offered then either.
-    const codexSelectable = !harnessChoiceLocked && nativeProvider.value !== "anthropic";
+    const codexSelectable = !harnessChoiceLocked && !embeddedOnlyProvider(nativeProvider.value);
     const providerLocked =
       Boolean(savedSecret || savedCredentialSource || credentialRegistration) ||
       hasBoundModelCredential;
@@ -2744,8 +2865,8 @@ function renderAgentForm(
         : openclawEmbeddedRefused && mode.value === "embedded"
           ? binding?.method === "runtime"
             ? "This Preset's operator-managed credentials require Embedded OpenClaw, which this installation refuses because it selects a Sandbox Driver. Ask an Installation administrator, or start without a Preset."
-            : nativeProvider.value === "anthropic"
-              ? "Anthropic uses Embedded OpenClaw, which this installation refuses because it selects a Sandbox Driver. Choose OpenAI to use Dedicated execution."
+            : embeddedOnlyProvider(nativeProvider.value)
+              ? `${providerName()} uses Embedded OpenClaw, which this installation refuses because it selects a Sandbox Driver. Choose OpenAI to use Dedicated execution.`
               : "Embedded OpenClaw is unavailable: this installation selects a Sandbox Driver, which requires Dedicated execution. Select Dedicated under Runtime details."
           : embeddedRefused && harness.value === "hermes"
             ? "Hermes uses Embedded execution, which this installation refuses because it selects a Sandbox Driver."
@@ -2799,7 +2920,7 @@ function renderAgentForm(
     // The harness hint states what this Agent will run; Runtime details keep the installation's
     // conditions (finding 1904).
     const harnessOutcome = () => {
-      const anthropic = nativeProvider.value === "anthropic";
+      const anthropic = embeddedOnlyProvider(nativeProvider.value);
       if (harness.value === "hermes") {
         return embeddedRefused
           ? "This Agent cannot run Hermes on this installation: Hermes requires Embedded execution."
@@ -2823,7 +2944,7 @@ function renderAgentForm(
       }
       const runtime = `${mode.value === "dedicated" ? "Dedicated" : "Embedded"} execution`;
       if (anthropic && mode.value !== "embedded") {
-        return `This Agent cannot run OpenClaw with ${runtime}: Anthropic requires Embedded OpenClaw.`;
+        return `This Agent cannot run OpenClaw with ${runtime}: ${providerName()} requires Embedded OpenClaw.`;
       }
       if (modeUnavailable) {
         return `This Agent cannot run OpenClaw with ${runtime} on this installation.`;
@@ -2831,7 +2952,7 @@ function renderAgentForm(
       // Name Codex only when the reader can still choose it. Why Dedicated OpenClaw is refused
       // stays under Runtime details, so it is said once (finding 2404).
       const reason = anthropic
-        ? " Anthropic requires Embedded OpenClaw."
+        ? ` ${providerName()} requires Embedded OpenClaw.`
         : nativeRefused && !harnessChoiceLocked
           ? " Choose Codex for Dedicated execution."
           : "";
@@ -2839,8 +2960,11 @@ function renderAgentForm(
     };
     nativeHarnessWarning.hidden =
       harness.value !== "openclaw" || mode.value !== "dedicated" || nativeRefused;
-    codexOption.hidden = nativeProvider.value === "anthropic";
-    codexOption.disabled = nativeProvider.value === "anthropic";
+    codexOption.hidden = embeddedOnlyProvider(nativeProvider.value);
+    codexOption.disabled = embeddedOnlyProvider(nativeProvider.value);
+    const compatible = nativeProvider.value === OPENAI_COMPATIBLE;
+    baseUrlField.hidden = !compatible;
+    providerBaseUrl.required = compatible;
     harnessHint.textContent =
       harnessChoiceLocked && usesPat
         ? "This saved service account token requires Codex. Create a new draft without a Preset to use OpenClaw with an API key."
@@ -2854,7 +2978,11 @@ function renderAgentForm(
     nativeProvider.disabled ||= providerLocked;
     authMethod.disabled ||= Boolean(savedSecret || savedCredentialSource || credentialRegistration);
     apiKeyOption.textContent =
-      nativeProvider.value === "anthropic" ? "Anthropic API key" : "OpenAI API key";
+      nativeProvider.value === "anthropic"
+        ? "Anthropic API key"
+        : nativeProvider.value === OPENAI_COMPATIBLE
+          ? "API key"
+          : "OpenAI API key";
     patOption.hidden = harness.value !== "codex";
     patOption.disabled = harness.value !== "codex";
     oauthOption.hidden = harness.value !== "codex";
@@ -2923,6 +3051,10 @@ function renderAgentForm(
         ),
         ".",
       );
+    } else if (nativeProvider.value === OPENAI_COMPATIBLE) {
+      apiKey.placeholder = "";
+      credentialHelp.textContent =
+        "Use an API key the endpoint accepts as a bearer token. It is sent only to the Base URL's host.";
     } else {
       apiKey.placeholder = "sk-ant-…";
       credentialHelp.textContent = "Use an Anthropic API key for embedded OpenClaw.";
@@ -2944,6 +3076,11 @@ function renderAgentForm(
       saved ||
       Boolean(savedSecret || savedCredentialSource || credentialRegistration);
     if (useModelChoices) {
+      // Compatible endpoints have no model list: their model ID is always entered.
+      if (compatible) {
+        manualModel = true;
+      }
+      toggleModel.hidden = compatible;
       choiceField.hidden = manualModel;
       modelField.hidden = !manualModel;
       model.required = manualModel;
@@ -3472,11 +3609,13 @@ function renderAgentForm(
     const selected = configuredModelSelection(values);
     const primaryModel = modelPrimary(selected);
     const fallbackPrefixes =
-      harness.value === "codex" ? ["openai/", "codex/"] : [`${nativeProvider.value}/`];
+      harness.value === "codex"
+        ? ["openai/", "codex/"]
+        : [`${providerConfigId(nativeProvider.value)}/`];
     // Bound Codex Presets may use either supported provider prefix; OpenClaw keeps its provider.
     const primaryPrefixes = hasBoundModelCredential
       ? fallbackPrefixes
-      : [harness.value === "codex" ? "codex/" : `${nativeProvider.value}/`];
+      : [harness.value === "codex" ? "codex/" : `${providerConfigId(nativeProvider.value)}/`];
     if (
       (!binding || hasBoundModelCredential) &&
       !primaryPrefixes.some((prefix) => primaryModel === `${prefix}${model.value.trim()}`)
@@ -3509,10 +3648,23 @@ function renderAgentForm(
         "Service account tokens and ChatGPT OAuth (Experimental) require OpenAI with the Codex harness and Dedicated execution. Update the Configuration JSON or reset the template before saving.";
       return;
     }
-    if (nativeProvider.value === "anthropic" && mode.value !== "embedded") {
-      feedback.textContent =
-        "Anthropic requires Embedded execution. Update the execution mode or choose OpenAI.";
+    if (embeddedOnlyProvider(nativeProvider.value) && mode.value !== "embedded") {
+      feedback.textContent = `${providerName()} requires Embedded execution. Update the execution mode or choose OpenAI.`;
       return;
+    }
+    if (nativeProvider.value === OPENAI_COMPATIBLE) {
+      const problem = compatibleBaseUrlProblem(providerBaseUrl.value.trim());
+      if (problem) {
+        feedback.textContent = problem;
+        providerBaseUrl.focus();
+        return;
+      }
+      if (compatibleBaseUrl(values) === undefined) {
+        feedback.textContent =
+          "Configuration must use the Base URL. Update the JSON or reset the template before saving.";
+        focusConfiguration();
+        return;
+      }
     }
     if (mode.value === "embedded" && hasEnabledChannel(values)) {
       feedback.textContent =
