@@ -309,6 +309,7 @@ export function renderOaePeople(
         if (requestFailure(error).status === 409) {
           throw new Error(
             `An OCE account for ${address} already exists, but it is not linked to this person’s SSO identity here. The platform operator links it once with: oae-user add ${address} ${text(found.subject)}`,
+            { cause: error },
           );
         }
         throw error;
