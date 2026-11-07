@@ -125,7 +125,13 @@ Progress (2026-11-06):
   `observability.accessLogs: false` (Traefik ≥ 3.1; verified: token requests not logged, browser
   requests still logged for CrowdSec).
 
-## ⬜ Strike 4 — OAE images and the Claude harness for OpenClaw
+## 🟨 Strike 4 — OAE images and the Claude harness for OpenClaw
+
+**Claude Code harness — done 2026-11-07** (branch `feat/oae-claude-harness`): OpenClaw's built-in
+`claude-cli` backend instead of an acpx PR; Console Provider Anthropic → Harness Claude Code;
+runtime image = OCE runtime + pinned Claude Code with an admin-managed `apiKeyHelper`. Embedded
+only; Dedicated Claude Code Pod not built. See `docs/oae/claude-harness.md`. Images from `oae`
+via CI (`oae-images.yml`) still open.
 
 - `oae-images.yml`: build and publish controller and runtime images from `oae` to
   `ghcr.io/oidebrett/open-agents-enterprise-*` (amd64 + arm64); manidae package
