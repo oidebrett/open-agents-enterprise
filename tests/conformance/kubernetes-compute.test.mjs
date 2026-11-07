@@ -9434,6 +9434,19 @@ test("deployment admission refuses Gateway breakers before a dedicated deploymen
     () => unrouted.validateHarnessAuth(embedded, apiKeyAuth, { ...embeddedBase, ...slack }, null),
     named("channels.slack", "is enabled, but channels require a dedicated Agent workload"),
   );
+  // OAE: Teams on an embedded Agent runs over the gateway's own egress, with no channel runtime.
+  unrouted.validateHarnessAuth(embedded, apiKeyAuth, {
+    ...embeddedBase,
+    channels: { msteams: { enabled: true } },
+  });
+  assert.throws(
+    () =>
+      unrouted.validateHarnessAuth(embedded, apiKeyAuth, {
+        ...embeddedBase,
+        channels: { msteams: { enabled: true }, slack: { enabled: true } },
+      }),
+    named("channels.msteams", "is enabled, but channels require a dedicated Agent workload"),
+  );
   // A disabled channel, and channel defaults, need neither.
   for (const channels of [{ slack: { enabled: false } }, { defaults: { groupPolicy: "open" } }]) {
     unrouted.validateHarnessAuth(codex, apiKeyAuth, { ...base, channels });
@@ -15098,7 +15111,8 @@ test("revision lifecycle rejects invalid ownership and unsupported workloads bef
     );
   }
   // Channel credentials must never enter the combined embedded Agent and gateway workload.
-  for (const provider of ["slack", "msteams"]) {
+  // OAE: except Microsoft Teams (EMBEDDED_DIRECT_CHANNELS; docs/oae/teams.md).
+  for (const provider of ["slack"]) {
     await assert.rejects(
       production.prepareRevision({
         ...embeddedRevision,
