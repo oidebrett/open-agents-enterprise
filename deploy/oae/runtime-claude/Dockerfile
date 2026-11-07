@@ -18,7 +18,23 @@ COPY claude-wrapper /tmp/oae-claude/
 RUN rm -f /usr/local/bin/claude && install -m 0755 /tmp/oae-claude/claude-wrapper /usr/local/bin/claude \
     && rm -rf /tmp/oae-claude \
     && claude --version
+# Microsoft Teams channel plugin, bundled beside OCE's Slack (OCE's image ships only Slack), so the
+# gateway discovers it as a stock extension. Pinned to the image's OpenClaw (2026.10.8) and checked
+# against npm's integrity; its development-only workspace entries are dropped before the install.
+# docs/oae/teams.md
+ARG MSTEAMS_VERSION=2026.10.8
+ARG MSTEAMS_INTEGRITY=sha512-Wa7Odaqy7u7ecC8rJDLamXh4qccKmjZuBZNKBmbThlbm9Bw7Sc0nrKOkYrZ5vfM4eL99sFtmst4SNIOzMxNeGQ==
+RUN set -e; mkdir -p /tmp/msteams && cd /tmp/msteams \
+    && npm pack "@openclaw/msteams@${MSTEAMS_VERSION}" --silent >/dev/null \
+    && test "sha512-$(openssl dgst -sha512 -binary "openclaw-msteams-${MSTEAMS_VERSION}.tgz" | base64 -w0)" = "${MSTEAMS_INTEGRITY}" \
+    && tar xzf "openclaw-msteams-${MSTEAMS_VERSION}.tgz" && cd package \
+    && node -e 'const fs=require("fs"),p=JSON.parse(fs.readFileSync("package.json"));delete p.devDependencies;delete p.peerDependencies;fs.writeFileSync("package.json",JSON.stringify(p,null,2))' \
+    && npm install --omit=dev --omit=peer --no-fund --no-audit --ignore-scripts --legacy-peer-deps \
+    && npm cache clean --force \
+    && cp -a /tmp/msteams/package /app/node_modules/openclaw/dist/extensions/msteams \
+    && rm -rf /tmp/msteams
 USER node
+RUN HOME=/tmp/probe openclaw plugins inspect msteams >/dev/null && rm -rf /tmp/probe
 
 # No self-update in an immutable image; no telemetry, error reporting or other non-essential
 # traffic (the Agent's egress allows the Anthropic API only).
