@@ -133,15 +133,56 @@ the card and choose channels and people. See the OCE guide `docs/guides/integrat
 - **Teams does not answer**: the bot's messaging endpoint must be the one on the Teams card, and
   the Agent's version with Teams must be deployed.
 
-## 8. For the platform operator
+## 8. Single sign-on: Keycloak, and your company login (Entra ID)
+
+Single sign-on is optional. Without it only the recovery administrator signs in (password), and
+people, `/apps` and the People card are unavailable. With it, everyone signs in through a
+**Keycloak realm**, which can itself hand sign-in to your company's identity provider.
+
+**When deploying with manidae-cloud**, the Open Agents Enterprise form has a **Single sign-on**
+choice. Pick **Keycloak** and fill in:
+
+| Field                                   | Value                                                                                                        |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Keycloak Realm URL                      | `https://<keycloak host>/realms/<realm>` (HTTPS, port 443)                                                   |
+| Sign-In Button Name                     | Shown as "Continue with …" (default: SSO)                                                                    |
+| Console Client ID / Secret              | Confidential client, redirect `https://<console host>/api/auth/providers/oidc/callback`                      |
+| Edge Client ID / Secret                 | Confidential client, redirect `https://auth.agents.<console host>/callback`                                  |
+| Directory Client ID / Secret (optional) | Service-account-only client with `realm-management` → `view-users`, so the People card finds people by email |
+
+The form checks these before creating the server; the secrets are stored write-only.
+
+**Creating the realm and clients.** On the machine that runs Keycloak (Docker container
+`oae-sso-keycloak-1`, admin login in `~/.config/oae-sso/keycloak.env`), run
+`deploy/oae/central-sso/oae-realm.sh <realm> https://<console host>`. It creates the realm and the
+three clients with the settings OCE requires (confidential, standard flow only, PKCE S256, RS256
+ID tokens, no direct grants) and writes each client's issuer, ID and secret to
+`~/.config/oae-sso/<realm>-client.json`, `-edge-client.json` and `-directory-client.json`: copy
+those values into the form. By hand, mirror those settings in _Clients → Create client_, and for
+the directory client enable only _Service accounts_ and assign `realm-management` → `view-users`.
+
+**Your company login through Keycloak (Microsoft Entra ID).** OAE only ever talks to Keycloak, so
+nothing changes on the OAE side:
+
+1. In Entra ID (_App registrations → New registration_), register an app with redirect URI
+   `https://<keycloak host>/realms/<realm>/broker/entra/endpoint`; create a client secret.
+2. In Keycloak: the realm → _Identity providers → Microsoft_ (or _OpenID Connect v1.0_ with the
+   tenant's issuer `https://login.microsoftonline.com/<tenant id>/v2.0`), alias `entra`, with the
+   app's client ID and secret.
+3. Optional: make it the only way in (_Authentication → browser flow → Identity Provider
+   Redirector_, default provider `entra`), and map the Entra email to the Keycloak user's email.
+
+People then click the OAE sign-in button, sign in with Microsoft, and come back as Keycloak users.
+**Keycloak creates a brokered user at their first sign-in**: until then the People card cannot
+find them by email. Ask people to sign in once before you grant access, or synchronise users into
+Keycloak (LDAP / user federation). Google, Okta or another OIDC/SAML provider work the same way.
+
+## 9. For the platform operator
 
 These need a server shell and are not part of daily administration.
 
-- **Installation** (manidae-cloud's _Open Agents Enterprise_ package) needs: a console host name;
-  an OIDC issuer with a client for the console and one for the edge (redirect
-  `https://auth.agents.<host>/callback`); optionally a **read-only directory client**
-  (`client_credentials`, Keycloak `realm-management` → `view-users`) for the People card's email
-  lookup. OAE's `deploy/oae/central-sso/oae-realm.sh` creates all three in a Keycloak realm.
+- **Installation**: manidae-cloud's _Open Agents Enterprise_ package; single sign-on as in
+  section 8.
 - **Break-glass** (SSO down): `oae-user add <email> <sso subject>`,
   `oae-user grant <email> <agent> [user|operator]`, `oae-user list`. Changes are made as the
   recovery administrator.
