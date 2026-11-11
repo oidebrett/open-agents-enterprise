@@ -26,6 +26,8 @@ s.update({"forceLoginMethod": "gateway", "forceLoginGatewayUrl": os.environ["GW_
 json.dump(s, open(p, "w"), indent=2)
 PY
 grep -q NODE_EXTRA_CA_CERTS ~/.zshrc 2>/dev/null || echo 'export NODE_EXTRA_CA_CERTS=$HOME/.claude-gateway/ca.crt' >> ~/.zshrc
+# Claude Desktop's Code tab runs Claude Code without your shell's settings: give apps the CA too.
+launchctl setenv NODE_EXTRA_CA_CERTS "$HOME/.claude-gateway/ca.crt"
 
 cat <<EOF
 Done. Next:

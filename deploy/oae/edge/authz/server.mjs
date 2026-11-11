@@ -622,7 +622,21 @@ s.update({"forceLoginMethod": "gateway", "forceLoginGatewayUrl": os.environ["GW_
 json.dump(s, open(p, "w"), indent=2)
 PY
 grep -q NODE_EXTRA_CA_CERTS ~/.zshrc 2>/dev/null || echo 'export NODE_EXTRA_CA_CERTS=$HOME/.claude-gateway/ca.crt' >> ~/.zshrc
-echo "Done. Import the tunnel file in WireGuard and activate it, then open Claude Code or Claude Desktop."
+# Claude Desktop's Code tab runs Claude Code without your shell's settings: give apps the CA too,
+# now and at every login (remove: launchctl unsetenv NODE_EXTRA_CA_CERTS; delete the plist).
+mkdir -p ~/Library/LaunchAgents
+cat > ~/Library/LaunchAgents/dev.oae.claude-gateway-ca.plist <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.oae.claude-gateway-ca</string>
+<key>ProgramArguments</key><array><string>/bin/launchctl</string><string>setenv</string><string>NODE_EXTRA_CA_CERTS</string><string>$HOME/.claude-gateway/ca.crt</string></array>
+<key>RunAtLoad</key><true/>
+</dict></plist>
+PLIST
+launchctl setenv NODE_EXTRA_CA_CERTS "$HOME/.claude-gateway/ca.crt"
+echo "Claude Code settings written to $CFG/settings.json (set CLAUDE_CONFIG_DIR to keep them elsewhere)."
+echo "Done. Import the tunnel file in WireGuard and activate it, then open Claude Code, or quit and reopen Claude Desktop."
 echo "Certificate fingerprint to confirm: ${fingerprint}"
 `;
 }
@@ -654,7 +668,7 @@ async function claudeConnect(req, res, session, agent, label) {
   const bootstrap = `https://${agent.claudeHost}:8443/user/bootstrap`;
   const body = `<ol>
 <li>Download ${download(`${fileBase}.conf`, tunnel, "your tunnel file")} and ${download("setup-claude-gateway.sh", claudeSetupScript(agent.claudeHost, gw.tunnelIp, gw.fingerprint, ca), "the setup script")} (macOS).</li>
-<li>Run the setup script once in Terminal: <code>bash ~/Downloads/setup-claude-gateway.sh</code> (it asks for your Mac password).</li>
+<li>Run the setup script once in Terminal: <code>bash ~/Downloads/setup-claude-gateway.sh</code> (it asks for your Mac password). It makes this gateway your Claude Code sign-in; to keep it separate from another setup, run it with <code>CLAUDE_CONFIG_DIR=~/claude-gateway</code> and start Claude Code the same way.</li>
 <li>WireGuard (Mac App Store): <b>Import tunnel(s) from file</b>, pick the tunnel file, <b>Activate</b>. Run one WireGuard tunnel at a time. It works within a minute.</li>
 <li><b>Claude Code</b> (2.1.295 or later): open a new terminal and run <code>claude</code>. Trust the gateway only if its fingerprint is <code>${esc(gw.fingerprint)}</code>, then sign in.</li>
 <li><b>Claude Desktop</b>: Help → Troubleshooting → Enable Developer Mode; Developer → Configure Third-Party Inference… → Source. Bootstrap config URL:<code class="secret">${esc(bootstrap)}</code>Leave the OIDC fields empty, save, then <b>Sign in with your organization</b>.</li>
