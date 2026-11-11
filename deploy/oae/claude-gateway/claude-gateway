@@ -43,7 +43,7 @@ dc() { (cd "$CGW_DIR" && docker compose --env-file .env -f compose.yaml $(overri
 overrides() { [ "${CGW_IDP:-bundled}" = external ] && echo "-f compose.external-idp.yaml" || true; }
 profiles() {
   local p=""
-  [ "${CGW_IDP:-bundled}" = bundled ] && p="$p --profile keycloak"
+  if [ "${CGW_IDP:-bundled}" = bundled ]; then p="$p --profile keycloak"; fi
   case "${CGW_NETWORK:-wireguard}" in wireguard) p="$p --profile wireguard";; pangolin) p="$p --profile pangolin";; esac
   echo "$p"
 }
@@ -113,7 +113,7 @@ make_certs() {
       -addext "nameConstraints=critical,permitted;DNS:$dom,permitted;DNS:.$dom" 2>/dev/null
   fi
   leaf gateway "$CGW_GATEWAY_HOST" 10001
-  [ "$CGW_IDP" = bundled ] && leaf keycloak "$CGW_KEYCLOAK_HOST" 1000
+  if [ "$CGW_IDP" = bundled ]; then leaf keycloak "$CGW_KEYCLOAK_HOST" 1000; fi
   install -m 644 "$c/ca/ca.crt" "$c/gateway/ca.crt"; install -m 644 "$c/ca/ca.crt" "$c/keycloak/ca.crt"
   chmod 755 "$c" "$c/gateway" "$c/keycloak"; chmod 700 "$c/ca"
 }
@@ -126,7 +126,7 @@ leaf() {  # leaf NAME HOST UID: a one-year server certificate, regenerated only 
   openssl x509 -req -in "$c/ca/$n.csr" -CA "$c/ca/ca.crt" -CAkey "$c/ca/ca.key" -CAcreateserial -days 365 -sha256 \
     -extfile "$c/ca/$n.ext" -out "$c/$n/$n.crt" 2>/dev/null
   chmod 644 "$c/$n/$n.crt"; chgrp "$uid" "$c/$n/$n.key"; chmod 640 "$c/$n/$n.key"
-  [ "$n" = keycloak ] && chown "$uid" "$c/$n/$n.key"
+  if [ "$n" = keycloak ]; then chown "$uid" "$c/$n/$n.key"; fi
 }
 
 render_config() {
@@ -269,7 +269,7 @@ cmd_install() {
     [ -n "$key" ] || die "no Anthropic API key (set CGW_ANTHROPIC_KEY_FILE)"
     printf 'ANTHROPIC_API_KEY=%s\n' "$key" > "$CGW_DIR/anthropic.env"; chmod 600 "$CGW_DIR/anthropic.env"
   fi
-  [ "$CGW_NETWORK" = pangolin ] && [ ! -s "$CGW_DIR/newt.env" ] && die "CGW_NETWORK=pangolin needs $CGW_DIR/newt.env (PANGOLIN_ENDPOINT, NEWT_ID, NEWT_SECRET)"
+  if [ "$CGW_NETWORK" = pangolin ] && [ ! -s "$CGW_DIR/newt.env" ]; then die "CGW_NETWORK=pangolin needs $CGW_DIR/newt.env (PANGOLIN_ENDPOINT, NEWT_ID, NEWT_SECRET)"; fi
   load_env
   install -m 644 "$SRC/compose.yaml" "$CGW_DIR/compose.yaml"
   install -m 644 "$SRC/compose.external-idp.yaml" "$CGW_DIR/compose.external-idp.yaml"
@@ -284,8 +284,8 @@ cmd_install() {
   say "building and starting"
   dc build -q
   dc up -d --remove-orphans
-  [ "$CGW_IDP" = bundled ] && kc_realm
-  [ "$CGW_NETWORK" = wireguard ] && dc up -d --force-recreate traefik >/dev/null 2>&1
+  if [ "$CGW_IDP" = bundled ]; then kc_realm; fi
+  if [ "$CGW_NETWORK" = wireguard ]; then dc up -d --force-recreate traefik >/dev/null 2>&1; fi
   say "waiting for the gateway"
   for _ in $(seq 60); do dc logs --no-color gateway 2>/dev/null | grep -q '"evt"' && break; sleep 2; done
   cmd_status
@@ -310,13 +310,13 @@ cmd_peer() {
     add|remove)
       [[ "$name" =~ ^[a-zA-Z0-9_-]{1,32}$ ]] || die "peer name: letters, digits, - or _"
       local peers; peers=$(echo "${CGW_PEERS:-}" | tr ',' '\n' | sed '/^$/d' | grep -vx "$name" || true)
-      [ "$sub" = add ] && peers=$(printf '%s\n%s\n' "$peers" "$name" | sed '/^$/d')
+      if [ "$sub" = add ]; then peers=$(printf '%s\n%s\n' "$peers" "$name" | sed '/^$/d'); fi
       setkv CGW_PEERS "$(echo "$peers" | paste -sd, -)"
-      [ "$sub" = remove ] && rm -rf "$CGW_DIR/wireguard/peer_$name" "$CGW_DIR/handoff/$name"
+      if [ "$sub" = remove ]; then rm -rf "$CGW_DIR/wireguard/peer_$name" "$CGW_DIR/handoff/$name"; fi
       load_env
       dc up -d wireguard >/dev/null 2>&1; dc up -d --force-recreate traefik >/dev/null 2>&1
-      [ "$sub" = add ] && handoff "$name"
-      [ "$sub" = remove ] && say "peer $name removed"
+      if [ "$sub" = add ]; then handoff "$name"; fi
+      if [ "$sub" = remove ]; then say "peer $name removed"; fi
       ;;
     *) die "peer add|remove|list" ;;
   esac
@@ -365,7 +365,7 @@ cmd_status() {
   [ "$CGW_NETWORK" = wireguard ] && dc exec -T wireguard wg show wg0 latest-handshakes 2>/dev/null | sed 's/^/  handshake: /' >&2 || true
   say "gateway https://$CGW_GATEWAY_HOST:8443  certificate SHA-256 $(fingerprint)"
   say "Desktop bootstrap URL: https://$CGW_GATEWAY_HOST:8443/user/bootstrap"
-  [ "$CGW_LOAD_TEST" = 1 ] && say "LOAD TEST MODE: canned replies, nothing reaches Anthropic"
+  if [ "$CGW_LOAD_TEST" = 1 ]; then say "LOAD TEST MODE: canned replies, nothing reaches Anthropic"; fi
   true
 }
 cmd_restart() { need_root; load_env; render_config; dc up -d --force-recreate gateway pii-masker; }
@@ -384,7 +384,7 @@ cmd_uninstall() {
   need_root; load_env
   if [ "${1:-}" = --purge ]; then dc down -v; else dc down; fi
   systemctl disable -q --now $UNIT 2>/dev/null || true; rm -f /etc/systemd/system/$UNIT; systemctl daemon-reload
-  [ "${1:-}" = --purge ] && rm -rf "$CGW_DIR" /usr/local/bin/claude-gateway
+  if [ "${1:-}" = --purge ]; then rm -rf "$CGW_DIR" /usr/local/bin/claude-gateway; fi
   say "stopped${1:+ and purged}; close UDP $CGW_WG_PORT in the cloud firewall"
 }
 
