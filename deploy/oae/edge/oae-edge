@@ -366,6 +366,16 @@ cmd_sync() {
         | map({sub: $sub[.subjectId], level: (if $rname[.roleId] == $op then "operator" else "user" end)})
         | reduce .[] as $e ({}; .[$e.sub] = (if .[$e.sub] == "operator" or $e.level == "operator" then "operator" else "user" end))' <<<"$bindings")
       acl=$(jq -c --arg h "$host" --argjson p "$people" '.[$h] = $p' <<<"$acl")
+      # Claude Gateway Agents (docs/oae/claude-gateway.md): no public route; people reach them over
+      # the gateway's WireGuard (oae-claude-sync). /apps lists them from this metadata and the ACL.
+      local cgw
+      cgw=$(kubectl get svc -A -l "openclaw.dev/agent=$aid,oae.dev/runtime=claude-gateway" -o json | jq -c '.items[0] // empty')
+      if [ -n "$cgw" ]; then
+        meta=$(jq -c --arg h "$host" --arg n "$(jq -r .name <<<"$agent")" \
+          --arg c "$(jq -r '.metadata.annotations["oae.dev/claude-host"] // ""' <<<"$cgw")" \
+          '.[$h] = {name: $n, runtime: "claude-gateway", claudeHost: $c}' <<<"$meta")
+        continue
+      fi
       svc=$(kubectl get svc -A -l "openclaw.dev/agent=$aid" -o json | jq -c '[.items[] | select((.metadata.name | startswith("gateway-")) or .metadata.labels["oae.dev/runtime"] == "hermes")][0] // empty')
       [ -n "$svc" ] || continue
       tns=$(jq -r .metadata.namespace <<<"$svc"); sname=$(jq -r .metadata.name <<<"$svc")
