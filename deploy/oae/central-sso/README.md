@@ -13,6 +13,8 @@ What you end up with, per OAE deployment:
 | Client **`oae-console`** (confidential)                     | People signing in to the OAE console                            |
 | Client **`oae-edge`** (confidential)                        | People opening their Agents, `/apps`, phones and Hermes Desktop |
 | Client **`oae-edge-directory`** (optional, service account) | The console's People card finding people by email (read-only)   |
+| Client **`oae-claude-clients`** (optional, service account) | Claude Gateway Agents: one sign-in client per gateway           |
+| Client scope **`groups`**                                   | Group names in Claude Gateway tokens (model policy per group)   |
 | **Users** (or a brokered Entra ID)                          | The people who sign in                                          |
 
 ## 1. Install Keycloak
@@ -67,7 +69,7 @@ the same name below.
 
 It creates realm `acme` and the three clients with exactly the settings OCE requires, and writes
 each one's issuer, client ID and secret to `~/.config/oae-sso/acme-client.json`,
-`acme-edge-client.json` and `acme-directory-client.json` (mode 600). Read them with
+`acme-edge-client.json`, `acme-directory-client.json` and `acme-claude-client.json` (mode 600). Read them with
 `jq . ~/.config/oae-sso/acme-*.json`. It is safe to run again.
 
 ### Option B: by hand in the Keycloak admin console
@@ -90,6 +92,15 @@ each one's issuer, client ID and secret to `~/.config/oae-sso/acme-client.json`,
    - _Service accounts roles_ tab → _Assign role_ → filter by clients →
      `realm-management` **view-users** → _Assign_. Nothing else: it can only read users.
    - _Credentials_ tab → copy the **Client secret**.
+5. **Claude Gateway client manager** (optional, for Claude Gateway Agents):
+   - _Client scopes → Create client scope_: name `groups`, type **None**, _Include in token scope_
+     **On** → _Save_; _Mappers → By configuration → Group Membership_: name and token claim
+     `groups`, _Full group path_ **Off** → _Save_.
+   - _Clients → Create client_ → Client ID `oae-claude-clients` → _Client authentication_ **On**;
+     _Authentication flow_: only **Service accounts roles** → _Save_.
+   - _Service accounts roles_ tab → _Assign role_ → filter by clients → `realm-management`
+     **manage-clients**, **view-clients**, **view-users**, **query-users** → _Assign_.
+   - _Credentials_ tab → copy the **Client secret**.
 
 ## 3. Fill in the deploy form
 
@@ -102,6 +113,7 @@ In manidae-cloud's _Open Agents Enterprise_ form, set **Single Sign-On** to **Ke
 | Console Client ID / Secret   | `oae-console` and its secret (`acme-client.json`)                                       |
 | Edge Client ID / Secret      | `oae-edge` and its secret (`acme-edge-client.json`)                                     |
 | Directory Client ID / Secret | `oae-edge-directory` and its secret (`acme-directory-client.json`), or leave both empty |
+| Claude Gateway Client ID / Secret | `oae-claude-clients` and its secret (`acme-claude-client.json`), or leave both empty (no Claude Gateway Agents) |
 
 The form checks these before it creates the server, and stores the secrets write-only. The
 **Server Name** must be the one you used for the redirect URIs.

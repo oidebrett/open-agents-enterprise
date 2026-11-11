@@ -3,7 +3,9 @@
 # (oae-console: OAE sign-in; oae-edge: the human ingress), configured as
 # docs/guides/deploy/oidc-keycloak.md requires, and the edge's directory client (oae-edge-directory:
 # client credentials only, realm-management view-users, for the console's People panel to find a
-# person by email). Idempotent.
+# person by email), and the Claude Gateway client manager (oae-claude-clients: client credentials
+# only, may manage clients and read users; oae-claude-sync makes one sign-in client per Claude
+# Gateway Agent with it) with the `groups` scope those clients offer. Idempotent.
 #
 #   oae-realm.sh <realm> <oae-base-url>      e.g. oae-realm.sh oae-oracle https://oae.example.com
 #
@@ -86,6 +88,48 @@ ensure_directory_client() {
   echo "client:  $client (directory lookups; secret in $out)"
 }
 
+# ensure_groups_scope: an optional `groups` client scope (group names, no paths), which the Claude
+# Gateway's model policies match.
+ensure_groups_scope() {
+  local sid
+  sid=$(kc get client-scopes -r "$REALM" --fields id,name --format csv --noquotes | awk -F, '$2=="groups"{print $1}')
+  [ -n "$sid" ] && return 0
+  kc create client-scopes -r "$REALM" -s name=groups -s protocol=openid-connect \
+    -s 'attributes."include.in.token.scope"=true' >/dev/null
+  sid=$(kc get client-scopes -r "$REALM" --fields id,name --format csv --noquotes | awk -F, '$2=="groups"{print $1}')
+  kc create "client-scopes/$sid/protocol-mappers/models" -r "$REALM" -s name=groups \
+    -s protocol=openid-connect -s protocolMapper=oidc-group-membership-mapper \
+    -s 'config."claim.name"=groups' -s 'config."full.path"=false' -s 'config."id.token.claim"=true' \
+    -s 'config."access.token.claim"=true' -s 'config."userinfo.token.claim"=true' >/dev/null
+  echo "client scope groups created"
+}
+
+# ensure_claude_client_manager OUT_FILE: a confidential client that signs nobody in; it may create
+# and delete clients (one per Claude Gateway Agent) and read users (their email domains).
+ensure_claude_client_manager() {
+  local client=oae-claude-clients out=$1 cid secret
+  cid=$(kc get clients -r "$REALM" -q "clientId=$client" --fields id --format csv --noquotes | head -1)
+  if [ -z "$cid" ]; then
+    kc create clients -r "$REALM" -s "clientId=$client" -s protocol=openid-connect -s enabled=true \
+      -s publicClient=false -s clientAuthenticatorType=client-secret >/dev/null
+    cid=$(kc get clients -r "$REALM" -q "clientId=$client" --fields id --format csv --noquotes | head -1)
+    echo "client $client created"
+  fi
+  kc update "clients/$cid" -r "$REALM" \
+    -s standardFlowEnabled=false -s implicitFlowEnabled=false -s directAccessGrantsEnabled=false \
+    -s serviceAccountsEnabled=true -s 'redirectUris=[]' -s 'webOrigins=[]' \
+    -s 'attributes."standard.token.exchange.enabled"=false' \
+    -s 'attributes."oauth2.device.authorization.grant.enabled"=false' \
+    -s 'attributes."oidc.ciba.grant.enabled"=false'
+  kc add-roles -r "$REALM" --uusername "service-account-$client" --cclientid realm-management \
+    --rolename manage-clients --rolename view-clients --rolename view-users --rolename query-users
+  secret=$(kc get "clients/$cid/client-secret" -r "$REALM" | sed -nE 's/.*"value" *: *"([^"]+)".*/\1/p')
+  [ -n "$secret" ] || { echo "could not read the $client secret" >&2; exit 1; }
+  printf '{"realm":"%s","clientId":"%s","clientSecret":"%s","issuer":"%s"}\n' \
+    "$REALM" "$client" "$secret" "$ISSUER" > "$out"
+  echo "client:  $client (Claude Gateway sign-in clients; secret in $out)"
+}
+
 ISSUER="$OAE_SSO_PUBLIC_URL/realms/$REALM"
 umask 077
 mkdir -p "$HOME/.config/oae-sso"
@@ -93,4 +137,7 @@ mkdir -p "$HOME/.config/oae-sso"
 ensure_client oae-console "$OAE/api/auth/providers/oidc/callback" "$HOME/.config/oae-sso/$REALM-client.json"
 ensure_client oae-edge "https://auth.agents.${OAE#https://}/callback" "$HOME/.config/oae-sso/$REALM-edge-client.json"
 ensure_directory_client "$HOME/.config/oae-sso/$REALM-directory-client.json"
+# Claude Gateway Agents (docs/oae/claude-gateway.md).
+ensure_groups_scope
+ensure_claude_client_manager "$HOME/.config/oae-sso/$REALM-claude-client.json"
 echo "issuer:  $ISSUER"

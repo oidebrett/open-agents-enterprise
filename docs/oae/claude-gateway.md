@@ -56,11 +56,31 @@ Claude Code and Claude Desktop accept a gateway only at a **private address** (R
 The hand-off on `/apps`: tunnel file, CA certificate, `setup-mac.sh` (hosts line, CA trust,
 Claude Code settings), the Desktop bootstrap URL and the certificate fingerprint.
 
+## Installing
+
+- **Keycloak**: `central-sso/oae-realm.sh` creates the `groups` client scope and the client
+  manager `oae-claude-clients` (service account: realm-management manage-clients, view-clients,
+  view-users, query-users); `central-sso/README.md` has the by-hand steps.
+- **Server**: with the manager's ID and secret, as root:
+  `CLAUDE_KC_ISSUER=… CLAUDE_KC_CLIENT_ID=oae-claude-clients CLAUDE_PUBLIC_HOST=<public IPv4>
+  deploy/oae/claude-gateway/oae-claude-sync install` (the secret first in
+  `/opt/oce/prod/secure/claude-kc-client-secret`). manidae-cloud does this when the OAE form has
+  the Claude Gateway client, and opens UDP 51830–51849.
+- **Firewall**: inbound UDP 51830–51849 (one port per gateway, up to 20).
+
+## Lifecycle notes
+
+- The sync restarts a gateway whose sign-in Secret changed (the gateway reads it at start).
+- Deleting the Agent removes its workload (controller), then within a minute its WireGuard and
+  Traefik containers, Keycloak client, certificate, sync-made Secrets and laptop peers (sync).
+  Its volume stays until the Namespace is deleted, as for other Agents.
+
 ## Build order (each proven on Oracle before the next)
 
 1. Harness id, console choice, workload in load-test mode; sync issues certificate and Keycloak
-   client; reach it from a pod in the cluster.
-2. WireGuard per gateway, `/apps` connect/disconnect, Mac CLI + Desktop sign-in.
-3. PII masker sidecar and real Anthropic key; metadata blocked.
+   client. Done 2026-11-11 (the in-cluster path for OAE's own Agents is still to come).
+2. WireGuard per gateway, `/apps` connect/disconnect, Mac CLI + Desktop sign-in. Done 2026-11-11.
+3. PII masker sidecar and real Anthropic key. Done 2026-11-11 (email and phone masked).
 4. Second gateway on the same installation; delete an Agent and check everything is removed.
+   Done 2026-11-11.
 5. manidae: UDP range in the firewall, `oae-claude-sync` installed with OAE, docs.
