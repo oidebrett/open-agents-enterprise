@@ -172,14 +172,16 @@ cmd_sync() {
     # 1. Certificate (the CA key never leaves this host).
     cert "$d" "$h"
     kubectl -n "$ns" create secret generic "$base-tls" --from-file=tls.crt="$d/tls.crt" --from-file=tls.key="$d/tls.key" \
-      --from-file=ca.crt="$STATE/ca/ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+      --from-file=ca.crt="$STATE/ca/ca.crt" --dry-run=client -o yaml |
+      kubectl label --local -f - "oae.dev/claude-gateway=$label" -o yaml | kubectl apply -f - >/dev/null
     # 2. Keycloak client and the sign-in Secret the Pod's render step reads.
     secret=$(kc_client "$label" "$h")
     local before
     before=$(kubectl -n "$ns" get secret "$base-oidc" -o json 2>/dev/null | jq -c '.data // {}' || echo '{}')
     kubectl -n "$ns" create secret generic "$base-oidc" --from-literal=ISSUER="$CLAUDE_KC_ISSUER" \
       --from-literal=CLIENT_ID="oae-claude-$label" --from-literal=CLIENT_SECRET="$secret" \
-      --from-literal=EMAIL_DOMAINS="$domains" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+      --from-literal=EMAIL_DOMAINS="$domains" --dry-run=client -o yaml |
+      kubectl label --local -f - "oae.dev/claude-gateway=$label" -o yaml | kubectl apply -f - >/dev/null
     # The gateway reads these at start: a change (a client secret Keycloak replaced after the Pod
     # started, a new email domain) needs a restart, or sign-in fails with unauthorized_client.
     if [ "$before" != '{}' ] && [ "$before" != "$(kubectl -n "$ns" get secret "$base-oidc" -o json | jq -c .data)" ]; then
@@ -217,10 +219,24 @@ cmd_sync() {
     label=${h%%.*}; label=${label#claude-}
     local id; id=$(kc GET "/clients?clientId=oae-claude-$label" | jq -r '.[0].id // empty')
     [ -z "$id" ] || kc DELETE "/clients/$id" >/dev/null
+    kubectl delete secret -A -l "oae.dev/claude-gateway=$label" --ignore-not-found >/dev/null
     rm -rf "$STATE/gw/$label"
     alloc=$(jq -c --arg h "$h" 'del(.[$h])' <<<"$alloc"); echo "$alloc" > "$STATE/alloc.json"
     log "removed $h (WireGuard slot $n, Keycloak client oae-claude-$label)"
   done
+  # Laptops of deleted gateways leave the edge's store. The write carries the version read, so a
+  # concurrent /apps change refuses it and the next run tries again.
+  local raw stale
+  raw=$(kubectl -n $EDGE_NS get secret $PEERS_SECRET -o json 2>/dev/null) || return 0
+  stale=$(jq -r --arg seen "$seen" '($seen | split("\n") | map(select(. != ""))) as $live
+    | .data["peers.json"] // "e30=" | @base64d | fromjson | to_entries
+    | map(select(.value.claudeHost as $c | $live | index($c) | not)) | .[].key' <<<"$raw")
+  if [ -n "$stale" ]; then
+    jq --arg stale "$stale" '($stale | split("\n")) as $gone
+      | .data["peers.json"] |= (@base64d | fromjson | with_entries(select(.key as $k | $gone | index($k) | not)) | tojson | @base64)' <<<"$raw" |
+      kubectl replace -f - >/dev/null && log "removed $(wc -l <<<"$stale" | tr -d ' ') laptop(s) of deleted gateways" ||
+      log "peers changed meanwhile; pruning next run"
+  fi
 }
 
 cmd_status() {
