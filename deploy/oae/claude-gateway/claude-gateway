@@ -332,7 +332,7 @@ cmd_peer() {
   esac
 }
 handoff() {
-  local n=$1 f="$CGW_DIR/wireguard/peer_$n/peer_$n.conf" out="$CGW_DIR/handoff/$n"
+  local n=$1; local f="$CGW_DIR/wireguard/peer_$n/peer_$n.conf" out="$CGW_DIR/handoff/$n"
   for _ in $(seq 30); do [ -f "$f" ] && break; sleep 1; done
   [ -f "$f" ] || die "WireGuard did not create peer $n"
   mkdir -p "$out"; chmod 700 "$CGW_DIR/handoff" "$out"
