@@ -22,12 +22,14 @@ function configuredRuntime(value: unknown): string | undefined {
   // OAE: "hermes" — Hermes as the Agent's gateway and harness (embedded; docs/oae/strikes.md 5b).
   // OAE: "claude-cli" — OpenClaw's Claude Code CLI backend, run by the OpenClaw gateway itself
   // (docs/oae/claude-harness.md).
+  // OAE: "claude-gateway" — Anthropic's claude gateway for people's Claude apps (docs/oae/claude-gateway.md).
   if (
     runtime === undefined ||
     (runtime.id !== "openclaw" &&
       runtime.id !== "codex" &&
       runtime.id !== "hermes" &&
-      runtime.id !== CLAUDE_CLI_RUNTIME)
+      runtime.id !== CLAUDE_CLI_RUNTIME &&
+      runtime.id !== "claude-gateway")
   ) {
     throw new ConfigurationHarnessError(
       "The configured model Harness runtime identity is unsupported.",

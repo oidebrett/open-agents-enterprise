@@ -79,6 +79,9 @@ cmd_install() {
     kubectl -n $EDGE_NS create secret generic oae-edge-hermes --from-literal=hermes.json='{}' >/dev/null
   kubectl -n $EDGE_NS get secret oae-edge-pairing >/dev/null 2>&1 ||
     kubectl -n $EDGE_NS create secret generic oae-edge-pairing --from-literal=pairing.json='{}' >/dev/null
+  # Claude Gateway laptops (/apps writes their public keys; oae-claude-sync applies them).
+  kubectl -n $EDGE_NS get secret oae-claude-peers >/dev/null 2>&1 ||
+    kubectl -n $EDGE_NS create secret generic oae-claude-peers --from-literal=peers.json='{}' >/dev/null
   migrate_records
   kubectl apply -f - >/dev/null <<YAML
 # The edge reads and writes exactly its record Secrets, nothing else in the cluster.
@@ -93,7 +96,7 @@ metadata: { name: oae-edge-authz-records, namespace: $EDGE_NS }
 rules:
 - apiGroups: [""]
   resources: [secrets]
-  resourceNames: [oae-edge-people, oae-edge-devices, oae-edge-pairing]
+  resourceNames: [oae-edge-people, oae-edge-devices, oae-edge-pairing, oae-claude-peers]
   verbs: [get, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -130,16 +133,20 @@ spec:
         - { name: OAE_EDGE_ACL_FILE, value: /acl/acl.json }
         - { name: OAE_EDGE_AGENTS_FILE, value: /acl/agents.json }
         - { name: OAE_EDGE_HERMES_FILE, value: /hermes/hermes.json }
+        - { name: OAE_EDGE_CLAUDE_DIR, value: /claude }
         envFrom: [{ secretRef: { name: oae-edge-authz } }]
         volumeMounts:
         - { name: acl, mountPath: /acl, readOnly: true }
         - { name: hermes, mountPath: /hermes, readOnly: true }
+        - { name: claude, mountPath: /claude, readOnly: true }
         readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
         resources: { requests: { cpu: 20m, memory: 64Mi }, limits: { memory: 192Mi } }
         securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
       volumes:
       - { name: acl, configMap: { name: oae-edge-acl } }
       - { name: hermes, secret: { secretName: oae-edge-hermes } }
+      # Written by oae-claude-sync (endpoints, server keys, fingerprints, CA); absent without gateways.
+      - { name: claude, configMap: { name: oae-claude-gateways, optional: true } }
 ---
 apiVersion: v1
 kind: Service
@@ -366,6 +373,16 @@ cmd_sync() {
         | map({sub: $sub[.subjectId], level: (if $rname[.roleId] == $op then "operator" else "user" end)})
         | reduce .[] as $e ({}; .[$e.sub] = (if .[$e.sub] == "operator" or $e.level == "operator" then "operator" else "user" end))' <<<"$bindings")
       acl=$(jq -c --arg h "$host" --argjson p "$people" '.[$h] = $p' <<<"$acl")
+      # Claude Gateway Agents (docs/oae/claude-gateway.md): no public route; people reach them over
+      # the gateway's WireGuard (oae-claude-sync). /apps lists them from this metadata and the ACL.
+      local cgw
+      cgw=$(kubectl get svc -A -l "openclaw.dev/agent=$aid,oae.dev/runtime=claude-gateway" -o json | jq -c '.items[0] // empty')
+      if [ -n "$cgw" ]; then
+        meta=$(jq -c --arg h "$host" --arg n "$(jq -r .name <<<"$agent")" \
+          --arg c "$(jq -r '.metadata.annotations["oae.dev/claude-host"] // ""' <<<"$cgw")" \
+          '.[$h] = {name: $n, runtime: "claude-gateway", claudeHost: $c}' <<<"$meta")
+        continue
+      fi
       svc=$(kubectl get svc -A -l "openclaw.dev/agent=$aid" -o json | jq -c '[.items[] | select((.metadata.name | startswith("gateway-")) or .metadata.labels["oae.dev/runtime"] == "hermes")][0] // empty')
       [ -n "$svc" ] || continue
       tns=$(jq -r .metadata.namespace <<<"$svc"); sname=$(jq -r .metadata.name <<<"$svc")

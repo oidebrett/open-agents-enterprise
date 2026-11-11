@@ -1,0 +1,5 @@
+# Added by claude-gateway when CGW_IDP=external: the gateway must reach an identity provider on the
+# internet (for example OAE's Keycloak). The egress subnet has the cloud metadata address blocked.
+services:
+  gateway:
+    networks: { egress: {} }

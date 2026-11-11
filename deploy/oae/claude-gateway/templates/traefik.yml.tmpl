@@ -1,0 +1,14 @@
+# Private entry points on the tunnel address. TLS passes through untouched (SNI routing), so
+# the gateway and Keycloak keep their own certificates; clients pin the gateway's.
+tcp:
+  routers:
+    gateway:
+      entryPoints: [gateway]
+      rule: "HostSNI(`@@GATEWAY_HOST@@`)"
+      service: gateway
+      tls: { passthrough: true }
+@@KEYCLOAK_ROUTER@@
+  services:
+    gateway:
+      loadBalancer: { servers: [{ address: "@@GATEWAY_HOST@@:8443" }] }
+@@KEYCLOAK_SERVICE@@

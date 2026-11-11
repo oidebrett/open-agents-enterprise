@@ -1,0 +1,138 @@
+# Claude Gateway for OAE. Rendered into /opt/claude-gateway by `claude-gateway install`, which
+# also writes the root-only .env (secrets + settings) this file reads. Nothing publishes a TCP
+# port on the host: the only public port is WireGuard's UDP port.
+#
+# Profiles: keycloak (bundled sign-in; off when OAE's own Keycloak is used), wireguard (laptop
+# access, the default), pangolin (Newt instead of WireGuard + Traefik).
+name: claude-gateway
+
+networks:
+  # No route off the host: the gateway, Keycloak and Postgres only talk to each other and the masker.
+  cgw: { internal: true }
+  # Only for services that must reach the internet. The host blocks the cloud metadata address
+  # for this subnet (claude-gateway-egress.service).
+  egress: { ipam: { config: [{ subnet: "${CGW_EGRESS_SUBNET}" }] } }
+
+volumes: { pgdata: {} }
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    environment:
+      POSTGRES_USER: gw
+      POSTGRES_PASSWORD: "${PG_PASSWORD}"
+      POSTGRES_DB: gateway
+      KC_DB_PASSWORD: "${KC_DB_PASSWORD}"
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U gw -d gateway"], interval: 5s, retries: 30 }
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+    networks: [cgw]
+
+  gateway:
+    build:
+      context: ./gateway
+      args: { DEBIAN_IMAGE: "${DEBIAN_IMAGE}" }
+    image: oae/claude-gateway:${CLAUDE_CODE_VERSION}
+    environment:
+      CLAUDE_CONFIG_DIR: /tmp/.claude
+      NODE_EXTRA_CA_CERTS: /certs/ca.crt
+      OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET}"
+      GATEWAY_JWT_SECRET: "${GATEWAY_JWT_SECRET}"
+      GATEWAY_POSTGRES_URL: "postgres://gw:${PG_PASSWORD}@postgres/gateway"
+      MASKER_KEY: "${MASKER_KEY}"
+    # Directories, never single files: a file replaced by mv keeps its old inode in the container.
+    volumes: ["./config:/etc/claude:ro", "./certs/gateway:/certs:ro"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      pii-masker: { condition: service_started }
+      keycloak: { condition: service_healthy, required: false }
+    restart: on-failure
+    networks: { cgw: { aliases: ["${CGW_GATEWAY_HOST}"] } }
+
+  pii-masker:
+    build:
+      context: ./masker-src/router
+      dockerfile: oae-masker.Dockerfile   # copied from masker/Dockerfile by the installer
+      args: { PYTHON_IMAGE: "${PYTHON_IMAGE}" }
+    image: oae/claude-gateway-masker:${MASKER_REF}
+    env_file: [anthropic.env]
+    environment:
+      MASKER_KEY: "${MASKER_KEY}"
+      MASK_SECRET: "${MASK_SECRET}"
+      PII_RULES_FILE: /etc/pii-masker/pii-rules.json
+      MASKER_DUMP_DIR: ""
+    volumes: ["./pii:/etc/pii-masker:ro"]
+    restart: unless-stopped
+    networks: { cgw: { aliases: [pii-masker] }, egress: {} }
+
+  keycloak:
+    profiles: [keycloak]
+    image: ${KEYCLOAK_IMAGE}
+    # Production mode: Keycloak terminates its own TLS (Traefik passes it through), HTTP is off,
+    # data lives in Postgres. `claude-gateway install` creates the realm and client with kcadm.
+    command:
+      - start
+      - --hostname=https://${CGW_KEYCLOAK_HOST}:5557
+      - --https-port=5557
+      - --http-enabled=false
+      - --https-certificate-file=/opt/keycloak/conf/tls/keycloak.crt
+      - --https-certificate-key-file=/opt/keycloak/conf/tls/keycloak.key
+      - --health-enabled=true
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: "${KC_DB_PASSWORD}"
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KC_ADMIN_PASSWORD}"
+    volumes: ["./certs/keycloak:/opt/keycloak/conf/tls:ro"]
+    depends_on: { postgres: { condition: service_healthy } }
+    # The image has no curl: probe the management port with bash.
+    healthcheck: { test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000"], interval: 5s, retries: 60, start_period: 20s }
+    restart: unless-stopped
+    networks: { cgw: { aliases: ["${CGW_KEYCLOAK_HOST}"] } }
+
+  # Laptop access: peers join ${CGW_WG_SUBNET}/24 and reach everything at the tunnel address.
+  wireguard:
+    profiles: [wireguard]
+    image: ${WIREGUARD_IMAGE}
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.conf.all.src_valid_mark: "1" }
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      SERVERURL: "${CGW_PUBLIC_HOST}"
+      SERVERPORT: "${CGW_WG_PORT}"
+      PEERS: "${CGW_PEERS}"
+      PEERDNS: ""
+      INTERNAL_SUBNET: "${CGW_WG_SUBNET}"
+      ALLOWEDIPS: "${CGW_TUNNEL_IP}/32"
+    volumes: ["./wireguard:/config"]
+    ports: ["${CGW_WG_PORT}:51820/udp"]
+    restart: unless-stopped
+    networks: [cgw, egress]
+
+  # Shares WireGuard's network namespace, so it is reachable only through the tunnel. TCP routing
+  # by SNI with TLS passthrough: the gateway and Keycloak keep their own certificates.
+  traefik:
+    profiles: [wireguard]
+    image: ${TRAEFIK_IMAGE}
+    network_mode: "service:wireguard"
+    command:
+      - --entrypoints.gateway.address=:8443
+      - --entrypoints.keycloak.address=:5557
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --log.level=INFO
+    volumes: ["./traefik:/etc/traefik/dynamic:ro"]
+    depends_on: [wireguard]
+    restart: unless-stopped
+
+  # Pangolin option: a Newt site; laptops reach the gateway as Pangolin private resources.
+  newt:
+    profiles: [pangolin]
+    image: ${NEWT_IMAGE}
+    env_file: [newt.env]
+    restart: unless-stopped
+    networks: [cgw, egress]

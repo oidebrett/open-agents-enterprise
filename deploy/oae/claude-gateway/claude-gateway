@@ -1,0 +1,412 @@
+#!/usr/bin/env bash
+# claude-gateway: install and run Claude Gateway for Open Agents Enterprise.
+#
+#   claude-gateway install            install or upgrade (settings: env vars, see below)
+#   claude-gateway peer add NAME      issue a WireGuard peer for a laptop (NAME: letters, digits)
+#   claude-gateway peer remove NAME   revoke it
+#   claude-gateway peer list
+#   claude-gateway user add EMAIL [GROUP]   bundled Keycloak: create a person (temp password)
+#   claude-gateway restart            re-render config (policies, rules) and restart the gateway
+#   claude-gateway status             services, tunnel handshakes, certificate fingerprint
+#   claude-gateway logs [N]           the gateway's audit events (last N minutes, default 30)
+#   claude-gateway uninstall [--purge]
+#
+# Install settings (environment; saved to $CGW_DIR/.env on first install, reused after):
+#   CGW_EMAIL_DOMAINS     required: comma-separated email domains allowed to sign in
+#   CGW_PUBLIC_HOST       WireGuard endpoint (public IP or DNS name); default: detected IP
+#   CGW_ANTHROPIC_KEY_FILE  file holding ANTHROPIC_API_KEY=... or the bare key (read once,
+#                         copied root-only, never printed); prompted for when unset
+#   CGW_MODELS            models everyone may use (default claude-sonnet-5-5,claude-haiku-5-5)
+#   CGW_NETWORK           wireguard (default) | pangolin | none
+#   CGW_IDP               bundled (default) | external (an existing Keycloak realm, e.g. OAE's)
+#   CGW_OIDC_ISSUER, CGW_OIDC_CLIENT_ID, CGW_OIDC_CLIENT_SECRET_FILE   for CGW_IDP=external
+#   CGW_DOMAIN            private DNS domain (default oae.internal)
+#   CGW_WG_PORT           UDP port (default 51830); open it in the cloud firewall
+#   CGW_LOAD_TEST         1 = canned replies, no spend (default 0)
+#   CGW_SESSION_TTL_HOURS gateway session lifetime (default 1)
+#
+# Claude is a trademark of Anthropic, PBC. This component runs Anthropic's own `claude gateway`
+# (downloaded from Anthropic at install time; OAE does not redistribute it).
+set -euo pipefail
+umask 077
+
+CGW_DIR=${CGW_DIR:-/opt/claude-gateway}
+SRC=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+UNIT=claude-gateway-egress.service
+say() { printf '\033[1m[claude-gateway]\033[0m %s\n' "$*" >&2; }
+die() { say "ERROR: $*"; exit 1; }
+
+need_root() { [ "$(id -u)" = 0 ] || die "run as root (sudo)"; }
+dc() { (cd "$CGW_DIR" && docker compose --env-file .env -f compose.yaml $(overrides) $(profiles) "$@"); }
+# An external identity provider (e.g. OAE's Keycloak) is on the internet: the gateway then joins the
+# egress network too, which the metadata block still covers.
+overrides() { [ "${CGW_IDP:-bundled}" = external ] && echo "-f compose.external-idp.yaml" || true; }
+profiles() {
+  local p=""
+  if [ "${CGW_IDP:-bundled}" = bundled ]; then p="$p --profile keycloak"; fi
+  case "${CGW_NETWORK:-wireguard}" in wireguard) p="$p --profile wireguard";; pangolin) p="$p --profile pangolin";; esac
+  echo "$p"
+}
+load_env() { [ -f "$CGW_DIR/.env" ] || die "not installed ($CGW_DIR/.env missing)"; set -a; . "$CGW_DIR/.env"; set +a; }
+setkv() {  # setkv KEY VALUE: write or replace one line in .env
+  local f="$CGW_DIR/.env" k=$1 v=$2
+  touch "$f"; chmod 600 "$f"
+  if grep -q "^$k=" "$f"; then
+    python3 - "$f" "$k" "$v" <<'PY'
+import sys; f,k,v=sys.argv[1:]
+lines=open(f).read().splitlines()
+open(f,"w").write("\n".join(f"{k}={v}" if l.startswith(k+"=") else l for l in lines)+"\n")
+PY
+  else printf '%s=%s\n' "$k" "$v" >> "$f"; fi
+}
+getkv() { [ -f "$CGW_DIR/.env" ] && sed -n "s/^$1=//p" "$CGW_DIR/.env" | tail -1 || true; }
+secret() { [ -n "$(getkv "$1")" ] || setkv "$1" "$(openssl rand -hex 24)"; }
+render() {  # render TEMPLATE OUT KEY=VAL...: replace @@KEY@@ tokens
+  python3 - "$@" <<'PY'
+import sys
+src, out, *kv = sys.argv[1:]
+s = open(src).read()
+for pair in kv:
+    k, v = pair.split("=", 1)
+    s = s.replace(f"@@{k}@@", v)
+assert "@@" not in s, f"unrendered token in {src}"
+open(out, "w").write(s)
+PY
+}
+
+# ---------------------------------------------------------------------------------------- install
+fetch_claude() {
+  local v=$CLAUDE_CODE_VERSION plat bin="$CGW_DIR/gateway/bin"
+  case "$(uname -m)" in x86_64) plat=linux-x64;; aarch64|arm64) plat=linux-arm64;; *) die "unsupported CPU $(uname -m)";; esac
+  if [ -x "$bin/claude" ] && [ "$(cat "$bin/.version" 2>/dev/null)" = "$v-$plat" ]; then return; fi
+  say "downloading Claude Code $v ($plat) from Anthropic"
+  mkdir -p "$bin"; local b="https://downloads.claude.ai/claude-code-releases/$v"
+  curl -fsSL "$b/manifest.json" -o "$bin/manifest.json"
+  curl -fsSL "$b/$plat/claude" -o "$bin/claude.part"
+  local want got
+  want=$(jq -r ".platforms[\"$plat\"].checksum" "$bin/manifest.json")
+  got=$(sha256sum "$bin/claude.part" | cut -d' ' -f1)
+  [ -n "$want" ] && [ "$want" = "$got" ] || { rm -f "$bin/claude.part"; die "checksum mismatch for claude $v $plat"; }
+  chmod 755 "$bin/claude.part"; mv "$bin/claude.part" "$bin/claude"; echo "$v-$plat" > "$bin/.version"
+  chmod 755 "$CGW_DIR/gateway" "$bin"
+}
+
+fetch_masker() {
+  local d="$CGW_DIR/masker-src"
+  # Public source, read by the image build: world-readable, unlike everything else here.
+  if [ ! -d "$d/.git" ]; then (umask 022; git clone -q "$MASKER_REPO" "$d"); fi
+  if [ "$(git -C "$d" rev-parse HEAD 2>/dev/null)" != "$MASKER_REF" ]; then
+    say "PII masker source at ${MASKER_REF:0:12}"
+    (umask 022; git -C "$d" fetch -q origin "$MASKER_REF" && git -C "$d" checkout -q --detach "$MASKER_REF")
+  fi
+  chmod -R a+rX "$d"
+  install -m 644 "$SRC/masker/Dockerfile" "$d/router/oae-masker.Dockerfile"
+}
+
+make_certs() {
+  local c="$CGW_DIR/certs" dom=$CGW_DOMAIN
+  mkdir -p "$c/ca" "$c/gateway" "$c/keycloak"
+  if [ ! -f "$c/ca/ca.key" ]; then
+    say "creating a private CA limited to *.$dom (name-constrained)"
+    openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -keyout "$c/ca/ca.key" -out "$c/ca/ca.crt" \
+      -subj "/CN=Claude Gateway CA ($dom only)" \
+      -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+      -addext "keyUsage=critical,keyCertSign,cRLSign" \
+      -addext "nameConstraints=critical,permitted;DNS:$dom,permitted;DNS:.$dom" 2>/dev/null
+  fi
+  leaf gateway "$CGW_GATEWAY_HOST" 10001
+  if [ "$CGW_IDP" = bundled ]; then leaf keycloak "$CGW_KEYCLOAK_HOST" 1000; fi
+  install -m 644 "$c/ca/ca.crt" "$c/gateway/ca.crt"; install -m 644 "$c/ca/ca.crt" "$c/keycloak/ca.crt"
+  chmod 755 "$c" "$c/gateway" "$c/keycloak"; chmod 700 "$c/ca"
+}
+leaf() {  # leaf NAME HOST UID: a one-year server certificate, regenerated only when missing or renamed
+  local c="$CGW_DIR/certs" n=$1 h=$2 uid=$3
+  if [ -f "$c/$n/$n.crt" ] && openssl x509 -in "$c/$n/$n.crt" -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:$h\$"; then return; fi
+  say "certificate for $h"
+  printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\nbasicConstraints=CA:FALSE\n' "$h" > "$c/ca/$n.ext"
+  openssl req -newkey rsa:2048 -nodes -keyout "$c/$n/$n.key" -out "$c/ca/$n.csr" -subj "/CN=$h" 2>/dev/null
+  openssl x509 -req -in "$c/ca/$n.csr" -CA "$c/ca/ca.crt" -CAkey "$c/ca/ca.key" -CAcreateserial -days 365 -sha256 \
+    -extfile "$c/ca/$n.ext" -out "$c/$n/$n.crt" 2>/dev/null
+  chmod 644 "$c/$n/$n.crt"; chgrp "$uid" "$c/$n/$n.key"; chmod 640 "$c/$n/$n.key"
+  if [ "$n" = keycloak ]; then chown "$uid" "$c/$n/$n.key"; fi
+}
+
+render_config() {
+  local cfg="$CGW_DIR/config"; mkdir -p "$cfg" "$CGW_DIR/pii" "$CGW_DIR/traefik" "$CGW_DIR/postgres-init"
+  chmod 755 "$cfg" "$CGW_DIR/pii" "$CGW_DIR/traefik"
+  [ -f "$cfg/policies.yaml" ] || render "$SRC/templates/policies.yaml.tmpl" "$cfg/policies.yaml" MODELS="${CGW_MODELS//,/, }"
+  [ -f "$CGW_DIR/pii/pii-rules.json" ] || cp "$SRC/templates/pii-rules.example.json" "$CGW_DIR/pii/pii-rules.json"
+  chmod 644 "$cfg/policies.yaml" "$CGW_DIR/pii/pii-rules.json"
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CGW_DIR/pii/pii-rules.json" || die "pii/pii-rules.json is not valid JSON"
+  local pol issuer client
+  pol=$(sed 's/^/    /' "$cfg/policies.yaml")
+  if [ "$CGW_IDP" = bundled ]; then issuer="https://$CGW_KEYCLOAK_HOST:5557/realms/$CGW_REALM"; client=claude-gateway
+  else issuer=$CGW_OIDC_ISSUER; client=$CGW_OIDC_CLIENT_ID; fi
+  render "$SRC/templates/gateway.yaml.tmpl" "$cfg/gateway.yaml.new" \
+    GATEWAY_HOST="$CGW_GATEWAY_HOST" OIDC_ISSUER="$issuer" OIDC_CLIENT_ID="$client" \
+    EMAIL_DOMAINS="$(echo "$CGW_EMAIL_DOMAINS" | sed 's/ //g; s/,/, /g')" SESSION_TTL_HOURS="$CGW_SESSION_TTL_HOURS" \
+    POLICIES="$pol" LOAD_TEST="$([ "$CGW_LOAD_TEST" = 1 ] && echo true || echo false)"
+  chmod 644 "$cfg/gateway.yaml.new"; mv "$cfg/gateway.yaml.new" "$cfg/gateway.yaml"
+  local kr="" ks=""
+  if [ "$CGW_IDP" = bundled ]; then
+    kr=$(printf '    keycloak:\n      entryPoints: [keycloak]\n      rule: "HostSNI(`%s`)"\n      service: keycloak\n      tls: { passthrough: true }' "$CGW_KEYCLOAK_HOST")
+    ks=$(printf '    keycloak:\n      loadBalancer: { servers: [{ address: "%s:5557" }] }' "$CGW_KEYCLOAK_HOST")
+  fi
+  render "$SRC/templates/traefik.yml.tmpl" "$CGW_DIR/traefik/routes.yml" GATEWAY_HOST="$CGW_GATEWAY_HOST" \
+    KEYCLOAK_ROUTER="$kr" KEYCLOAK_SERVICE="$ks"
+  chmod 644 "$CGW_DIR/traefik/routes.yml"
+  # Keycloak's database, created on Postgres's first start only.
+  cat > "$CGW_DIR/postgres-init/10-keycloak.sh" <<'SH'
+#!/bin/sh
+set -e
+psql -v ON_ERROR_STOP=1 -U gw -d gateway -v pw="$KC_DB_PASSWORD" <<'SQL'
+CREATE ROLE keycloak LOGIN PASSWORD :'pw';
+CREATE DATABASE keycloak OWNER keycloak;
+SQL
+SH
+  chmod 755 "$CGW_DIR/postgres-init"; chmod 644 "$CGW_DIR/postgres-init/10-keycloak.sh"
+}
+
+egress_unit() {
+  # Containers reach the cloud metadata address (169.254.169.254, instance credentials) through
+  # DOCKER-USER. Block it for the egress subnet, re-applied after every Docker start.
+  cat > /etc/systemd/system/$UNIT <<EOF
+[Unit]
+Description=Claude Gateway: block the cloud metadata address for its egress network
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for i in \$(seq 30); do iptables -L DOCKER-USER -n >/dev/null 2>&1 && break; sleep 1; done; iptables -C DOCKER-USER -s $CGW_EGRESS_SUBNET -d 169.254.169.254/32 -j REJECT 2>/dev/null || iptables -I DOCKER-USER -s $CGW_EGRESS_SUBNET -d 169.254.169.254/32 -j REJECT'
+ExecStop=/bin/sh -c 'iptables -D DOCKER-USER -s $CGW_EGRESS_SUBNET -d 169.254.169.254/32 -j REJECT 2>/dev/null || true'
+
+[Install]
+WantedBy=docker.service
+EOF
+  systemctl daemon-reload && systemctl enable -q $UNIT && systemctl restart $UNIT
+}
+
+kc() { dc exec -T keycloak /opt/keycloak/bin/kcadm.sh "$@"; }
+kc_login() {
+  dc exec -T keycloak bash -c 'rm -f /tmp/ts.p12; keytool -importcert -noprompt -alias cgw -file /opt/keycloak/conf/tls/ca.crt -keystore /tmp/ts.p12 -storetype PKCS12 -storepass cgwtrust >/dev/null 2>&1; /opt/keycloak/bin/kcadm.sh config truststore --trustpass cgwtrust /tmp/ts.p12 >/dev/null'
+  # The management port opens before Keycloak serves requests: retry until the admin login works.
+  for _ in $(seq 60); do
+    kc config credentials --server "https://$CGW_KEYCLOAK_HOST:5557" --realm master --user admin \
+      --password "$KC_ADMIN_PASSWORD" >/dev/null 2>&1 && return 0
+    sleep 3
+  done
+  die "Keycloak admin login failed (claude-gateway logs; docker logs claude-gateway-keycloak-1)"
+}
+kc_realm() {
+  say "waiting for Keycloak"
+  for _ in $(seq 90); do [ "$(docker inspect -f '{{.State.Health.Status}}' claude-gateway-keycloak-1 2>/dev/null)" = healthy ] && break; sleep 2; done
+  kc_login
+  local r=$CGW_REALM sid cid
+  kc get "realms/$r" >/dev/null 2>&1 || kc create realms -s realm="$r" -s enabled=true -s sslRequired=all \
+    -s bruteForceProtected=true -s registrationAllowed=false >/dev/null
+  sid=$(kc get client-scopes -r "$r" --fields id,name --format csv --noquotes | awk -F, '$2=="groups"{print $1}')
+  if [ -z "$sid" ]; then
+    sid=$(kc create client-scopes -r "$r" -s name=groups -s protocol=openid-connect -s 'attributes."include.in.token.scope"=true' -i)
+    kc create "client-scopes/$sid/protocol-mappers/models" -r "$r" -s name=groups -s protocol=openid-connect \
+      -s protocolMapper=oidc-group-membership-mapper -s 'config."claim.name"=groups' -s 'config."full.path"=false' \
+      -s 'config."id.token.claim"=true' -s 'config."access.token.claim"=true' -s 'config."userinfo.token.claim"=true' >/dev/null
+  fi
+  cid=$(kc get clients -r "$r" -q clientId=claude-gateway --fields id --format csv --noquotes)
+  if [ -z "$cid" ]; then
+    cid=$(kc create clients -r "$r" -s clientId=claude-gateway -s name="Claude Gateway" -s enabled=true -s publicClient=false \
+      -s secret="$OIDC_CLIENT_SECRET" -s standardFlowEnabled=true -s directAccessGrantsEnabled=false \
+      -s "redirectUris=[\"https://$CGW_GATEWAY_HOST:8443/oauth/callback\"]" -i)
+  else
+    kc update "clients/$cid" -r "$r" -s secret="$OIDC_CLIENT_SECRET" \
+      -s "redirectUris=[\"https://$CGW_GATEWAY_HOST:8443/oauth/callback\"]" >/dev/null
+  fi
+  kc update "clients/$cid/optional-client-scopes/$sid" -r "$r" >/dev/null 2>&1 || true
+  kc get groups -r "$r" -q search=claude-users --fields name --format csv --noquotes | grep -qx claude-users \
+    || kc create groups -r "$r" -s name=claude-users >/dev/null
+}
+
+cmd_install() {
+  need_root
+  for t in docker openssl jq curl git python3 iptables systemctl; do command -v $t >/dev/null || die "missing $t"; done
+  docker compose version >/dev/null 2>&1 || die "missing docker compose"
+  mkdir -p "$CGW_DIR"; chmod 755 "$CGW_DIR"
+  # Settings: environment first, then what an earlier install saved, then defaults.
+  local k v
+  for k in CGW_EMAIL_DOMAINS CGW_PUBLIC_HOST CGW_MODELS CGW_NETWORK CGW_IDP CGW_OIDC_ISSUER CGW_OIDC_CLIENT_ID \
+           CGW_DOMAIN CGW_WG_PORT CGW_WG_SUBNET CGW_EGRESS_SUBNET CGW_LOAD_TEST CGW_SESSION_TTL_HOURS CGW_REALM; do
+    v=${!k:-$(getkv $k)}; v=${v// /}; [ -n "$v" ] && setkv $k "$v"
+  done
+  [ -n "$(getkv CGW_EMAIL_DOMAINS)" ] || die "set CGW_EMAIL_DOMAINS (e.g. example.com)"
+  [ -n "$(getkv CGW_MODELS)" ] || setkv CGW_MODELS "claude-sonnet-5-5,claude-haiku-5-5"
+  [ -n "$(getkv CGW_NETWORK)" ] || setkv CGW_NETWORK wireguard
+  [ -n "$(getkv CGW_IDP)" ] || setkv CGW_IDP bundled
+  [ -n "$(getkv CGW_DOMAIN)" ] || setkv CGW_DOMAIN oae.internal
+  [ -n "$(getkv CGW_WG_PORT)" ] || setkv CGW_WG_PORT 51830
+  [ -n "$(getkv CGW_WG_SUBNET)" ] || setkv CGW_WG_SUBNET 10.77.0.0
+  [ -n "$(getkv CGW_EGRESS_SUBNET)" ] || setkv CGW_EGRESS_SUBNET 172.30.251.0/24
+  [ -n "$(getkv CGW_LOAD_TEST)" ] || setkv CGW_LOAD_TEST 0
+  [ -n "$(getkv CGW_SESSION_TTL_HOURS)" ] || setkv CGW_SESSION_TTL_HOURS 1
+  [ -n "$(getkv CGW_REALM)" ] || setkv CGW_REALM oae
+  if [ -z "$(getkv CGW_PUBLIC_HOST)" ]; then
+    if [ "$(getkv CGW_NETWORK)" = wireguard ]; then
+      setkv CGW_PUBLIC_HOST "$(curl -4 -fsS https://api.ipify.org || die 'set CGW_PUBLIC_HOST')"
+    else setkv CGW_PUBLIC_HOST none; fi
+  fi
+  local dom; dom=$(getkv CGW_DOMAIN)
+  setkv CGW_GATEWAY_HOST "claude-gw.$dom"; setkv CGW_KEYCLOAK_HOST "keycloak.$dom"
+  setkv CGW_TUNNEL_IP "$(getkv CGW_WG_SUBNET | sed 's/\.0$/.1/')"
+  grep -q '^CGW_PEERS=' "$CGW_DIR/.env" || setkv CGW_PEERS ""
+  # Pinned versions travel with the checkout.
+  while IFS='=' read -r k v; do case $k in ''|\#*) ;; *) setkv "$k" "$v";; esac; done < "$SRC/versions.env"
+  # Secrets: generated once, kept on upgrade.
+  for k in PG_PASSWORD KC_DB_PASSWORD KC_ADMIN_PASSWORD GATEWAY_JWT_SECRET MASKER_KEY MASK_SECRET; do secret $k; done
+  load_env
+  if [ "$CGW_IDP" = bundled ]; then secret OIDC_CLIENT_SECRET
+  else
+    [ -n "${CGW_OIDC_ISSUER:-}" ] && [ -n "${CGW_OIDC_CLIENT_ID:-}" ] || die "CGW_IDP=external needs CGW_OIDC_ISSUER and CGW_OIDC_CLIENT_ID"
+    if [ -n "${CGW_OIDC_CLIENT_SECRET_FILE:-}" ]; then setkv OIDC_CLIENT_SECRET "$(tr -d '\r\n' < "$CGW_OIDC_CLIENT_SECRET_FILE")"; fi
+    [ -n "$(getkv OIDC_CLIENT_SECRET)" ] || die "set CGW_OIDC_CLIENT_SECRET_FILE"
+  fi
+  # The Anthropic key: only the masker ever sees it.
+  if [ ! -s "$CGW_DIR/anthropic.env" ] || [ -n "${CGW_ANTHROPIC_KEY_FILE:-}" ]; then
+    local key=""
+    if [ -n "${CGW_ANTHROPIC_KEY_FILE:-}" ]; then key=$(sed -n 's/^ANTHROPIC_API_KEY=//p' "$CGW_ANTHROPIC_KEY_FILE"); [ -n "$key" ] || key=$(tr -d '\r\n' < "$CGW_ANTHROPIC_KEY_FILE")
+    elif [ -t 0 ]; then read -rsp "Anthropic API key (not shown): " key; echo >&2
+    fi
+    [ -n "$key" ] || die "no Anthropic API key (set CGW_ANTHROPIC_KEY_FILE)"
+    printf 'ANTHROPIC_API_KEY=%s\n' "$key" > "$CGW_DIR/anthropic.env"; chmod 600 "$CGW_DIR/anthropic.env"
+  fi
+  if [ "$CGW_NETWORK" = pangolin ] && [ ! -s "$CGW_DIR/newt.env" ]; then die "CGW_NETWORK=pangolin needs $CGW_DIR/newt.env (PANGOLIN_ENDPOINT, NEWT_ID, NEWT_SECRET)"; fi
+  load_env
+  install -m 644 "$SRC/compose.yaml" "$CGW_DIR/compose.yaml"
+  install -m 644 "$SRC/compose.external-idp.yaml" "$CGW_DIR/compose.external-idp.yaml"
+  mkdir -p "$CGW_DIR/gateway"; install -m 644 "$SRC/gateway/Dockerfile" "$CGW_DIR/gateway/Dockerfile"
+  mkdir -p "$CGW_DIR/wireguard"
+  ln -sfn "$SRC" "$CGW_DIR/src"
+  fetch_claude; fetch_masker; make_certs; render_config
+  # CGW_HOST_INTEGRATION=0 (test installs): no systemd unit, nothing in /usr/local/bin.
+  if [ "${CGW_HOST_INTEGRATION:-1}" = 1 ]; then
+    # A link, so the command always finds its templates in the checkout it came from.
+    ln -sfn "$SRC/claude-gateway" /usr/local/bin/claude-gateway; egress_unit
+  else say "CGW_HOST_INTEGRATION=0: metadata block NOT installed"; fi
+  say "building and starting"
+  dc build -q
+  dc up -d --remove-orphans
+  if [ "$CGW_IDP" = bundled ]; then kc_realm; fi
+  if [ "$CGW_NETWORK" = wireguard ]; then dc up -d --force-recreate traefik >/dev/null 2>&1; fi
+  say "waiting for the gateway"
+  for _ in $(seq 60); do dc logs --no-color gateway 2>/dev/null | grep -q '"evt"' && break; sleep 2; done
+  cmd_status
+  cat >&2 <<EOF
+
+Next:
+  - Open UDP $CGW_WG_PORT inbound in the cloud firewall (WireGuard).
+  - Add people: claude-gateway user add alice@${CGW_EMAIL_DOMAINS%%,*}   (bundled Keycloak)
+  - Issue a laptop: claude-gateway peer add alicemac
+  - Models per group: $CGW_DIR/config/policies.yaml, then claude-gateway restart
+  - PII rules: $CGW_DIR/pii/pii-rules.json, then claude-gateway restart
+EOF
+}
+
+# ------------------------------------------------------------------------------------------ peers
+cmd_peer() {
+  need_root; load_env
+  [ "$CGW_NETWORK" = wireguard ] || die "peers are for CGW_NETWORK=wireguard"
+  local sub=${1:-list} name=${2:-}
+  case $sub in
+    list) echo "${CGW_PEERS:-}" | tr ',' '\n' | sed '/^$/d' ;;
+    add|remove)
+      # The WireGuard image skips any peer whose name is not purely alphanumeric.
+      [[ "$name" =~ ^[a-zA-Z0-9]{1,32}$ ]] || die "peer name: letters and digits only (e.g. alicemac)"
+      local peers; peers=$(echo "${CGW_PEERS:-}" | tr ',' '\n' | sed '/^$/d' | grep -vx "$name" || true)
+      if [ "$sub" = add ]; then peers=$(printf '%s\n%s\n' "$peers" "$name" | sed '/^$/d'); fi
+      setkv CGW_PEERS "$(echo "$peers" | paste -sd, -)"
+      if [ "$sub" = remove ]; then rm -rf "$CGW_DIR/wireguard/peer_$name" "$CGW_DIR/handoff/$name"; fi
+      load_env
+      dc up -d wireguard >/dev/null 2>&1; dc up -d --force-recreate traefik >/dev/null 2>&1
+      if [ "$sub" = add ]; then handoff "$name"; fi
+      if [ "$sub" = remove ]; then say "peer $name removed"; fi
+      ;;
+    *) die "peer add|remove|list" ;;
+  esac
+}
+handoff() {
+  local n=$1; local f="$CGW_DIR/wireguard/peer_$n/peer_$n.conf" out="$CGW_DIR/handoff/$n"
+  for _ in $(seq 30); do [ -f "$f" ] && break; sleep 1; done
+  [ -f "$f" ] || die "WireGuard did not create peer $n"
+  mkdir -p "$out"; chmod 700 "$CGW_DIR/handoff" "$out"
+  # The image writes a DNS line (all the laptop's DNS into the tunnel, where nothing answers): drop it.
+  grep -vE '^(DNS|ListenPort) *=' "$f" > "$out/$n.conf"
+  cp "$CGW_DIR/certs/ca/ca.crt" "$out/claude-gateway-ca.crt"
+  sed -e "s/@@GATEWAY_HOST@@/$CGW_GATEWAY_HOST/g" -e "s/@@KEYCLOAK_HOST@@/$CGW_KEYCLOAK_HOST/g" \
+      -e "s/@@TUNNEL_IP@@/$CGW_TUNNEL_IP/g" -e "s/@@FINGERPRINT@@/$(fingerprint)/g" \
+      "$SRC/laptop/setup-mac.sh" > "$out/setup-mac.sh"
+  chmod 600 "$out"/*; chmod 700 "$out/setup-mac.sh"
+  say "hand-off files for $n in $out (the .conf holds a private key: send it privately, then delete it)"
+}
+
+# ------------------------------------------------------------------------------------------ users
+cmd_user() {
+  need_root; load_env
+  [ "$CGW_IDP" = bundled ] || die "people live in your own Keycloak (CGW_IDP=external)"
+  [ "${1:-}" = add ] || die "user add EMAIL [GROUP]"
+  local email=${2:-} group=${3:-claude-users} r=$CGW_REALM uid gid pw out
+  [[ "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || die "user add EMAIL [GROUP]"
+  kc_login
+  uid=$(kc get users -r "$r" -q email="$email" -q exact=true --fields id --format csv --noquotes | head -1)
+  [ -n "$uid" ] || uid=$(kc create users -r "$r" -s username="$email" -s email="$email" -s emailVerified=true -s enabled=true -i)
+  gid=$(kc get groups -r "$r" -q search="$group" --fields id,name --format csv --noquotes | awk -F, -v g="$group" '$2==g{print $1}')
+  [ -n "$gid" ] || gid=$(kc create groups -r "$r" -s name="$group" -i)
+  kc update "users/$uid/groups/$gid" -r "$r" -n >/dev/null
+  pw=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)
+  kc set-password -r "$r" --userid "$uid" --new-password "$pw" --temporary >/dev/null
+  out="$CGW_DIR/handoff/users"; mkdir -p "$out"; chmod 700 "$CGW_DIR/handoff" "$out"
+  printf 'Sign-in for %s (group %s)\nTemporary password (must be changed at first sign-in): %s\n' "$email" "$group" "$pw" > "$out/$email.txt"
+  chmod 600 "$out/$email.txt"
+  say "$email added to $group; temporary password in $out/$email.txt (send privately, then delete)"
+}
+
+# ----------------------------------------------------------------------------------------- others
+fingerprint() { openssl x509 -in "$CGW_DIR/certs/gateway/gateway.crt" -noout -fingerprint -sha256 | cut -d= -f2; }
+cmd_status() {
+  load_env
+  dc ps --format 'table {{.Service}}\t{{.Status}}' >&2
+  [ "$CGW_NETWORK" = wireguard ] && dc exec -T wireguard wg show wg0 latest-handshakes 2>/dev/null | sed 's/^/  handshake: /' >&2 || true
+  say "gateway https://$CGW_GATEWAY_HOST:8443  certificate SHA-256 $(fingerprint)"
+  say "Desktop bootstrap URL: https://$CGW_GATEWAY_HOST:8443/user/bootstrap"
+  if [ "$CGW_LOAD_TEST" = 1 ]; then say "LOAD TEST MODE: canned replies, nothing reaches Anthropic"; fi
+  true
+}
+cmd_restart() { need_root; load_env; render_config; dc up -d --force-recreate gateway pii-masker; }
+cmd_logs() {
+  load_env
+  dc logs --no-color --since "${1:-30}m" gateway | grep '"evt"' | python3 -c '
+import sys, json
+for l in sys.stdin:
+    try: j = json.loads(l[l.index("{"):])
+    except ValueError: continue
+    if j.get("evt") == "inference" and j.get("path") != "/v1/messages": continue
+    print(j.get("ts","")[11:19], j.get("evt"), j.get("email") or "", j.get("model") or "",
+          j.get("status") or j.get("result") or j.get("reason") or "", j.get("policy_index", ""))'
+}
+cmd_uninstall() {
+  need_root; load_env
+  if [ "${1:-}" = --purge ]; then dc down -v; else dc down; fi
+  systemctl disable -q --now $UNIT 2>/dev/null || true; rm -f /etc/systemd/system/$UNIT; systemctl daemon-reload
+  if [ "${1:-}" = --purge ]; then rm -rf "$CGW_DIR" /usr/local/bin/claude-gateway; fi
+  say "stopped${1:+ and purged}; close UDP $CGW_WG_PORT in the cloud firewall"
+}
+
+case "${1:-}" in
+  install) shift; cmd_install "$@" ;;
+  peer) shift; cmd_peer "$@" ;;
+  user) shift; cmd_user "$@" ;;
+  restart) cmd_restart ;;
+  status) need_root; cmd_status ;;
+  logs) shift; need_root; cmd_logs "$@" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

@@ -246,6 +246,13 @@ const OPENAI_COMPATIBLE = "openai-compatible";
 // OAE: OpenClaw's Claude Code runtime. The gateway is OpenClaw, so the form treats it as OpenClaw
 // except that it needs Anthropic and Embedded execution.
 const CLAUDE_CODE = "claude-cli";
+// OAE: Anthropic's claude gateway for people's own Claude apps (docs/oae/claude-gateway.md):
+// Anthropic and Embedded, like Claude Code, but not an OpenClaw gateway.
+const CLAUDE_GATEWAY = "claude-gateway";
+/** Harness choices that need Anthropic and Embedded execution. */
+function anthropicEmbedded(harnessId: string) {
+  return harnessId === CLAUDE_CODE || harnessId === CLAUDE_GATEWAY;
+}
 /** Whether a Harness choice runs in the OpenClaw gateway: OpenClaw itself or its Claude Code. */
 function openclawGateway(harnessId: string) {
   return harnessId === "openclaw" || harnessId === CLAUDE_CODE;
@@ -1028,6 +1035,7 @@ function renderAgentForm(
   // OAE: Claude Code, as OpenClaw's claude-cli runtime inside the OpenClaw gateway: Anthropic only,
   // Embedded (docs/oae/claude-harness.md).
   const claudeCodeOption = element("option", { value: CLAUDE_CODE }, "Claude Code");
+  const claudeGatewayOption = element("option", { value: CLAUDE_GATEWAY }, "Claude Gateway");
   const harness = element(
     "select",
     { id: "agent-harness", "aria-describedby": "agent-harness-hint" },
@@ -1036,13 +1044,14 @@ function renderAgentForm(
     element("option", { value: "openclaw" }, "OpenClaw"),
     // OAE: Hermes runs embedded, with an API key for OpenAI or Anthropic.
     element("option", { value: "hermes" }, "Hermes"),
+    claudeGatewayOption,
   );
   // Whether a provider change keeps the Harness: Hermes takes either provider, Claude Code stays
   // with Anthropic; an operator-managed (runtime) binding keeps its own rules.
   function keepsHarness() {
     return (
       harness.value === "hermes" ||
-      (harness.value === CLAUDE_CODE &&
+      (anthropicEmbedded(harness.value) &&
         nativeProvider.value === "anthropic" &&
         binding?.method !== "runtime")
     );
@@ -1399,7 +1408,7 @@ function renderAgentForm(
   if (harness.value === "codex") {
     mode.value = "dedicated";
   }
-  if (harness.value === "hermes" || harness.value === CLAUDE_CODE) {
+  if (harness.value === "hermes" || anthropicEmbedded(harness.value)) {
     mode.value = "embedded";
   }
   const currentTemplate = () =>
@@ -1680,7 +1689,7 @@ function renderAgentForm(
     mode.value =
       harness.value === "codex"
         ? "dedicated"
-        : harness.value === "hermes" || harness.value === CLAUDE_CODE
+        : harness.value === "hermes" || anthropicEmbedded(harness.value)
           ? "embedded"
           : defaultOpenClawMode();
     modeDefaulted = true;
@@ -1731,7 +1740,7 @@ function renderAgentForm(
       if (selectedHarness === "codex") {
         mode.value = "dedicated";
       }
-      if (selectedHarness === "hermes" || selectedHarness === CLAUDE_CODE) {
+      if (selectedHarness === "hermes" || anthropicEmbedded(selectedHarness)) {
         mode.value = "embedded";
       }
     }
@@ -2823,7 +2832,7 @@ function renderAgentForm(
     mode.disabled ||=
       harness.value === "codex" ||
       harness.value === "hermes" ||
-      harness.value === CLAUDE_CODE ||
+      anthropicEmbedded(harness.value) ||
       embeddedOnlyProvider(nativeProvider.value) ||
       binding?.method === "runtime";
     // Why the harness choice is locked, without the request in flight: the hint must not change
@@ -2946,6 +2955,13 @@ function renderAgentForm(
           ? "This Agent cannot run Hermes on this installation: Hermes requires Embedded execution."
           : "This Agent will run Hermes with Embedded execution.";
       }
+      if (harness.value === CLAUDE_GATEWAY) {
+        return nativeProvider.value !== "anthropic"
+          ? "A Claude Gateway requires Anthropic."
+          : embeddedRefused
+            ? "This installation cannot run a Claude Gateway: it requires Embedded execution."
+            : "People you grant connect Claude Code and Claude Desktop to this gateway from their apps page. Add every model they may use to the Configuration's model list.";
+      }
       if (harness.value === CLAUDE_CODE) {
         return nativeProvider.value !== "anthropic"
           ? "This Agent cannot run Claude Code: Claude Code requires Anthropic."
@@ -2991,6 +3007,8 @@ function renderAgentForm(
     codexOption.disabled = embeddedOnlyProvider(nativeProvider.value);
     claudeCodeOption.hidden = nativeProvider.value !== "anthropic";
     claudeCodeOption.disabled = nativeProvider.value !== "anthropic";
+    claudeGatewayOption.hidden = nativeProvider.value !== "anthropic";
+    claudeGatewayOption.disabled = nativeProvider.value !== "anthropic";
     const compatible = nativeProvider.value === OPENAI_COMPATIBLE;
     baseUrlField.hidden = !compatible;
     providerBaseUrl.required = compatible;
@@ -3084,6 +3102,10 @@ function renderAgentForm(
       apiKey.placeholder = "";
       credentialHelp.textContent =
         "Use an API key the endpoint accepts as a bearer token. It is sent only to the Base URL's host.";
+    } else if (harness.value === CLAUDE_GATEWAY) {
+      apiKey.placeholder = "sk-ant-api…";
+      credentialHelp.textContent =
+        "Use an Anthropic API key (not a personal subscription token): everyone you grant uses it through the gateway. Only the gateway's PII masker holds it. Set a spend limit on its workspace.";
     } else if (harness.value === CLAUDE_CODE) {
       apiKey.placeholder = "sk-ant-…";
       credentialHelp.textContent =

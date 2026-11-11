@@ -1,0 +1,290 @@
+#!/bin/bash
+# oae-claude-sync — host side of Claude Gateway Agents (docs/oae/claude-gateway.md). Run as root on
+# the OAE server (installed with OAE; the oae-claude-sync timer runs `sync` every minute).
+#
+#   oae-claude-sync install   settings file, private CA, the timer
+#   oae-claude-sync sync      for every Claude Gateway Agent: TLS certificate, Keycloak client,
+#                             WireGuard + Traefik, laptop peers; removes what belongs to deleted ones
+#   oae-claude-sync status    gateways, their ports and peers
+#
+# Settings: /opt/oce/prod/claude.env (CLAUDE_KC_ISSUER, CLAUDE_KC_CLIENT_ID, CLAUDE_PUBLIC_HOST,
+# optional CLAUDE_DOMAIN, CLAUDE_WG_PORT_BASE, CLAUDE_WG_PORTS); the client manager's secret in
+# /opt/oce/prod/secure/claude-kc-client-secret. The Keycloak client manager is a service account
+# that may manage clients and read users in the installation's realm (central-sso/oae-realm.sh).
+set -euo pipefail
+umask 077
+. /opt/oce/env.sh
+export PATH=/opt/oce/tools/bin:$PATH KUBECONFIG=${KUBECONFIG:-/opt/oce/prod/kubeconfig}
+PROD=/opt/oce/prod
+SECURE=$PROD/secure
+STATE=$PROD/claude
+EDGE_NS=oae-edge
+PEERS_SECRET=oae-claude-peers          # written by the edge's /apps: laptop public keys
+GATEWAYS_CM=oae-claude-gateways        # read by the edge's /apps: what a hand-off needs
+OCE_NET=oce
+WG_IMAGE=lscr.io/linuxserver/wireguard:1.0.20260223-r0-ls128@sha256:b677c3f46d524921c8a7c91873479eb7bab190d098fddbbd887ce333ec078c90
+TRAEFIK_IMAGE=traefik:v3.6.22@sha256:d85749d4d10d970ed2b3a7cb2406d9b9da1cdd6ea975a39c727aab809d73136a
+log() { echo "oae-claude-sync: $*"; }
+die() { log "ERROR: $*"; exit 1; }
+settings() {
+  [ -f $PROD/claude.env ] || die "not installed ($PROD/claude.env)"
+  . $PROD/claude.env
+  CLAUDE_DOMAIN=${CLAUDE_DOMAIN:-oae.internal}
+  CLAUDE_WG_PORT_BASE=${CLAUDE_WG_PORT_BASE:-51830}
+  CLAUDE_WG_PORTS=${CLAUDE_WG_PORTS:-20}
+}
+
+# ------------------------------------------------------------------------------------ certificates
+ensure_ca() {
+  mkdir -p "$STATE/ca"; chmod 700 "$STATE" "$STATE/ca"
+  [ -f "$STATE/ca/ca.key" ] && return 0
+  log "creating the private CA for *.$CLAUDE_DOMAIN (name-constrained)"
+  openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -keyout "$STATE/ca/ca.key" -out "$STATE/ca/ca.crt" \
+    -subj "/CN=OAE Claude Gateway CA ($CLAUDE_DOMAIN only)" \
+    -addext "basicConstraints=critical,CA:TRUE,pathlen:0" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -addext "nameConstraints=critical,permitted;DNS:$CLAUDE_DOMAIN,permitted;DNS:.$CLAUDE_DOMAIN" 2>/dev/null
+}
+# cert DIR HOST: a one-year server certificate, kept until it nears expiry (clients pin it).
+cert() {
+  local d=$1 h=$2
+  mkdir -p "$d"
+  if [ -f "$d/tls.crt" ] && openssl x509 -in "$d/tls.crt" -noout -checkend $((30 * 86400)) >/dev/null 2>&1; then return 0; fi
+  printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\nbasicConstraints=CA:FALSE\n' "$h" > "$d/ext.cnf"
+  openssl req -newkey rsa:2048 -nodes -keyout "$d/tls.key" -out "$d/tls.csr" -subj "/CN=$h" 2>/dev/null
+  openssl x509 -req -in "$d/tls.csr" -CA "$STATE/ca/ca.crt" -CAkey "$STATE/ca/ca.key" -CAcreateserial \
+    -days 365 -sha256 -extfile "$d/ext.cnf" -out "$d/tls.crt" 2>/dev/null
+  log "certificate for $h"
+}
+fingerprint() { openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2; }
+
+# ---------------------------------------------------------------------------------------- keycloak
+kc_token() {
+  curl -fsS -X POST "$CLAUDE_KC_ISSUER/protocol/openid-connect/token" \
+    --data-urlencode grant_type=client_credentials --data-urlencode "client_id=$CLAUDE_KC_CLIENT_ID" \
+    --data-urlencode "client_secret@$SECURE/claude-kc-client-secret" | jq -r .access_token
+}
+KC_ADMIN=""
+kc() {  # kc METHOD PATH [JSON]
+  local admin=${CLAUDE_KC_ISSUER/\/realms\//\/admin\/realms\/}
+  [ -n "$KC_ADMIN" ] || KC_ADMIN=$(kc_token)
+  curl -fsS -X "$1" "$admin$2" -H "authorization: Bearer $KC_ADMIN" -H 'content-type: application/json' ${3:+--data "$3"}
+}
+# kc_client LABEL HOST: the gateway's confidential client; prints its secret.
+kc_client() {
+  local cid=oae-claude-$1 h=$2 id body
+  body=$(jq -nc --arg c "$cid" --arg h "$h" '{clientId: $c, name: "Claude Gateway \($h)", enabled: true,
+    publicClient: false, standardFlowEnabled: true, directAccessGrantsEnabled: false, implicitFlowEnabled: false,
+    serviceAccountsEnabled: false, redirectUris: ["https://\($h):8443/oauth/callback"], webOrigins: ["https://\($h):8443"],
+    defaultClientScopes: ["basic", "profile", "email", "roles", "web-origins", "acr"],
+    optionalClientScopes: ["offline_access", "groups"]}')
+  id=$(kc GET "/clients?clientId=$cid" | jq -r '.[0].id // empty')
+  if [ -z "$id" ]; then
+    kc POST /clients "$body" >/dev/null
+    id=$(kc GET "/clients?clientId=$cid" | jq -r '.[0].id')
+    log "Keycloak client $cid"
+  fi
+  # Naming only the optional scopes at creation left a client without openid/profile/email
+  # ("invalid_scope"): refuse to hand out a client that lacks them.
+  kc GET "/clients/$id/default-client-scopes" | jq -e 'map(.name) | index("basic") and index("email") and index("profile")' >/dev/null ||
+    log "WARNING: Keycloak client $cid lacks its default scopes (basic, profile, email)"
+  kc GET "/clients/$id/client-secret" | jq -r .value
+}
+kc_email_domains() {
+  kc GET "/users?max=5000&briefRepresentation=true&enabled=true" |
+    jq -r '[.[].email // empty | ascii_downcase | split("@")[1] // empty] | unique | join(",")'
+}
+
+# --------------------------------------------------------------------------------------- wireguard
+wg_tool() { docker run --rm --entrypoint "" "$WG_IMAGE" sh -c "$1"; }
+# The WireGuard + Traefik pair of gateway N (one UDP port, one /24), routing :8443 to TARGET.
+wg_up() {
+  local n=$1 h=$2 target=$3 d="$STATE/wg/$n" port=$((CLAUDE_WG_PORT_BASE + $1 - 1))
+  mkdir -p "$d/wg_confs" "$d/traefik"
+  [ -f "$d/server.key" ] || { wg_tool 'wg genkey' > "$d/server.key"; wg_tool "echo $(cat "$d/server.key") | wg pubkey" > "$d/server.pub"; }
+  {
+    printf '[Interface]\nAddress = 10.77.%s.1/24\nListenPort = 51820\nPrivateKey = %s\n' "$n" "$(cat "$d/server.key")"
+    jq -r --arg h "$h" 'to_entries[] | select(.value.claudeHost == $h) | "\n[Peer]\n# \(.value.email) \(.value.label)\nPublicKey = \(.key)\nAllowedIPs = \(.value.ip)/32"' <<<"$PEERS"
+  } > "$d/wg_confs/wg0.conf.new"
+  cat > "$d/traefik/routes.yml" <<EOF
+tcp:
+  routers:
+    gateway: { entryPoints: [gateway], rule: "HostSNI(\`$h\`)", service: gateway, tls: { passthrough: true } }
+  services:
+    gateway: { loadBalancer: { servers: [{ address: "$target" }] } }
+EOF
+  chmod 755 "$d" "$d/traefik"; chmod 644 "$d/traefik/routes.yml"
+  local name=oae-claude-wg-$n changed=1
+  cmp -s "$d/wg_confs/wg0.conf.new" "$d/wg_confs/wg0.conf" 2>/dev/null && changed=0
+  mv "$d/wg_confs/wg0.conf.new" "$d/wg_confs/wg0.conf"
+  if [ "$(docker inspect -f '{{.State.Running}}' $name 2>/dev/null)" != true ]; then
+    docker rm -f $name oae-claude-traefik-$n >/dev/null 2>&1 || true
+    docker run -d --name $name --restart unless-stopped --network $OCE_NET --cap-add NET_ADMIN \
+      --sysctl net.ipv4.conf.all.src_valid_mark=1 -e PUID=1000 -e PGID=1000 -p "$port:51820/udp" \
+      -v "$d:/config" --label oae.dev/claude-host="$h" "$WG_IMAGE" >/dev/null
+    docker run -d --name oae-claude-traefik-$n --restart unless-stopped --network container:$name \
+      -v "$d/traefik:/etc/traefik/dynamic:ro" "$TRAEFIK_IMAGE" --entrypoints.gateway.address=:8443 \
+      --providers.file.directory=/etc/traefik/dynamic --log.level=WARN --global.checknewversion=false \
+      --global.sendanonymoususage=false >/dev/null
+    log "WireGuard for $h on UDP $port"
+  elif ! docker exec $name wg show wg0 >/dev/null 2>&1; then
+    # The image gives up on a tunnel that failed to start (seen on a first start): start it again.
+    # Traefik shares its network namespace, so it must follow, or it keeps the old one.
+    docker restart $name >/dev/null && sleep 3 && docker restart oae-claude-traefik-$n >/dev/null
+    log "WireGuard for $h restarted (no wg0)"
+  elif [ $changed = 1 ]; then
+    # Peers change without a restart; Traefik reloads routes.yml on its own.
+    docker exec $name bash -c 'wg syncconf wg0 <(wg-quick strip /config/wg_confs/wg0.conf)'
+    log "peers updated for $h"
+  fi
+  [ "$(docker inspect -f '{{.State.Running}}' oae-claude-traefik-$n 2>/dev/null)" = true ] ||
+    docker start oae-claude-traefik-$n >/dev/null 2>&1 || true
+}
+wg_down() {
+  docker rm -f oae-claude-wg-$1 oae-claude-traefik-$1 >/dev/null 2>&1 || true
+  rm -rf "$STATE/wg/$1"
+}
+
+# -------------------------------------------------------------------------------------------- sync
+cmd_sync() {
+  settings; ensure_ca
+  mkdir -p "$STATE/gw" "$STATE/wg"
+  [ -f "$STATE/alloc.json" ] || echo '{}' > "$STATE/alloc.json"
+  local alloc svcs acl meta seen published domains
+  alloc=$(cat "$STATE/alloc.json")
+  svcs=$(kubectl get svc -A -l oae.dev/runtime=claude-gateway -o json)
+  acl=$(kubectl -n $EDGE_NS get cm oae-edge-acl -o json 2>/dev/null | jq -c '.data["acl.json"] // "{}" | fromjson' || echo '{}')
+  meta=$(kubectl -n $EDGE_NS get cm oae-edge-acl -o json 2>/dev/null | jq -c '.data["agents.json"] // "{}" | fromjson' || echo '{}')
+  # Laptop peers from /apps, kept only while their person is granted that gateway's Agent.
+  PEERS=$(kubectl -n $EDGE_NS get secret $PEERS_SECRET -o json 2>/dev/null | jq -c '.data["peers.json"] // "e30=" | @base64d | fromjson' || echo '{}')
+  PEERS=$(jq -c --argjson acl "$acl" --argjson meta "$meta" '
+    ($meta | to_entries | map(select(.value.runtime == "claude-gateway")) | map({(.value.claudeHost): .key}) | add // {}) as $edge
+    | with_entries(select(($edge[.value.claudeHost] // "") as $e | $e != "" and ($acl[$e][.value.sub] // null) != null))' <<<"$PEERS")
+  domains=$(kc_email_domains)
+  seen=""; published='{}'
+  while read -r svc; do
+    [ -n "$svc" ] || continue
+    local ns base h label node nodeport target n port secret d
+    ns=$(jq -r .metadata.namespace <<<"$svc"); base=$(jq -r .metadata.name <<<"$svc")
+    h=$(jq -r '.metadata.annotations["oae.dev/claude-host"] // empty' <<<"$svc")
+    [[ "$h" =~ ^claude-[0-9a-f]{16}\.${CLAUDE_DOMAIN//./\\.}$ ]] || { log "skipping $ns/$base: no valid host"; continue; }
+    label=${h%%.*}; label=${label#claude-}; seen+="$h"$'\n'
+    d="$STATE/gw/$label"
+    # 1. Certificate (the CA key never leaves this host).
+    cert "$d" "$h"
+    kubectl -n "$ns" create secret generic "$base-tls" --from-file=tls.crt="$d/tls.crt" --from-file=tls.key="$d/tls.key" \
+      --from-file=ca.crt="$STATE/ca/ca.crt" --dry-run=client -o yaml |
+      kubectl label --local -f - "oae.dev/claude-gateway=$label" -o yaml | kubectl apply -f - >/dev/null
+    # 2. Keycloak client and the sign-in Secret the Pod's render step reads.
+    secret=$(kc_client "$label" "$h")
+    local before
+    before=$(kubectl -n "$ns" get secret "$base-oidc" -o json 2>/dev/null | jq -c '.data // {}' || echo '{}')
+    kubectl -n "$ns" create secret generic "$base-oidc" --from-literal=ISSUER="$CLAUDE_KC_ISSUER" \
+      --from-literal=CLIENT_ID="oae-claude-$label" --from-literal=CLIENT_SECRET="$secret" \
+      --from-literal=EMAIL_DOMAINS="$domains" --dry-run=client -o yaml |
+      kubectl label --local -f - "oae.dev/claude-gateway=$label" -o yaml | kubectl apply -f - >/dev/null
+    # The gateway reads these at start: a change (a client secret Keycloak replaced after the Pod
+    # started, a new email domain) needs a restart, or sign-in fails with unauthorized_client.
+    if [ "$before" != '{}' ] && [ "$before" != "$(kubectl -n "$ns" get secret "$base-oidc" -o json | jq -c .data)" ]; then
+      kubectl -n "$ns" rollout restart "deploy/$base" >/dev/null && log "restarted $base: sign-in settings changed"
+    fi
+    # 3. WireGuard: a stable slot per gateway (port and /24).
+    n=$(jq -r --arg h "$h" '.[$h] // empty' <<<"$alloc")
+    if [ -z "$n" ]; then
+      n=$(jq -r --argjson max "$CLAUDE_WG_PORTS" '[.[]] as $used | [range(1; $max + 1)] | map(select(. as $i | $used | index($i) | not)) | .[0] // empty' <<<"$alloc")
+      [ -n "$n" ] || { log "no free WireGuard slot for $h (CLAUDE_WG_PORTS)"; continue; }
+      alloc=$(jq -c --arg h "$h" --argjson n "$n" '.[$h] = $n' <<<"$alloc"); echo "$alloc" > "$STATE/alloc.json"
+    fi
+    port=$((CLAUDE_WG_PORT_BASE + n - 1))
+    # The node that runs the Pod answers on the NodePort (externalTrafficPolicy Local).
+    node=$(kubectl -n "$ns" get pods -l "oae.dev/runtime=claude-gateway,openclaw.dev/agent=$(jq -r '.metadata.labels["openclaw.dev/agent"]' <<<"$svc")" \
+      -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)
+    nodeport=$(jq -r '.spec.ports[0].nodePort' <<<"$svc")
+    if [ -n "$node" ]; then
+      target="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$OCE_NET\").IPAddress}}" "$node"):$nodeport"
+      wg_up "$n" "$h" "$target"
+    fi
+    published=$(jq -c --arg h "$h" --arg ep "$CLAUDE_PUBLIC_HOST:$port" --arg pub "$(cat "$STATE/wg/$n/server.pub" 2>/dev/null)" \
+      --arg net "10.77.$n" --arg fp "$(fingerprint "$d/tls.crt")" \
+      '.[$h] = {endpoint: $ep, serverPublicKey: $pub, subnet: $net, tunnelIp: "\($net).1", fingerprint: $fp}' <<<"$published")
+  done < <(jq -c '.items[]' <<<"$svcs")
+  # What /apps needs for a hand-off (no secrets): endpoints, server keys, fingerprints, the CA.
+  kubectl -n $EDGE_NS create cm $GATEWAYS_CM --from-literal=gateways.json="$published" \
+    --from-file=ca.crt="$STATE/ca/ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # Deleted gateways: their WireGuard, certificate and Keycloak client go too.
+  local h n
+  for h in $(jq -r 'keys[]' <<<"$alloc"); do
+    grep -qx "$h" <<<"$seen" && continue
+    n=$(jq -r --arg h "$h" '.[$h]' <<<"$alloc")
+    wg_down "$n"
+    label=${h%%.*}; label=${label#claude-}
+    local id; id=$(kc GET "/clients?clientId=oae-claude-$label" | jq -r '.[0].id // empty')
+    [ -z "$id" ] || kc DELETE "/clients/$id" >/dev/null
+    kubectl delete secret -A -l "oae.dev/claude-gateway=$label" --ignore-not-found >/dev/null
+    rm -rf "$STATE/gw/$label"
+    alloc=$(jq -c --arg h "$h" 'del(.[$h])' <<<"$alloc"); echo "$alloc" > "$STATE/alloc.json"
+    log "removed $h (WireGuard slot $n, Keycloak client oae-claude-$label)"
+  done
+  # Laptops of deleted gateways leave the edge's store. The write carries the version read, so a
+  # concurrent /apps change refuses it and the next run tries again.
+  local raw stale
+  raw=$(kubectl -n $EDGE_NS get secret $PEERS_SECRET -o json 2>/dev/null) || return 0
+  stale=$(jq -r --arg seen "$seen" '($seen | split("\n") | map(select(. != ""))) as $live
+    | .data["peers.json"] // "e30=" | @base64d | fromjson | to_entries
+    | map(select(.value.claudeHost as $c | $live | index($c) | not)) | .[].key' <<<"$raw")
+  if [ -n "$stale" ]; then
+    jq --arg stale "$stale" '($stale | split("\n")) as $gone
+      | .data["peers.json"] |= (@base64d | fromjson | with_entries(select(.key as $k | $gone | index($k) | not)) | tojson | @base64)' <<<"$raw" |
+      kubectl replace -f - >/dev/null && log "removed $(wc -l <<<"$stale" | tr -d ' ') laptop(s) of deleted gateways" ||
+      log "peers changed meanwhile; pruning next run"
+  fi
+}
+
+cmd_status() {
+  settings
+  jq -r 'to_entries[] | "\(.value)  \(.key)"' "$STATE/alloc.json" 2>/dev/null | while read -r n h; do
+    echo "$h  UDP $((CLAUDE_WG_PORT_BASE + n - 1))  $(docker exec oae-claude-wg-$n wg show wg0 peers 2>/dev/null | wc -l) peer(s)"
+  done
+}
+
+cmd_install() {
+  [ "$(id -u)" = 0 ] || die "run as root"
+  for v in CLAUDE_KC_ISSUER CLAUDE_KC_CLIENT_ID CLAUDE_PUBLIC_HOST; do [ -n "${!v:-}" ] || die "set $v"; done
+  [ -s "$SECURE/claude-kc-client-secret" ] || die "put the client manager's secret in $SECURE/claude-kc-client-secret"
+  cat > $PROD/claude.env <<EOF
+CLAUDE_KC_ISSUER=$CLAUDE_KC_ISSUER
+CLAUDE_KC_CLIENT_ID=$CLAUDE_KC_CLIENT_ID
+CLAUDE_PUBLIC_HOST=$CLAUDE_PUBLIC_HOST
+CLAUDE_DOMAIN=${CLAUDE_DOMAIN:-oae.internal}
+CLAUDE_WG_PORT_BASE=${CLAUDE_WG_PORT_BASE:-51830}
+CLAUDE_WG_PORTS=${CLAUDE_WG_PORTS:-20}
+EOF
+  settings; ensure_ca
+  local self; self=$(readlink -f "$0")
+  install -m 755 "$self" /usr/local/bin/oae-claude-sync
+  cat > /etc/systemd/system/oae-claude-sync.service <<'EOF'
+[Unit]
+Description=OAE Claude Gateway sync (certificates, Keycloak clients, WireGuard, peers)
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oae-claude-sync sync
+EOF
+  cat > /etc/systemd/system/oae-claude-sync.timer <<'EOF'
+[Unit]
+Description=Run the OAE Claude Gateway sync every minute
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload && systemctl enable --now oae-claude-sync.timer
+  log "installed; open UDP $CLAUDE_WG_PORT_BASE-$((CLAUDE_WG_PORT_BASE + CLAUDE_WG_PORTS - 1)) in the cloud firewall"
+}
+
+case "${1:-}" in
+  install) cmd_install ;;
+  sync) cmd_sync ;;
+  status) cmd_status ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
