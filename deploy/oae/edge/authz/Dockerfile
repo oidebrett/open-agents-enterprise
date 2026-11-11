@@ -5,6 +5,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY server.mjs ./
+# The console's typeface (Instrument Sans, SIL Open Font License: assets/instrument-sans-OFL.txt).
+COPY assets ./assets
 USER node
 EXPOSE 8080
 ENTRYPOINT ["node", "server.mjs"]

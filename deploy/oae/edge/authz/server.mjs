@@ -270,19 +270,44 @@ const esc = (value) =>
 const PAGE_HEADERS = {
   "content-type": "text/html; charset=utf-8",
   "content-security-policy":
-    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    `default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; img-src data: https://${CONSOLE_HOST}; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
   // Not "no-referrer": under it browsers send "Origin: null" on this page's own form posts.
   // same-origin still sends nothing to other sites.
   "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
 };
-const STYLE =
-  "body{font-family:system-ui;margin:2rem auto;max-width:46rem;padding:0 1rem;line-height:1.45}" +
-  "table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.4rem .5rem;border-bottom:1px solid #ddd;vertical-align:top}" +
-  "form{display:inline}input[type=text]{width:9rem}code,.secret{font-family:ui-monospace,monospace;word-break:break-all}" +
-  ".secret{background:#f4f4f4;padding:.5rem;border-radius:4px;display:block}.muted{color:#666}.qr{max-width:16rem}";
+// The OAE console's look (apps/controller/src/console/console.css): its colour roles, type and
+// controls, its inverse top bar and mascot, and Instrument Sans (served from this image, OFL).
+const DISPLAY_NAME = process.env.OAE_EDGE_DISPLAY_NAME ?? "Open Agents Enterprise";
+const FONT = readFileSync(new URL("./assets/instrument-sans-latin.woff2", import.meta.url));
+const STYLE = `@font-face{font-family:"Instrument Sans";font-style:normal;font-weight:400 700;font-display:swap;src:url("/assets/instrument-sans-latin.woff2") format("woff2")}
+:root{--bg:#f7f5f0;--surface:#fff;--surface-2:#f1f4f6;--hover:#eaf1f6;--border:#d4d9dc;--border-strong:#7e8c99;--text:#293847;--strong:#202e40;--muted:#566573;--accent:#b53d2a;--accent-hover:#963322;--link:#245784;--danger:#b91c1c;--danger-subtle:rgba(185,28,28,.08);--info-subtle:#e8f1f9;--radius:10px;--radius-lg:14px;--shadow:0 8px 24px rgba(60,42,24,.09);
+color-scheme:light;font-family:"Instrument Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5;color:var(--text);background:var(--bg);font-synthesis:none}
+*{box-sizing:border-box}body{margin:0;min-height:100dvh}
+.topbar{display:flex;align-items:center;gap:12px;padding:12px 24px;background:var(--strong);color:#fff}
+.topbar img{height:36px;width:auto}.topbar .name{font-weight:600;font-size:16px;letter-spacing:-.01em}.topbar .where{margin-left:auto;font-size:12px;color:color-mix(in srgb,#fff 82%,#193e61)}
+.topbar a{color:inherit}
+main{max-width:960px;margin:0 auto;padding:32px 24px 48px}
+h1{color:var(--strong);font-size:24px;line-height:1.2;font-weight:600;letter-spacing:-.02em;margin:0 0 4px}
+h2{color:var(--strong);font-size:18px;font-weight:500;margin:32px 0 12px}
+p{margin:0 0 12px}.muted{color:var(--muted)}.error{color:var(--danger);background:var(--danger-subtle);border-radius:var(--radius);padding:8px 12px}
+a{color:var(--link);text-underline-offset:2px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow);padding:4px 20px;margin-top:16px}
+table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:12px 4px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:0}th{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+form{display:inline-flex;gap:8px;flex-wrap:wrap;align-items:center}
+input[type=text]{height:40px;width:11rem;padding:0 12px;border:1px solid var(--border-strong);border-radius:var(--radius);font:inherit;color:var(--text);background:var(--surface)}
+button{height:40px;cursor:pointer;font:inherit;font-weight:500;color:var(--strong);background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:0 14px}
+button:hover{background:var(--hover)}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+code,.secret{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;word-break:break-all}
+.secret{display:block;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;margin:6px 0}
+ol{padding-left:20px}ol li{margin:0 0 12px}.qr{max-width:16rem}
+.tag{display:inline-block;font-size:12px;color:var(--muted)}`;
 const page = (title, html) =>
-  `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${STYLE}</style><body><h1>${esc(title)}</h1>${html}</body>`;
+  `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · ${esc(DISPLAY_NAME)}</title><style>${STYLE}</style>` +
+  `<body><header class="topbar"><img src="https://${CONSOLE_HOST}/console/oce-mascot-inverse.png" alt=""><span class="name">${esc(DISPLAY_NAME)}</span><span class="where"><a href="/apps">Your Agents</a></span></header>` +
+  `<main><h1>${esc(title)}</h1><div class="card">${html}</div></main></body></html>`;
 const textPage = (title, text) => page(title, `<p>${esc(text)}</p>`);
 const log = (event, fields = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields }));
 
@@ -475,7 +500,7 @@ async function appsPage(req, res, notice = "") {
           (a) => `<tr><td>${a.runtime === "claude-gateway" ? esc(a.name) : `<a href="https://${esc(a.host)}/" target="_blank" rel="noopener">${esc(a.name)}</a>`}<div class="muted">${{ hermes: "Hermes", "claude-gateway": "Claude Gateway" }[a.runtime] ?? "OpenClaw"} · ${esc(a.level)}</div></td>
 <td><form method="post" action="/apps/connect"><input type="hidden" name="host" value="${esc(a.host)}">
 <input type="text" name="label" maxlength="40" placeholder="${a.runtime === "openclaw" ? "e.g. my phone" : "e.g. laptop"}" required pattern="[A-Za-z0-9 ._-]{1,40}" aria-label="Name for this app">
-<button type="submit">${{ hermes: "Connect Hermes Desktop", "claude-gateway": "Connect Claude Code / Desktop" }[a.runtime] ?? "Connect the mobile app"}</button></form></td></tr>`,
+<button type="submit" class="primary">${{ hermes: "Connect Hermes Desktop", "claude-gateway": "Connect Claude Code / Desktop" }[a.runtime] ?? "Connect the mobile app"}</button></form></td></tr>`,
         )
         .join("")
     : `<tr><td colspan="2" class="muted">You have not been given access to any Agent yet. Ask an administrator.</td></tr>`;
@@ -599,28 +624,33 @@ const wgKey = (jwkValue) => Buffer.from(jwkValue, "base64url").toString("base64"
 const download = (name, text, label) =>
   `<a download="${esc(name)}" href="data:application/octet-stream;base64,${Buffer.from(text).toString("base64")}">${esc(label)}</a>`;
 
-function claudeSetupScript(claudeHost, tunnelIp, fingerprint, ca) {
-  return `#!/bin/bash
-# Claude Gateway: one-time setup for this Mac. Run from the folder with the downloaded files.
-set -e
-cd "$(dirname "$0")"
-GW=${claudeHost}
-grep -q " $GW" /etc/hosts || echo "${tunnelIp} $GW" | sudo tee -a /etc/hosts >/dev/null
-cat > claude-gateway-ca.crt <<'CA'
-${ca.trim()}
-CA
-# Name-constrained to the gateway's private domain: it cannot vouch for any other site.
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain claude-gateway-ca.crt
-mkdir -p ~/.claude-gateway && cp claude-gateway-ca.crt ~/.claude-gateway/ca.crt
-CFG=\${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+// The laptop setup per OS: hosts entry, CA trust, Claude Code's gateway sign-in, and the CA for
+// Claude Code started outside a shell (Desktop's Code tab). macOS is tested; Linux and Windows
+// follow each OS's standard tools (docs/oae/claude-gateway.md).
+const settingsPython = (gw) => `CFG=\${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 mkdir -p "$CFG"
-CFG="$CFG" GW_URL="https://$GW:8443" python3 - <<'PY'
+CFG="$CFG" GW_URL="https://${gw}:8443" python3 - <<'PY'
 import json, os
 p = os.path.join(os.environ["CFG"], "settings.json")
 s = json.load(open(p)) if os.path.exists(p) else {}
 s.update({"forceLoginMethod": "gateway", "forceLoginGatewayUrl": os.environ["GW_URL"]})
 json.dump(s, open(p, "w"), indent=2)
 PY
+echo "Claude Code settings written to $CFG/settings.json (set CLAUDE_CONFIG_DIR to keep them elsewhere)."`;
+
+function claudeScriptMac(gw, ip, fingerprint, ca) {
+  return `#!/bin/bash
+# Claude Gateway: one-time setup for this Mac. Run: bash setup-claude-gateway-mac.sh
+set -e
+cd "$(dirname "$0")"
+grep -q " ${gw}" /etc/hosts || echo "${ip} ${gw}" | sudo tee -a /etc/hosts >/dev/null
+mkdir -p ~/.claude-gateway
+cat > ~/.claude-gateway/ca.crt <<'CA'
+${ca.trim()}
+CA
+# Name-constrained to the gateway's private domain: it cannot vouch for any other site.
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/.claude-gateway/ca.crt
+${settingsPython(gw)}
 grep -q NODE_EXTRA_CA_CERTS ~/.zshrc 2>/dev/null || echo 'export NODE_EXTRA_CA_CERTS=$HOME/.claude-gateway/ca.crt' >> ~/.zshrc
 # Claude Desktop's Code tab runs Claude Code without your shell's settings: give apps the CA too,
 # now and at every login (remove: launchctl unsetenv NODE_EXTRA_CA_CERTS; delete the plist).
@@ -635,10 +665,88 @@ cat > ~/Library/LaunchAgents/dev.oae.claude-gateway-ca.plist <<PLIST
 </dict></plist>
 PLIST
 launchctl setenv NODE_EXTRA_CA_CERTS "$HOME/.claude-gateway/ca.crt"
-echo "Claude Code settings written to $CFG/settings.json (set CLAUDE_CONFIG_DIR to keep them elsewhere)."
 echo "Done. Import the tunnel file in WireGuard and activate it, then open Claude Code, or quit and reopen Claude Desktop."
 echo "Certificate fingerprint to confirm: ${fingerprint}"
 `;
+}
+
+function claudeScriptLinux(gw, ip, fingerprint, ca) {
+  return `#!/bin/bash
+# Claude Gateway: one-time setup for this Linux machine. Run: bash setup-claude-gateway-linux.sh
+set -e
+cd "$(dirname "$0")"
+grep -q " ${gw}" /etc/hosts || echo "${ip} ${gw}" | sudo tee -a /etc/hosts >/dev/null
+mkdir -p ~/.claude-gateway
+cat > ~/.claude-gateway/ca.crt <<'CA'
+${ca.trim()}
+CA
+# System trust (name-constrained to the gateway's private domain).
+if [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
+  sudo cp ~/.claude-gateway/ca.crt /usr/local/share/ca-certificates/claude-gateway-ca.crt && sudo update-ca-certificates >/dev/null
+elif command -v trust >/dev/null; then
+  sudo trust anchor --store ~/.claude-gateway/ca.crt
+else
+  echo "Add ~/.claude-gateway/ca.crt to your system's trusted certificates by hand."
+fi
+${settingsPython(gw)}
+for f in ~/.profile ~/.bashrc; do
+  grep -q NODE_EXTRA_CA_CERTS "$f" 2>/dev/null || echo 'export NODE_EXTRA_CA_CERTS=$HOME/.claude-gateway/ca.crt' >> "$f"
+done
+echo "Done. Start the tunnel: sudo install -m 600 <your tunnel file>.conf /etc/wireguard/cgw.conf && sudo wg-quick up cgw"
+echo "(or: nmcli connection import type wireguard file <your tunnel file>.conf). Then open a new terminal and run claude."
+echo "Certificate fingerprint to confirm: ${fingerprint}"
+`;
+}
+
+// PowerShell (Windows): no backticks or "\${" here, both of which this template literal would take.
+function claudeScriptWindows(gw, ip, fingerprint, ca) {
+  return `#Requires -RunAsAdministrator
+# Claude Gateway: one-time setup for this Windows PC. In PowerShell as Administrator, run:
+#   powershell -ExecutionPolicy Bypass -File setup-claude-gateway-windows.ps1
+$ErrorActionPreference = 'Stop'
+$GW = '${gw}'
+$hosts = Join-Path $env:WINDIR 'System32\\drivers\\etc\\hosts'
+if (-not (Select-String -Path $hosts -Pattern (' ' + $GW) -SimpleMatch -Quiet)) { Add-Content -Path $hosts -Value ('${ip} ' + $GW) }
+$dir = Join-Path $env:USERPROFILE '.claude-gateway'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$caPath = Join-Path $dir 'ca.crt'
+$ca = @'
+${ca.trim()}
+'@
+[IO.File]::WriteAllText($caPath, $ca + [Environment]::NewLine)
+# Name-constrained to the gateway's private domain: it cannot vouch for any other site.
+Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\\LocalMachine\\Root | Out-Null
+$cfg = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+New-Item -ItemType Directory -Force -Path $cfg | Out-Null
+$sp = Join-Path $cfg 'settings.json'
+$s = if (Test-Path $sp) { Get-Content $sp -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+$s | Add-Member -Force -NotePropertyName forceLoginMethod -NotePropertyValue 'gateway'
+$s | Add-Member -Force -NotePropertyName forceLoginGatewayUrl -NotePropertyValue ('https://' + $GW + ':8443')
+# UTF-8 without a byte-order mark: Claude Code reads plain JSON.
+[IO.File]::WriteAllText($sp, ($s | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding $false))
+[Environment]::SetEnvironmentVariable('NODE_EXTRA_CA_CERTS', $caPath, 'User')
+Write-Host ('Claude Code settings written to ' + $sp)
+Write-Host 'Done. Import the tunnel file in WireGuard for Windows and activate it, then open a new terminal (or restart Claude Desktop).'
+Write-Host 'Certificate fingerprint to confirm: ${fingerprint}'
+`;
+}
+
+const CLAUDE_OS = {
+  mac: { label: "macOS", file: "setup-claude-gateway-mac.sh", script: claudeScriptMac,
+    run: "bash ~/Downloads/setup-claude-gateway-mac.sh", tunnel: "WireGuard (Mac App Store): <b>Import tunnel(s) from file</b>, pick the tunnel file, <b>Activate</b>." },
+  windows: { label: "Windows", file: "setup-claude-gateway-windows.ps1", script: claudeScriptWindows,
+    run: "powershell -ExecutionPolicy Bypass -File $HOME\\Downloads\\setup-claude-gateway-windows.ps1 (in PowerShell as Administrator)",
+    tunnel: "WireGuard for Windows (wireguard.com/install): <b>Import tunnel(s) from file</b>, pick the tunnel file, <b>Activate</b>." },
+  linux: { label: "Linux", file: "setup-claude-gateway-linux.sh", script: claudeScriptLinux,
+    run: "bash ~/Downloads/setup-claude-gateway-linux.sh",
+    tunnel: "<code>sudo install -m 600 TUNNEL.conf /etc/wireguard/cgw.conf && sudo wg-quick up cgw</code> (wireguard-tools), or import it in NetworkManager." },
+};
+function clientOs(req) {
+  const ua = String(req.headers["user-agent"] ?? "");
+  if (/Windows/i.test(ua)) return "windows";
+  if (/Mac OS X|Macintosh/i.test(ua)) return "mac";
+  if (/Linux|X11/i.test(ua) && !/Android/i.test(ua)) return "linux";
+  return "mac";
 }
 
 async function claudeConnect(req, res, session, agent, label) {
@@ -666,14 +774,22 @@ async function claudeConnect(req, res, session, agent, label) {
   const tunnel = `[Interface]\nPrivateKey = ${priv}\nAddress = ${ip}/32\n\n[Peer]\nPublicKey = ${gw.serverPublicKey}\nEndpoint = ${gw.endpoint}\nAllowedIPs = ${gw.tunnelIp}/32\nPersistentKeepalive = 25\n`;
   const fileBase = `${agent.name}-${label}`.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 60);
   const bootstrap = `https://${agent.claudeHost}:8443/user/bootstrap`;
-  const body = `<ol>
-<li>Download ${download(`${fileBase}.conf`, tunnel, "your tunnel file")} and ${download("setup-claude-gateway.sh", claudeSetupScript(agent.claudeHost, gw.tunnelIp, gw.fingerprint, ca), "the setup script")} (macOS).</li>
-<li>Run the setup script once in Terminal: <code>bash ~/Downloads/setup-claude-gateway.sh</code> (it asks for your Mac password). It makes this gateway your Claude Code sign-in; to keep it separate from another setup, run it with <code>CLAUDE_CONFIG_DIR=~/claude-gateway</code> and start Claude Code the same way.</li>
-<li>WireGuard (Mac App Store): <b>Import tunnel(s) from file</b>, pick the tunnel file, <b>Activate</b>. Run one WireGuard tunnel at a time. It works within a minute.</li>
+  const os = clientOs(req);
+  const mine = CLAUDE_OS[os];
+  const script = (o) => CLAUDE_OS[o].script(agent.claudeHost, gw.tunnelIp, gw.fingerprint, ca);
+  const others = Object.keys(CLAUDE_OS)
+    .filter((o) => o !== os)
+    .map((o) => download(CLAUDE_OS[o].file, script(o), `${CLAUDE_OS[o].label} setup script`))
+    .join(" · ");
+  const body = `<p class="muted">Set up for ${esc(mine.label)}. Another computer: ${others}.</p>
+<ol>
+<li>Download ${download(`${fileBase}.conf`, tunnel, "your tunnel file")} and ${download(mine.file, script(os), "the setup script")}.</li>
+<li>Run the setup script once: <code>${esc(mine.run)}</code>. It makes this gateway your Claude Code sign-in; to keep it apart from another setup, set <code>CLAUDE_CONFIG_DIR</code> when you run it and when you start Claude Code.</li>
+<li>Tunnel: ${mine.tunnel} Run one WireGuard tunnel at a time. It works within a minute.</li>
 <li><b>Claude Code</b> (2.1.295 or later): open a new terminal and run <code>claude</code>. Trust the gateway only if its fingerprint is <code>${esc(gw.fingerprint)}</code>, then sign in.</li>
-<li><b>Claude Desktop</b>: Help → Troubleshooting → Enable Developer Mode; Developer → Configure Third-Party Inference… → Source. Bootstrap config URL:<code class="secret">${esc(bootstrap)}</code>Leave the OIDC fields empty, save, then <b>Sign in with your organization</b>.</li>
+${os === "linux" ? "" : `<li><b>Claude Desktop</b>: Help → Troubleshooting → Enable Developer Mode; Developer → Configure Third-Party Inference… → Source. Bootstrap config URL:<code class="secret">${esc(bootstrap)}</code>Leave the OIDC fields empty, save, then <b>Sign in with your organization</b>.</li>`}
 </ol>
-<p class="muted">The tunnel file holds a private key that is shown only now: keep it to yourself. Disconnecting below, or losing access to ${esc(agent.name)}, closes the tunnel.</p>`;
+<p class="muted">The tunnel file holds a private key that is shown only now: keep it to yourself. Disconnecting below, or losing access to ${esc(agent.name)}, closes the tunnel.${os === "mac" ? "" : " Tested on macOS; " + esc(mine.label) + " follows the same steps with that system's tools."}</p>`;
   return send(res, 200, PAGE_HEADERS, page(`Connect ${agent.name}`, `${body}<p><a href="/apps">Done</a></p>`));
 }
 
@@ -837,6 +953,8 @@ createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", "http://local");
     if (url.pathname === "/healthz") return send(res, 200, {}, "ok");
+    if (url.pathname === "/assets/instrument-sans-latin.woff2" && req.method === "GET")
+      return send(res, 200, { "content-type": "font/woff2", "cache-control": "public, max-age=604800" }, FONT);
     if (url.pathname === "/check") return await check(req, res);
     const host = String(req.headers.host ?? "").toLowerCase().split(":")[0];
     if (host === CONSOLE_HOST && url.pathname.startsWith("/oae/api/")) return await consoleApi(req, res, url);
