@@ -2,7 +2,7 @@
 # claude-gateway: install and run Claude Gateway for Open Agents Enterprise.
 #
 #   claude-gateway install            install or upgrade (settings: env vars, see below)
-#   claude-gateway peer add NAME      issue a WireGuard peer for a laptop (hand-off files)
+#   claude-gateway peer add NAME      issue a WireGuard peer for a laptop (NAME: letters, digits)
 #   claude-gateway peer remove NAME   revoke it
 #   claude-gateway peer list
 #   claude-gateway user add EMAIL [GROUP]   bundled Keycloak: create a person (temp password)
@@ -304,7 +304,7 @@ cmd_install() {
 Next:
   - Open UDP $CGW_WG_PORT inbound in the cloud firewall (WireGuard).
   - Add people: claude-gateway user add alice@${CGW_EMAIL_DOMAINS%%,*}   (bundled Keycloak)
-  - Issue a laptop: claude-gateway peer add alice-laptop
+  - Issue a laptop: claude-gateway peer add alicemac
   - Models per group: $CGW_DIR/config/policies.yaml, then claude-gateway restart
   - PII rules: $CGW_DIR/pii/pii-rules.json, then claude-gateway restart
 EOF
@@ -318,7 +318,8 @@ cmd_peer() {
   case $sub in
     list) echo "${CGW_PEERS:-}" | tr ',' '\n' | sed '/^$/d' ;;
     add|remove)
-      [[ "$name" =~ ^[a-zA-Z0-9_-]{1,32}$ ]] || die "peer name: letters, digits, - or _"
+      # The WireGuard image skips any peer whose name is not purely alphanumeric.
+      [[ "$name" =~ ^[a-zA-Z0-9]{1,32}$ ]] || die "peer name: letters and digits only (e.g. alicemac)"
       local peers; peers=$(echo "${CGW_PEERS:-}" | tr ',' '\n' | sed '/^$/d' | grep -vx "$name" || true)
       if [ "$sub" = add ]; then peers=$(printf '%s\n%s\n' "$peers" "$name" | sed '/^$/d'); fi
       setkv CGW_PEERS "$(echo "$peers" | paste -sd, -)"
