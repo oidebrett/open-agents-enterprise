@@ -77,6 +77,7 @@ import {
   type KubernetesComputeDriverOptions,
 } from "../drivers/compute/kubernetes/index.ts";
 import { withHermesRuntime } from "../drivers/compute/kubernetes/hermes.ts";
+import { withClaudeGatewayRuntime } from "../drivers/compute/kubernetes/claude-gateway.ts";
 import { refuseRewrittenIpv4Host, refuseWrittenUserinfo } from "../auth/configuration.ts";
 import {
   createExternalDriver,
@@ -1282,8 +1283,9 @@ export async function loadInstallationConfiguration(options: {
       },
     );
   } else {
-    // OAE: `hermes` revisions go to the Hermes workload; every other revision is unchanged.
-    computeDriver = withHermesRuntime(new KubernetesComputeDriver(
+    // OAE: `hermes` and `claude-gateway` revisions go to their own workloads; every other
+    // revision is unchanged.
+    computeDriver = withClaudeGatewayRuntime(withHermesRuntime(new KubernetesComputeDriver(
       compute.configuration as unknown as KubernetesComputeDriverOptions,
       {
         id: compute.id,
@@ -1304,7 +1306,7 @@ export async function loadInstallationConfiguration(options: {
         ),
         readNodeCa: () => readHarnessNodeCa(environment),
       },
-    ));
+    )));
   }
   const createIAMDriver = (state: NativeIAMStateStore): IAMDriver => {
     return iamPackage === undefined

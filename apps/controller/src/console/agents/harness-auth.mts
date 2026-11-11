@@ -15,7 +15,7 @@ import { createDeviceLogin, type DeviceLogin } from "./device-login.mjs";
 // Display native model policy; deployment admission owns full Configuration validation.
 export function configuredHarnessId(
   values: unknown,
-): "codex" | "openclaw" | "hermes" | "claude-cli" | undefined {
+): "codex" | "openclaw" | "hermes" | "claude-cli" | "claude-gateway" | undefined {
   const { agents, models } = responseFields(values);
   const agentPolicy = responseFields(agents);
   const defaults = responseFields(agentPolicy.defaults);
@@ -53,7 +53,8 @@ export function configuredHarnessId(
     return runtime === "codex" ||
       runtime === "openclaw" ||
       runtime === "hermes" ||
-      runtime === "claude-cli"
+      runtime === "claude-cli" ||
+      runtime === "claude-gateway"
       ? runtime
       : undefined;
   }
