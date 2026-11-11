@@ -13,7 +13,7 @@
 //   administrator, proven by OCE itself from the administrator's own console session; the panel
 //   makes every OCE change (accounts, SSO identity, AccessBindings) with that session, and the edge
 //   only looks people up in the directory and records which SSO subject an OCE Principal is.
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -43,6 +43,8 @@ const AGENTS_FILE = env("OAE_EDGE_AGENTS_FILE", "/acl/agents.json");
 // Hermes agents (single-owner, no proxy identity): { "<host>": "<dashboard session token>" }. For a
 // granted person the edge presents the agent's session token, as Hermes Desktop would.
 const HERMES_FILE = env("OAE_EDGE_HERMES_FILE", "/hermes/hermes.json");
+// Claude Gateways (docs/oae/claude-gateway.md): written by oae-claude-sync.
+const CLAUDE_DIR = env("OAE_EDGE_CLAUDE_DIR", "/claude");
 // The OCE installation, for /open: an Agent's host is agent-<sha256(installation\0namespace\0agent)
 // [:32]>.<agents domain>, as oae-edge sync names it. Unset: /open is not offered.
 const INSTALLATION_ID = process.env.OAE_EDGE_INSTALLATION_ID ?? "";
@@ -121,6 +123,15 @@ const grants = watchedJson(ACL_FILE);
 const agentsMeta = watchedJson(AGENTS_FILE);
 const hermesTokens = watchedJson(HERMES_FILE);
 const hermesToken = (host) => (Object.hasOwn(hermesTokens(), host) ? hermesTokens()[host] : null);
+// { "<claude host>": { endpoint, serverPublicKey, subnet, tunnelIp, fingerprint } }
+const claudeGateways = watchedJson(`${CLAUDE_DIR}/gateways.json`);
+const claudeCa = () => {
+  try {
+    return readFileSync(`${CLAUDE_DIR}/ca.crt`, "utf8");
+  } catch {
+    return "";
+  }
+};
 
 // --- records the edge keeps itself: Kubernetes Secrets in its own namespace -----------------
 // Its ServiceAccount may get and update exactly these two Secrets (oae-edge install).
@@ -229,6 +240,10 @@ const people = secretStore("oae-edge-people", "people.json");
 // (node + operator without operator.admin; minting needs operator.admin, which no person holds):
 // { "<agent host>": { bootstrapToken, expiresAtMs } }. Connect takes it; the sync mints the next.
 const pairing = secretStore("oae-edge-pairing", "pairing.json");
+// Claude Gateway laptops: { "<WireGuard public key>": { sub, email, claudeHost, ip, id, label, created } }.
+// The private key is made here and shown once; only the public key is kept. oae-claude-sync
+// applies these peers while their person is still granted the gateway.
+const claudePeers = secretStore("oae-claude-peers", "peers.json");
 // A taken token must outlive the person's scan.
 const PAIRING_MIN_LIFE_MS = 120_000;
 
@@ -431,7 +446,8 @@ function myAgents(sub) {
       host,
       level: levels[sub],
       name: meta[host]?.name ?? host.split(".")[0],
-      runtime: meta[host]?.runtime === "hermes" ? "hermes" : "openclaw",
+      runtime: ["hermes", "claude-gateway"].includes(meta[host]?.runtime) ? meta[host].runtime : "openclaw",
+      claudeHost: meta[host]?.claudeHost ?? "",
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -445,16 +461,21 @@ async function appsPage(req, res, notice = "") {
   if (!session) return signInFirst(res);
   const agents = myAgents(session.sub);
   const names = Object.fromEntries(agents.map((a) => [a.host, a.name]));
-  const tokens = Object.values(await devices.load())
+  const claudeNames = Object.fromEntries(agents.filter((a) => a.claudeHost).map((a) => [a.claudeHost, a.host]));
+  const tokens = [
+    ...Object.values(await devices.load()),
+    // Claude Gateway laptops, listed with the app tokens; their ids start with "cgw-".
+    ...Object.values(await claudePeers.load()).map((p) => ({ ...p, host: claudeNames[p.claudeHost] ?? "gone" })),
+  ]
     .filter((d) => d.sub === session.sub)
     .sort((a, b) => String(b.created).localeCompare(String(a.created)));
   const agentRows = agents.length
     ? agents
         .map(
-          (a) => `<tr><td><a href="https://${esc(a.host)}/" target="_blank" rel="noopener">${esc(a.name)}</a><div class="muted">${a.runtime === "hermes" ? "Hermes" : "OpenClaw"} · ${esc(a.level)}</div></td>
+          (a) => `<tr><td>${a.runtime === "claude-gateway" ? esc(a.name) : `<a href="https://${esc(a.host)}/" target="_blank" rel="noopener">${esc(a.name)}</a>`}<div class="muted">${{ hermes: "Hermes", "claude-gateway": "Claude Gateway" }[a.runtime] ?? "OpenClaw"} · ${esc(a.level)}</div></td>
 <td><form method="post" action="/apps/connect"><input type="hidden" name="host" value="${esc(a.host)}">
-<input type="text" name="label" maxlength="40" placeholder="${a.runtime === "hermes" ? "e.g. laptop" : "e.g. my phone"}" required pattern="[A-Za-z0-9 ._-]{1,40}" aria-label="Name for this app">
-<button type="submit">${a.runtime === "hermes" ? "Connect Hermes Desktop" : "Connect the mobile app"}</button></form></td></tr>`,
+<input type="text" name="label" maxlength="40" placeholder="${a.runtime === "openclaw" ? "e.g. my phone" : "e.g. laptop"}" required pattern="[A-Za-z0-9 ._-]{1,40}" aria-label="Name for this app">
+<button type="submit">${{ hermes: "Connect Hermes Desktop", "claude-gateway": "Connect Claude Code / Desktop" }[a.runtime] ?? "Connect the mobile app"}</button></form></td></tr>`,
         )
         .join("")
     : `<tr><td colspan="2" class="muted">You have not been given access to any Agent yet. Ask an administrator.</td></tr>`;
@@ -499,6 +520,7 @@ async function appsConnect(req, res) {
   const agent = myAgents(session.sub).find((a) => a.host === host);
   if (!agent) return send(res, 403, PAGE_HEADERS, textPage("No access", "You do not have access to that Agent."));
   if (!/^[A-Za-z0-9 ._-]{1,40}$/.test(label)) return appsPage(req, res, `<p class="error">Name the app with up to 40 letters, digits, spaces or . _ -</p>`);
+  if (agent.runtime === "claude-gateway") return claudeConnect(req, res, session, agent, label);
   // OpenClaw: take this Agent's bootstrap token first, so the phone pairs on its own.
   let bootstrap = null;
   if (agent.runtime !== "hermes") {
@@ -572,6 +594,75 @@ ${body}<p><a href="/apps">Done</a></p>`,
   );
 }
 
+// --- Claude Gateway: a laptop gets its own WireGuard peer to the gateway -----------------------
+const wgKey = (jwkValue) => Buffer.from(jwkValue, "base64url").toString("base64");
+const download = (name, text, label) =>
+  `<a download="${esc(name)}" href="data:application/octet-stream;base64,${Buffer.from(text).toString("base64")}">${esc(label)}</a>`;
+
+function claudeSetupScript(claudeHost, tunnelIp, fingerprint, ca) {
+  return `#!/bin/bash
+# Claude Gateway: one-time setup for this Mac. Run from the folder with the downloaded files.
+set -e
+cd "$(dirname "$0")"
+GW=${claudeHost}
+grep -q " $GW" /etc/hosts || echo "${tunnelIp} $GW" | sudo tee -a /etc/hosts >/dev/null
+cat > claude-gateway-ca.crt <<'CA'
+${ca.trim()}
+CA
+# Name-constrained to the gateway's private domain: it cannot vouch for any other site.
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain claude-gateway-ca.crt
+mkdir -p ~/.claude-gateway && cp claude-gateway-ca.crt ~/.claude-gateway/ca.crt
+CFG=\${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+mkdir -p "$CFG"
+CFG="$CFG" GW_URL="https://$GW:8443" python3 - <<'PY'
+import json, os
+p = os.path.join(os.environ["CFG"], "settings.json")
+s = json.load(open(p)) if os.path.exists(p) else {}
+s.update({"forceLoginMethod": "gateway", "forceLoginGatewayUrl": os.environ["GW_URL"]})
+json.dump(s, open(p, "w"), indent=2)
+PY
+grep -q NODE_EXTRA_CA_CERTS ~/.zshrc 2>/dev/null || echo 'export NODE_EXTRA_CA_CERTS=$HOME/.claude-gateway/ca.crt' >> ~/.zshrc
+echo "Done. Import the tunnel file in WireGuard and activate it, then open Claude Code or Claude Desktop."
+echo "Certificate fingerprint to confirm: ${fingerprint}"
+`;
+}
+
+async function claudeConnect(req, res, session, agent, label) {
+  const gw = claudeGateways()[agent.claudeHost];
+  const ca = claudeCa();
+  if (!agent.claudeHost || !gw?.serverPublicKey || !ca) {
+    return appsPage(req, res, `<p class="error">${esc(agent.name)} is still being set up. Try again in a minute.</p>`);
+  }
+  const { publicKey, privateKey } = generateKeyPairSync("x25519");
+  const pub = wgKey(publicKey.export({ format: "jwk" }).x);
+  const priv = wgKey(privateKey.export({ format: "jwk" }).d);
+  const id = `cgw-${randomBytes(6).toString("hex")}`;
+  let ip = "";
+  await claudePeers.update((all) => {
+    if (Object.values(all).filter((p) => p.sub === session.sub).length >= MAX_APP_TOKENS_PER_PERSON) {
+      throw Object.assign(new Error("too many apps"), { status: 409 });
+    }
+    const used = new Set(Object.values(all).filter((p) => p.claudeHost === agent.claudeHost).map((p) => p.ip));
+    for (let i = 2; i < 255 && !ip; i += 1) if (!used.has(`${gw.subnet}.${i}`)) ip = `${gw.subnet}.${i}`;
+    if (!ip) throw Object.assign(new Error("gateway full"), { status: 409 });
+    all[pub] = { sub: session.sub, email: session.email ?? "", claudeHost: agent.claudeHost, ip, id, label, created: new Date().toISOString() };
+    return all;
+  });
+  log("app.connected", { sub: session.sub, host: agent.host, id, label, runtime: "claude-gateway" });
+  const tunnel = `[Interface]\nPrivateKey = ${priv}\nAddress = ${ip}/32\n\n[Peer]\nPublicKey = ${gw.serverPublicKey}\nEndpoint = ${gw.endpoint}\nAllowedIPs = ${gw.tunnelIp}/32\nPersistentKeepalive = 25\n`;
+  const fileBase = `${agent.name}-${label}`.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 60);
+  const bootstrap = `https://${agent.claudeHost}:8443/user/bootstrap`;
+  const body = `<ol>
+<li>Download ${download(`${fileBase}.conf`, tunnel, "your tunnel file")} and ${download("setup-claude-gateway.sh", claudeSetupScript(agent.claudeHost, gw.tunnelIp, gw.fingerprint, ca), "the setup script")} (macOS).</li>
+<li>Run the setup script once in Terminal: <code>bash ~/Downloads/setup-claude-gateway.sh</code> (it asks for your Mac password).</li>
+<li>WireGuard (Mac App Store): <b>Import tunnel(s) from file</b>, pick the tunnel file, <b>Activate</b>. Run one WireGuard tunnel at a time. It works within a minute.</li>
+<li><b>Claude Code</b> (2.1.295 or later): open a new terminal and run <code>claude</code>. Trust the gateway only if its fingerprint is <code>${esc(gw.fingerprint)}</code>, then sign in.</li>
+<li><b>Claude Desktop</b>: Help → Troubleshooting → Enable Developer Mode; Developer → Configure Third-Party Inference… → Source. Bootstrap config URL:<code class="secret">${esc(bootstrap)}</code>Leave the OIDC fields empty, save, then <b>Sign in with your organization</b>.</li>
+</ol>
+<p class="muted">The tunnel file holds a private key that is shown only now: keep it to yourself. Disconnecting below, or losing access to ${esc(agent.name)}, closes the tunnel.</p>`;
+  return send(res, 200, PAGE_HEADERS, page(`Connect ${agent.name}`, `${body}<p><a href="/apps">Done</a></p>`));
+}
+
 async function appsRevoke(req, res) {
   const session = unseal(cookies(req)[SESSION_COOKIE]);
   if (!session) return signInFirst(res);
@@ -587,6 +678,17 @@ async function appsRevoke(req, res) {
     }
     return all;
   });
+  if (id.startsWith("cgw-")) {
+    await claudePeers.update((all) => {
+      for (const [key, p] of Object.entries(all)) {
+        if (p.sub === session.sub && p.id === id) {
+          delete all[key];
+          removed += 1;
+        }
+      }
+      return all;
+    });
+  }
   log("app.disconnected", { sub: session.sub, id, removed });
   return send(res, 303, { location: "/apps" });
 }

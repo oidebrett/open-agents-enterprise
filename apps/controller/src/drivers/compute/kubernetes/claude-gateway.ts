@@ -9,7 +9,8 @@
 //                        its manifest, cached on the Agent's volume (OAE never ships the binary)
 //   init  render-config  gateway.yaml from this module's template + the sign-in Secret
 //   gateway              `claude gateway` on 8443 (its own TLS; clients pin the certificate)
-//   pii-masker           the gateway's upstream on 127.0.0.1:8080, the only holder of the key
+//   pii-masker           the gateway's upstream on 127.0.0.1:8080 (as http://pii-masker:8080), the
+//                        only holder of the key
 //   postgres             gateway sessions, on the Agent's volume
 //
 // The host's `oae-claude-sync` (deploy/oae/claude-gateway) gives each gateway its private name's
@@ -168,7 +169,7 @@ export function claudeGatewayConfigTemplate(host: string, models: readonly strin
     "  postgres_url: ${GATEWAY_POSTGRES_URL}",
     "upstreams:",
     "  - provider: anthropic",
-    "    base_url: http://127.0.0.1:8080",
+    "    base_url: http://pii-masker:8080",
     "    auth:",
     "      api_key: ${MASKER_KEY}",
     "    forward_user_identity: true",
@@ -368,6 +369,8 @@ class ClaudeGatewayWorkloads {
           spec: {
             automountServiceAccountToken: false,
             nodeSelector: this.driver.options.runtime?.nodeSelector,
+            // The gateway refuses a loopback upstream URL; the masker sidecar gets a name instead.
+            hostAliases: [{ ip: "127.0.0.1", hostnames: ["pii-masker"] }],
             securityContext: {
               runAsNonRoot: true,
               runAsUser: UID,

@@ -50,7 +50,7 @@ test("the config keeps secrets as environment references and sends Anthropic tra
   assert.match(yaml, /public_url: https:\/\/claude-x\.oae\.internal:8443/);
   assert.match(yaml, /client_secret: \$\{OIDC_CLIENT_SECRET\}/);
   assert.match(yaml, /api_key: \$\{MASKER_KEY\}/);
-  assert.match(yaml, /base_url: http:\/\/127\.0\.0\.1:8080/);
+  assert.match(yaml, /base_url: http:\/\/pii-masker:8080/);
   assert.match(yaml, /availableModels: \[claude-haiku-5-5\]/);
   assert.match(yaml, /desktop: \{\}/);
   assert.doesNotMatch(yaml, /sk-ant/);
