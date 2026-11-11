@@ -93,11 +93,13 @@ fetch_claude() {
 
 fetch_masker() {
   local d="$CGW_DIR/masker-src"
-  if [ ! -d "$d/.git" ]; then git clone -q "$MASKER_REPO" "$d"; fi
+  # Public source, read by the image build: world-readable, unlike everything else here.
+  if [ ! -d "$d/.git" ]; then (umask 022; git clone -q "$MASKER_REPO" "$d"); fi
   if [ "$(git -C "$d" rev-parse HEAD 2>/dev/null)" != "$MASKER_REF" ]; then
     say "PII masker source at ${MASKER_REF:0:12}"
-    git -C "$d" fetch -q origin "$MASKER_REF" && git -C "$d" checkout -q --detach "$MASKER_REF"
+    (umask 022; git -C "$d" fetch -q origin "$MASKER_REF" && git -C "$d" checkout -q --detach "$MASKER_REF")
   fi
+  chmod -R a+rX "$d"
   install -m 644 "$SRC/masker/Dockerfile" "$d/router/oae-masker.Dockerfile"
 }
 
