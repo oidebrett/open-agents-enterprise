@@ -1,0 +1,10 @@
+# Who may use which models. The gateway matches each person's Keycloak groups (the `groups`
+# claim) against `match`; the first match wins, so put specific groups first and keep the
+# catch-all `match: {}` last. `desktop: {}` lets that policy sign in to Claude Desktop.
+# `enforceAvailableModels` is enforced by the gateway (HTTP 400), not only shown in the picker.
+# After a change: `claude-gateway restart`; Desktop users quit (Cmd+Q) and reopen.
+- match: {}
+  cli:
+    availableModels: [@@MODELS@@]
+    enforceAvailableModels: true
+  desktop: {}

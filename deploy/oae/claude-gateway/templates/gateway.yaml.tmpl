@@ -1,0 +1,38 @@
+# Claude Gateway config, rendered by `claude-gateway install` (@@…@@ = install settings).
+# ${VAR} values are secrets the gateway reads from its environment (the root-only .env).
+# Block style wherever ${VAR} appears: inside a YAML flow map it fails to parse.
+listen:
+  host: 0.0.0.0
+  port: 8443
+  public_url: https://@@GATEWAY_HOST@@:8443
+  tls: { cert: /certs/gateway.crt, key: /certs/gateway.key }
+oidc:
+  issuer: @@OIDC_ISSUER@@
+  client_id: @@OIDC_CLIENT_ID@@
+  client_secret: ${OIDC_CLIENT_SECRET}
+  allowed_email_domains: [@@EMAIL_DOMAINS@@]
+  scopes: [openid, profile, email, offline_access, groups]
+session:
+  jwt_secret: ${GATEWAY_JWT_SECRET}
+  # Also the longest a disabled user keeps access: the gateway has no early revocation.
+  ttl_hours: @@SESSION_TTL_HOURS@@
+store:
+  postgres_url: ${GATEWAY_POSTGRES_URL}
+upstreams:
+  - provider: anthropic
+    # The PII masker holds the real Anthropic key; the gateway only has a key the masker accepts.
+    base_url: http://pii-masker:8080
+    auth:
+      api_key: ${MASKER_KEY}
+    forward_user_identity: true
+access_control:
+  allow_cidrs: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
+managed:
+  # Edit /opt/claude-gateway/config/policies.yaml, then `claude-gateway restart`.
+  policies:
+@@POLICIES@@
+load_test_mode:
+  # true = canned replies, nothing sent to Anthropic, no spend.
+  enabled: @@LOAD_TEST@@
+  reply_tokens: 40
+  reply_seconds: 1
