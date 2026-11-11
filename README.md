@@ -1,14 +1,58 @@
-# OpenClaw Enterprise
+# Open Agents Enterprise
 
-OpenClaw Enterprise (OCE) is the open source, vendor neutral platform for managing agents. Think of it as Kubernetes for agents.
+Open Agents Enterprise (OAE) runs an organisation's AI agents on its own servers, under one
+console: **OpenClaw**, **Hermes** and **Claude**. People sign in with the company login, see only
+the Agents they are granted, and reach them from the browser, their phone, Microsoft Teams or
+Slack, Hermes Desktop, or their own Claude Code and Claude Desktop.
 
-<img src="docs/assets/oce-mascot.png" alt="OpenClaw in a mech suit, the OpenClaw Enterprise mascot" width="200" />
+<img src="docs/assets/oae-mascot.png" alt="The OAE mascot, a robot in a mech suit, with OpenClaw, Hermes Agent and Claude around it" width="320" />
+
+OAE is an independent fork of [OpenClaw Enterprise (OCE)](https://github.com/openclaw/openclaw-enterprise),
+the open source, vendor-neutral platform for managing agents ("Kubernetes for agents"). It keeps
+OCE's control plane, console and Kubernetes deployment, and adds the agents and access below.
+[`OAE.md`](OAE.md) lists what the fork adds and how it stays close to upstream. OAE is not
+affiliated with or endorsed by the OpenClaw project, Nous Research or Anthropic; OpenClaw, Hermes
+and Claude are the names and marks of their owners.
+
+## What you can run
+
+Every Agent is created in the console (**Create Agent → Provider → Harness**), versioned, audited
+and granted to people like any OCE Agent.
+
+| Agent                     | What it is                                                                                                                                       | How people use it                                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| **OpenClaw**              | OCE's own Agent: OpenClaw's gateway, Embedded or Dedicated                                                                                       | Its web UI, the OpenClaw mobile app, Microsoft Teams, Slack                                                |
+| **Hermes**                | Nous Research's Hermes Agent as a second Agent kind                                                                                              | Its web UI, Hermes Desktop, Microsoft Teams                                                                |
+| **Claude Code** (harness) | An OpenClaw Agent whose turns run through Claude Code, on an Anthropic key or a person's own Claude subscription                                 | The same as OpenClaw ([details](docs/oae/claude-harness.md))                                               |
+| **Claude Gateway**        | Anthropic's `claude gateway` for a team: one Anthropic key, Keycloak sign-in, models per group, personal data masked before it reaches Anthropic | People's own Claude Code and Claude Desktop, over a private tunnel ([details](docs/oae/claude-gateway.md)) |
+
+Models: OpenAI, Anthropic, or any OpenAI-compatible HTTPS endpoint (NVIDIA, for example).
+
+## People and access
+
+- **Single sign-on** through Keycloak, which can hand sign-in to Microsoft Entra ID, Google or
+  Okta ([Keycloak for OAE](deploy/oae/central-sso/README.md)).
+- **Per-Agent grants**: an Agent's People card decides who may use it.
+- **`/apps`**: each person connects their own phone, Hermes Desktop, or Claude Code and Claude
+  Desktop, with one-time setup for macOS, Windows and Linux.
+
+Administrators start with the [administrator guide](docs/oae/admin-guide.md).
+
+## Install
+
+- **Packaged:** manidae-cloud installs OAE on a Hetzner server or your own, with single sign-on and the Claude Gateway as form options.
+- **By hand:** follow OCE's [Kubernetes Setup](docs/guides/kubernetes-setup.md), then the OAE
+  pieces in the [administrator guide](docs/oae/admin-guide.md).
+
+## The OCE platform underneath
+
+The rest of this page is OCE's, and applies unchanged to OAE.
 
 OCE includes the [OpenClaw Control Plane (OCC)](docs/guides/concepts.md#control-plane)
 for deploying and managing [Agents](docs/guides/concepts.md#agents-and-revisions).
 Start with [Getting Started](docs/README.md) to use the platform, [Operate](docs/guides/operate/README.md) to administer it, or [Contribute](docs/contributing/README.md) to change its source.
 
-## Getting started
+### Getting started
 
 Choose [Local Setup](docs/guides/quickstart.md) to run OCC on your machine, or [Kubernetes Setup](docs/guides/kubernetes-setup.md) to install it on a cluster you already operate. For local setup, run from the repository root:
 
@@ -30,7 +74,7 @@ After local setup, [deploy your first Agent](docs/guides/first-agent.md) and sen
 
 Reuse settings with [Agent Presets](docs/guides/topics/agent-presets.md), then fill variables and review the copied draft in the console.
 
-## Develop
+### Develop
 
 Follow [Make your first platform change](docs/contributing/first-change.md) for
 setup, a small source edit, and focused verification. You need Node.js 24.22.1 or
@@ -43,7 +87,7 @@ before opening a PR. [Testing](docs/testing/README.md) explains additional
 PostgreSQL, Docker/Podman, and Kubernetes setup; [CI coverage](docs/testing/ci.md#github-actions)
 distinguishes PR-safe checks from protected integrations.
 
-## Code layout
+### Code layout
 
 | Path                                          | Responsibility                                                                                  |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -58,7 +102,7 @@ distinguishes PR-safe checks from protected integrations.
 | [`packages/utils/`](packages/utils/README.md) | Shared validation, hashing, and object helpers.                                                 |
 | `tests/`                                      | Conformance and integration tests.                                                              |
 
-## Documentation
+### Documentation
 
 Run `npm run docs:install` once, then `npm run docs:dev` to preview the docs at <http://127.0.0.1:4173>.
 Use `npm run docs:build` for the full static build. See the
@@ -71,7 +115,8 @@ Use `npm run docs:build` for the full static build. See the
 
 ## Contributors
 
-Thanks to everyone contributing code, documentation, reviews, and ideas.
+OAE builds on the work of OpenClaw Enterprise's contributors. Thanks to everyone contributing
+code, documentation, reviews, and ideas upstream.
 See the [full contributor graph](https://github.com/openclaw/openclaw-enterprise/graphs/contributors)
 and [how to update recognition](CONTRIBUTING.md#recognize-contributors).
 
@@ -84,4 +129,4 @@ and [how to update recognition](CONTRIBUTING.md#recognize-contributors).
 
 ## License
 
-[MIT](LICENSE). Third-party components retain their own licenses.
+[MIT](LICENSE), as upstream OpenClaw Enterprise. Third-party components retain their own licenses.

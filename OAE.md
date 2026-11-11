@@ -13,6 +13,7 @@ what OAE adds and how the fork is kept close to upstream.
 | Harness behind the gateway | Embedded OpenClaw, dedicated Codex                                                            | Dedicated Claude Code; Hermes on the Codex and Claude harness pods                                        |
 | People's access to Agents  | Password/GitHub/Google/OIDC sign-in; native admin UI for `administer` holders, not under OIDC | Email (OIDC) access to granted Agents' own UIs through an edge that uses OCE's trusted-proxy gateway auth |
 | Remote clients             | None (gateways are private)                                                                   | OpenClaw mobile app and Hermes Desktop through the same edge, with per-device tokens                      |
+| People's own Claude apps   | None                                                                                          | Claude Gateway Agents: Claude Code and Claude Desktop through Anthropic's gateway, with PII masking       |
 | Installation               | Helm chart and installation profiles                                                          | The same, packaged by manidae-cloud for cloud VPS and BYOVPS                                              |
 
 Delivery is split into strikes: [docs/oae/strikes.md](docs/oae/strikes.md).
@@ -55,6 +56,10 @@ Remotes: `origin` = `github.com/oidebrett/open-agents-enterprise`,
 `upstream` = `github.com/openclaw/openclaw-enterprise`.
 
 ## Syncing from upstream
+
+Start with the report: `.claude/skills/oae-upstream-sync/upstream-report.sh` (the
+`oae-upstream-sync` skill) shows the newest published commit, fork commits upstream now has, a
+trial merge's conflicts and the upstream fixes and RFCs worth reading.
 
 `oae` follows upstream's **published-image commits**, not `upstream/main`.
 Upstream publishes controller and runtime images only for some commits
