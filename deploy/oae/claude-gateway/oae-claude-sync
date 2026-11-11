@@ -118,8 +118,14 @@ EOF
       -v "$d:/config" --label oae.dev/claude-host="$h" "$WG_IMAGE" >/dev/null
     docker run -d --name oae-claude-traefik-$n --restart unless-stopped --network container:$name \
       -v "$d/traefik:/etc/traefik/dynamic:ro" "$TRAEFIK_IMAGE" --entrypoints.gateway.address=:8443 \
-      --providers.file.directory=/etc/traefik/dynamic --log.level=WARN >/dev/null
+      --providers.file.directory=/etc/traefik/dynamic --log.level=WARN --global.checknewversion=false \
+      --global.sendanonymoususage=false >/dev/null
     log "WireGuard for $h on UDP $port"
+  elif ! docker exec $name wg show wg0 >/dev/null 2>&1; then
+    # The image gives up on a tunnel that failed to start (seen on a first start): start it again.
+    # Traefik shares its network namespace, so it must follow, or it keeps the old one.
+    docker restart $name >/dev/null && sleep 3 && docker restart oae-claude-traefik-$n >/dev/null
+    log "WireGuard for $h restarted (no wg0)"
   elif [ $changed = 1 ]; then
     # Peers change without a restart; Traefik reloads routes.yml on its own.
     docker exec $name bash -c 'wg syncconf wg0 <(wg-quick strip /config/wg_confs/wg0.conf)'
