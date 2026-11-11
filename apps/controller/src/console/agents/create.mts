@@ -1035,6 +1035,7 @@ function renderAgentForm(
   // OAE: Claude Code, as OpenClaw's claude-cli runtime inside the OpenClaw gateway: Anthropic only,
   // Embedded (docs/oae/claude-harness.md).
   const claudeCodeOption = element("option", { value: CLAUDE_CODE }, "Claude Code");
+  const claudeGatewayOption = element("option", { value: CLAUDE_GATEWAY }, "Claude Gateway");
   const harness = element(
     "select",
     { id: "agent-harness", "aria-describedby": "agent-harness-hint" },
@@ -1043,7 +1044,7 @@ function renderAgentForm(
     element("option", { value: "openclaw" }, "OpenClaw"),
     // OAE: Hermes runs embedded, with an API key for OpenAI or Anthropic.
     element("option", { value: "hermes" }, "Hermes"),
-    element("option", { value: CLAUDE_GATEWAY }, "Claude Gateway (for people's Claude apps)"),
+    claudeGatewayOption,
   );
   // Whether a provider change keeps the Harness: Hermes takes either provider, Claude Code stays
   // with Anthropic; an operator-managed (runtime) binding keeps its own rules.
@@ -3006,6 +3007,8 @@ function renderAgentForm(
     codexOption.disabled = embeddedOnlyProvider(nativeProvider.value);
     claudeCodeOption.hidden = nativeProvider.value !== "anthropic";
     claudeCodeOption.disabled = nativeProvider.value !== "anthropic";
+    claudeGatewayOption.hidden = nativeProvider.value !== "anthropic";
+    claudeGatewayOption.disabled = nativeProvider.value !== "anthropic";
     const compatible = nativeProvider.value === OPENAI_COMPATIBLE;
     baseUrlField.hidden = !compatible;
     providerBaseUrl.required = compatible;
