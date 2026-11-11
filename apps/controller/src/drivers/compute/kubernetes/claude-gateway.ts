@@ -45,7 +45,7 @@ const IMAGES = {
   // oidebrett/inference-router router/anthropic_masker, pinned by digest (multi-arch).
   masker:
     process.env.OAE_CLAUDE_MASKER_IMAGE ??
-    "docker.io/oideibrett/oae-pii-masker@sha256:a82dcd2809fff0297706cb2959a5e90c413d9347011adf6b9602fc5a179e56a8",
+    "docker.io/oideibrett/oae-pii-masker@sha256:250ff8d5c68387540e12de7b73b9e1134e8d63e9fdeb8907f377ff3960fd97fc",
   postgres:
     process.env.OAE_CLAUDE_POSTGRES_IMAGE ??
     "docker.io/library/postgres:16-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139",
