@@ -175,9 +175,16 @@ cmd_sync() {
       --from-file=ca.crt="$STATE/ca/ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     # 2. Keycloak client and the sign-in Secret the Pod's render step reads.
     secret=$(kc_client "$label" "$h")
+    local before
+    before=$(kubectl -n "$ns" get secret "$base-oidc" -o json 2>/dev/null | jq -c '.data // {}' || echo '{}')
     kubectl -n "$ns" create secret generic "$base-oidc" --from-literal=ISSUER="$CLAUDE_KC_ISSUER" \
       --from-literal=CLIENT_ID="oae-claude-$label" --from-literal=CLIENT_SECRET="$secret" \
       --from-literal=EMAIL_DOMAINS="$domains" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    # The gateway reads these at start: a change (a client secret Keycloak replaced after the Pod
+    # started, a new email domain) needs a restart, or sign-in fails with unauthorized_client.
+    if [ "$before" != '{}' ] && [ "$before" != "$(kubectl -n "$ns" get secret "$base-oidc" -o json | jq -c .data)" ]; then
+      kubectl -n "$ns" rollout restart "deploy/$base" >/dev/null && log "restarted $base: sign-in settings changed"
+    fi
     # 3. WireGuard: a stable slot per gateway (port and /24).
     n=$(jq -r --arg h "$h" '.[$h] // empty' <<<"$alloc")
     if [ -z "$n" ]; then
