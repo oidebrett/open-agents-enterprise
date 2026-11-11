@@ -14,11 +14,13 @@ grep -q " $GW" /etc/hosts || echo "$ADDR $GW $KC" | sudo tee -a /etc/hosts >/dev
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain claude-gateway-ca.crt
 mkdir -p ~/.claude-gateway && cp claude-gateway-ca.crt ~/.claude-gateway/ca.crt
 
-# 3. Claude Code CLI (2.1.295 or later): sign in through the gateway.
-mkdir -p ~/.claude
-GW_URL="https://$GW:8443" python3 - <<'PY'
+# 3. Claude Code CLI (2.1.295 or later): sign in through the gateway. Writes to
+#    $CLAUDE_CONFIG_DIR when set (keep a test separate from your everyday Claude Code), else ~/.claude.
+CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+mkdir -p "$CFG"
+CFG="$CFG" GW_URL="https://$GW:8443" python3 - <<'PY'
 import json, os
-p = os.path.expanduser("~/.claude/settings.json")
+p = os.path.join(os.environ["CFG"], "settings.json")
 s = json.load(open(p)) if os.path.exists(p) else {}
 s.update({"forceLoginMethod": "gateway", "forceLoginGatewayUrl": os.environ["GW_URL"]})
 json.dump(s, open(p, "w"), indent=2)
@@ -28,7 +30,7 @@ grep -q NODE_EXTRA_CA_CERTS ~/.zshrc 2>/dev/null || echo 'export NODE_EXTRA_CA_C
 cat <<EOF
 Done. Next:
   1. WireGuard (Mac App Store) -> Import tunnel(s) from file -> pick your .conf -> Activate.
-  2. Claude Code: open a new terminal, run claude, check the certificate fingerprint is
+  2. Claude Code: open a new terminal, run claude${CLAUDE_CONFIG_DIR:+ (with CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR)}, check the certificate fingerprint is
      @@FINGERPRINT@@
      then /login. /status shows "Cloud gateway".
   3. Claude Desktop: Help -> Troubleshooting -> Enable Developer Mode; then Developer ->
