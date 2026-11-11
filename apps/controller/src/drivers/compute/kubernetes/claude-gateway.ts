@@ -405,6 +405,9 @@ class ClaudeGatewayWorkloads {
                 command: ["/volume/claude/current", "gateway", "--config", "/etc/claude/gateway.yaml"],
                 env: [
                   { name: "CLAUDE_CONFIG_DIR", value: "/tmp/.claude" },
+                  // Its SSRF guard refuses loopback upstreams; the masker sidecar is one. Only OAE
+                  // writes upstreams (people cannot), so allowing loopback opens nothing else.
+                  { name: "CLAUDE_GATEWAY_ALLOW_LOOPBACK", value: "1" },
                   { name: "HOME", value: "/tmp" },
                   { name: "OIDC_CLIENT_SECRET", valueFrom: { secretKeyRef: { name: n.oidc, key: "CLIENT_SECRET" } } },
                   fromEnv("GATEWAY_JWT_SECRET"),
