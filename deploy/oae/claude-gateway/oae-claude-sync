@@ -75,6 +75,7 @@ kc_client() {
   body=$(jq -nc --arg c "$cid" --arg h "$h" '{clientId: $c, name: "Claude Gateway \($h)", enabled: true,
     publicClient: false, standardFlowEnabled: true, directAccessGrantsEnabled: false, implicitFlowEnabled: false,
     serviceAccountsEnabled: false, redirectUris: ["https://\($h):8443/oauth/callback"], webOrigins: ["https://\($h):8443"],
+    defaultClientScopes: ["basic", "profile", "email", "roles", "web-origins", "acr"],
     optionalClientScopes: ["offline_access", "groups"]}')
   id=$(kc GET "/clients?clientId=$cid" | jq -r '.[0].id // empty')
   if [ -z "$id" ]; then
@@ -82,6 +83,10 @@ kc_client() {
     id=$(kc GET "/clients?clientId=$cid" | jq -r '.[0].id')
     log "Keycloak client $cid"
   fi
+  # Naming only the optional scopes at creation left a client without openid/profile/email
+  # ("invalid_scope"): refuse to hand out a client that lacks them.
+  kc GET "/clients/$id/default-client-scopes" | jq -e 'map(.name) | index("basic") and index("email") and index("profile")' >/dev/null ||
+    log "WARNING: Keycloak client $cid lacks its default scopes (basic, profile, email)"
   kc GET "/clients/$id/client-secret" | jq -r .value
 }
 kc_email_domains() {
