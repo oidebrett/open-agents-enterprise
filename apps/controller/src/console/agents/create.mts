@@ -1036,6 +1036,9 @@ function renderAgentForm(
   // Embedded (docs/oae/claude-harness.md).
   const claudeCodeOption = element("option", { value: CLAUDE_CODE }, "Claude Code");
   const claudeGatewayOption = element("option", { value: CLAUDE_GATEWAY }, "Claude Gateway");
+  // OAE: offered only where the edge reports the Claude Gateway sync (single sign-on and the host's
+  // oae-claude-sync). Without it a gateway never gets its sign-in, certificate or VPN.
+  let claudeGatewayAvailable = false;
   const harness = element(
     "select",
     { id: "agent-harness", "aria-describedby": "agent-harness-hint" },
@@ -2160,6 +2163,17 @@ function renderAgentForm(
   // A refused Installation read stays refused: its access block offers a permission reread instead.
   const retryCapabilityDiscovery = button("Retry capability check", () => {
     void loadInstallationCapabilities();
+    void (async () => {
+      try {
+        const capabilities = responseFields(await request("/oae/api/capabilities"));
+        if (capabilities.claudeGateway === true && context.isCurrent()) {
+          claudeGatewayAvailable = true;
+          updateControls();
+        }
+      } catch {
+        // No edge (no single sign-on): no Claude Gateway.
+      }
+    })();
   });
   const recoveryMessage = element("p", { className: "muted" });
   const requireRepositoryReload = () => {
@@ -2899,7 +2913,9 @@ function renderAgentForm(
               : "Embedded OpenClaw is unavailable: this installation selects a Sandbox Driver, which requires Dedicated execution. Select Dedicated under Runtime details."
           : embeddedRefused && harness.value === "hermes"
             ? "Hermes uses Embedded execution, which this installation refuses because it selects a Sandbox Driver."
-            : (runtimeBindingRefused ?? "");
+            : harness.value === CLAUDE_GATEWAY && !claudeGatewayAvailable
+              ? "Claude Gateway is unavailable on this installation: it needs single sign-on (Keycloak) with the Claude Gateway client."
+              : (runtimeBindingRefused ?? "");
     if (openclawModeUnavailable.textContent !== modeRefusal) {
       openclawModeUnavailable.textContent = modeRefusal;
     }
@@ -2956,11 +2972,13 @@ function renderAgentForm(
           : "This Agent will run Hermes with Embedded execution.";
       }
       if (harness.value === CLAUDE_GATEWAY) {
-        return nativeProvider.value !== "anthropic"
-          ? "A Claude Gateway requires Anthropic."
-          : embeddedRefused
-            ? "This installation cannot run a Claude Gateway: it requires Embedded execution."
-            : "People you grant connect Claude Code and Claude Desktop to this gateway from their apps page. Add every model they may use to the Configuration's model list. Most companies need one Claude Gateway for everyone; add another only for a separate Anthropic key or separate rules.";
+        return !claudeGatewayAvailable
+          ? "This installation cannot run a Claude Gateway: it needs single sign-on (Keycloak) with the Claude Gateway client."
+          : nativeProvider.value !== "anthropic"
+            ? "A Claude Gateway requires Anthropic."
+            : embeddedRefused
+              ? "This installation cannot run a Claude Gateway: it requires Embedded execution."
+              : "People you grant connect Claude Code and Claude Desktop to this gateway from their apps page. Add every model they may use to the Configuration's model list. Most companies need one Claude Gateway for everyone; add another only for a separate Anthropic key or separate rules.";
       }
       if (harness.value === CLAUDE_CODE) {
         return nativeProvider.value !== "anthropic"
@@ -3007,8 +3025,8 @@ function renderAgentForm(
     codexOption.disabled = embeddedOnlyProvider(nativeProvider.value);
     claudeCodeOption.hidden = nativeProvider.value !== "anthropic";
     claudeCodeOption.disabled = nativeProvider.value !== "anthropic";
-    claudeGatewayOption.hidden = nativeProvider.value !== "anthropic";
-    claudeGatewayOption.disabled = nativeProvider.value !== "anthropic";
+    claudeGatewayOption.hidden = nativeProvider.value !== "anthropic" || !claudeGatewayAvailable;
+    claudeGatewayOption.disabled = nativeProvider.value !== "anthropic" || !claudeGatewayAvailable;
     const compatible = nativeProvider.value === OPENAI_COMPATIBLE;
     baseUrlField.hidden = !compatible;
     providerBaseUrl.required = compatible;
