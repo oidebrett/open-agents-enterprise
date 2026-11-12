@@ -2960,7 +2960,7 @@ function renderAgentForm(
           ? "A Claude Gateway requires Anthropic."
           : embeddedRefused
             ? "This installation cannot run a Claude Gateway: it requires Embedded execution."
-            : "People you grant connect Claude Code and Claude Desktop to this gateway from their apps page. Add every model they may use to the Configuration's model list.";
+            : "People you grant connect Claude Code and Claude Desktop to this gateway from their apps page. Add every model they may use to the Configuration's model list. Most companies need one Claude Gateway for everyone; add another only for a separate Anthropic key or separate rules.";
       }
       if (harness.value === CLAUDE_CODE) {
         return nativeProvider.value !== "anthropic"
