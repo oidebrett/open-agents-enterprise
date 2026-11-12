@@ -13,7 +13,7 @@
 //   administrator, proven by OCE itself from the administrator's own console session; the panel
 //   makes every OCE change (accounts, SSO identity, AccessBindings) with that session, and the edge
 //   only looks people up in the directory and records which SSO subject an OCE Principal is.
-import { createHash, createHmac, generateKeyPairSync, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -123,7 +123,7 @@ const grants = watchedJson(ACL_FILE);
 const agentsMeta = watchedJson(AGENTS_FILE);
 const hermesTokens = watchedJson(HERMES_FILE);
 const hermesToken = (host) => (Object.hasOwn(hermesTokens(), host) ? hermesTokens()[host] : null);
-// { "<claude host>": { endpoint, serverPublicKey, subnet, tunnelIp, fingerprint } }
+// { "<claude host>": { endpoint, serverPublicKey, subnet, tunnelIp, fingerprint, ikeServer? } }
 const claudeGateways = watchedJson(`${CLAUDE_DIR}/gateways.json`);
 const claudeCa = () => {
   try {
@@ -240,7 +240,8 @@ const people = secretStore("oae-edge-people", "people.json");
 // (node + operator without operator.admin; minting needs operator.admin, which no person holds):
 // { "<agent host>": { bootstrapToken, expiresAtMs } }. Connect takes it; the sync mints the next.
 const pairing = secretStore("oae-edge-pairing", "pairing.json");
-// Claude Gateway laptops: { "<WireGuard public key>": { sub, email, claudeHost, ip, id, label, created } }.
+// Claude Gateway laptops: { "<WireGuard public key>": { sub, email, claudeHost, ip, id, label, created } },
+// and for the built-in VPN { "ike:<id>": { kind: "ikev2", password, sub, email, claudeHost, id, label, created } }.
 // The private key is made here and shown once; only the public key is kept. oae-claude-sync
 // applies these peers while their person is still granted the gateway.
 const claudePeers = secretStore("oae-claude-peers", "peers.json");
@@ -500,6 +501,7 @@ async function appsPage(req, res, notice = "") {
           (a) => `<tr><td>${a.runtime === "claude-gateway" ? esc(a.name) : `<a href="https://${esc(a.host)}/" target="_blank" rel="noopener">${esc(a.name)}</a>`}<div class="muted">${{ hermes: "Hermes", "claude-gateway": "Claude Gateway" }[a.runtime] ?? "OpenClaw"} · ${esc(a.level)}</div></td>
 <td><form method="post" action="/apps/connect"><input type="hidden" name="host" value="${esc(a.host)}">
 <input type="text" name="label" maxlength="40" placeholder="${a.runtime === "openclaw" ? "e.g. my phone" : "e.g. laptop"}" required pattern="[A-Za-z0-9 ._-]{1,40}" aria-label="Name for this app">
+${a.runtime === "claude-gateway" && claudeGateways()[a.claudeHost]?.ikeServer ? `<select name="vpn" aria-label="How this computer connects"><option value="ikev2">Built-in VPN (nothing to install)</option><option value="wireguard">WireGuard app</option></select>` : ""}
 <button type="submit" class="primary">${{ hermes: "Connect Hermes Desktop", "claude-gateway": "Connect Claude Code / Desktop" }[a.runtime] ?? "Connect the mobile app"}</button></form></td></tr>`,
         )
         .join("")
@@ -545,7 +547,7 @@ async function appsConnect(req, res) {
   const agent = myAgents(session.sub).find((a) => a.host === host);
   if (!agent) return send(res, 403, PAGE_HEADERS, textPage("No access", "You do not have access to that Agent."));
   if (!/^[A-Za-z0-9 ._-]{1,40}$/.test(label)) return appsPage(req, res, `<p class="error">Name the app with up to 40 letters, digits, spaces or . _ -</p>`);
-  if (agent.runtime === "claude-gateway") return claudeConnect(req, res, session, agent, label);
+  if (agent.runtime === "claude-gateway") return claudeConnect(req, res, session, agent, label, String(form.get("vpn") ?? "wireguard"));
   // OpenClaw: take this Agent's bootstrap token first, so the phone pairs on its own.
   let bootstrap = null;
   if (agent.runtime !== "hermes") {
@@ -638,7 +640,21 @@ json.dump(s, open(p, "w"), indent=2)
 PY
 echo "Claude Code settings written to $CFG/settings.json (set CLAUDE_CONFIG_DIR to keep them elsewhere)."`;
 
-function claudeScriptMac(gw, ip, fingerprint, ca) {
+// How to bring the connection up, as the setup scripts' last words.
+const VPN_HINT = {
+  wireguard: {
+    mac: "Import the tunnel file in WireGuard and activate it",
+    linux: "Start the tunnel: sudo install -m 600 <your tunnel file>.conf /etc/wireguard/cgw.conf && sudo wg-quick up cgw (or: nmcli connection import type wireguard file <your tunnel file>.conf)",
+    windows: "Import the tunnel file in WireGuard for Windows and activate it",
+  },
+  ikev2: {
+    mac: "Install the VPN profile (double-click it, then System Settings, Profiles) and switch the VPN on in System Settings, VPN",
+    linux: "Add the built-in VPN in NetworkManager (IPsec/IKEv2, EAP) with the details shown on the page",
+    windows: "Connect the VPN from Settings, Network and internet, VPN, with the username and password shown on the page",
+  },
+};
+
+function claudeScriptMac(gw, ip, fingerprint, ca, vpn = "wireguard") {
   return `#!/bin/bash
 # Claude Gateway: one-time setup for this Mac. Run: bash setup-claude-gateway-mac.sh
 set -e
@@ -665,12 +681,12 @@ cat > ~/Library/LaunchAgents/dev.oae.claude-gateway-ca.plist <<PLIST
 </dict></plist>
 PLIST
 launchctl setenv NODE_EXTRA_CA_CERTS "$HOME/.claude-gateway/ca.crt"
-echo "Done. Import the tunnel file in WireGuard and activate it, then open Claude Code, or quit and reopen Claude Desktop."
+echo "Done. ${VPN_HINT[vpn].mac}, then open Claude Code, or quit and reopen Claude Desktop."
 echo "Certificate fingerprint to confirm: ${fingerprint}"
 `;
 }
 
-function claudeScriptLinux(gw, ip, fingerprint, ca) {
+function claudeScriptLinux(gw, ip, fingerprint, ca, vpn = "wireguard") {
   return `#!/bin/bash
 # Claude Gateway: one-time setup for this Linux machine. Run: bash setup-claude-gateway-linux.sh
 set -e
@@ -692,14 +708,13 @@ ${settingsPython(gw)}
 for f in ~/.profile ~/.bashrc; do
   grep -q NODE_EXTRA_CA_CERTS "$f" 2>/dev/null || echo 'export NODE_EXTRA_CA_CERTS=$HOME/.claude-gateway/ca.crt' >> "$f"
 done
-echo "Done. Start the tunnel: sudo install -m 600 <your tunnel file>.conf /etc/wireguard/cgw.conf && sudo wg-quick up cgw"
-echo "(or: nmcli connection import type wireguard file <your tunnel file>.conf). Then open a new terminal and run claude."
+echo "Done. ${VPN_HINT[vpn].linux}. Then open a new terminal and run claude."
 echo "Certificate fingerprint to confirm: ${fingerprint}"
 `;
 }
 
 // PowerShell (Windows): no backticks or "\${" here, both of which this template literal would take.
-function claudeScriptWindows(gw, ip, fingerprint, ca) {
+function claudeScriptWindows(gw, ip, fingerprint, ca, vpn = "wireguard", ike = null) {
   return `#Requires -RunAsAdministrator
 # Claude Gateway: one-time setup for this Windows PC. In PowerShell as Administrator, run:
 #   powershell -ExecutionPolicy Bypass -File setup-claude-gateway-windows.ps1
@@ -726,8 +741,56 @@ $s | Add-Member -Force -NotePropertyName forceLoginGatewayUrl -NotePropertyValue
 [IO.File]::WriteAllText($sp, ($s | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding $false))
 [Environment]::SetEnvironmentVariable('NODE_EXTRA_CA_CERTS', $caPath, 'User')
 Write-Host ('Claude Code settings written to ' + $sp)
-Write-Host 'Done. Import the tunnel file in WireGuard for Windows and activate it, then open a new terminal (or restart Claude Desktop).'
+${ike ? windowsIkev2(ike) : ""}Write-Host 'Done. ${VPN_HINT[vpn].windows}, then open a new terminal (or restart Claude Desktop).'
 Write-Host 'Certificate fingerprint to confirm: ${fingerprint}'
+`;
+}
+
+// The built-in VPN on Windows: a per-user IKEv2 connection with EAP-MSCHAPv2 that carries only the
+// gateway's address (split tunnel), with the IKE algorithms the server offers instead of Windows'
+// older defaults. Windows asks for the username and password on the first connect.
+function windowsIkev2({ name, server, tunnelIp }) {
+  return `$vpn = '${name}'
+Get-VpnConnection -Name $vpn -ErrorAction SilentlyContinue | Remove-VpnConnection -Force
+Add-VpnConnection -Name $vpn -ServerAddress '${server}' -TunnelType Ikev2 -EncryptionLevel Required -AuthenticationMethod Eap -SplitTunneling -RememberCredential -Force
+Set-VpnConnectionIPsecConfiguration -ConnectionName $vpn -AuthenticationTransformConstants GCMAES256 -CipherTransformConstants GCMAES256 -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -DHGroup Group14 -PfsGroup None -Force
+Add-VpnConnectionRoute -ConnectionName $vpn -DestinationPrefix '${tunnelIp}/32'
+Write-Host ('Built-in VPN added: ' + $vpn)
+`;
+}
+
+// The built-in VPN on a Mac: a configuration profile with one IKEv2 VPN (EAP-MSCHAPv2, the server
+// checked by its public certificate and name). The server narrows the traffic to the gateway.
+function macIkev2Profile({ name, server, user, password }) {
+  const x = (v) => esc(String(v));
+  const vpnId = randomUUID().toUpperCase();
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>PayloadContent</key><array><dict>
+<key>PayloadType</key><string>com.apple.vpn.managed</string>
+<key>PayloadIdentifier</key><string>dev.oae.claude-gateway.vpn.${vpnId}</string>
+<key>PayloadUUID</key><string>${vpnId}</string>
+<key>PayloadVersion</key><integer>1</integer>
+<key>PayloadDisplayName</key><string>${x(name)}</string>
+<key>UserDefinedName</key><string>${x(name)}</string>
+<key>VPNType</key><string>IKEv2</string>
+<key>IKEv2</key><dict>
+<key>RemoteAddress</key><string>${x(server)}</string>
+<key>RemoteIdentifier</key><string>${x(server)}</string>
+<key>LocalIdentifier</key><string>${x(user)}</string>
+<key>AuthenticationMethod</key><string>None</string>
+<key>ExtendedAuthEnabled</key><integer>1</integer>
+<key>AuthName</key><string>${x(user)}</string>
+<key>AuthPassword</key><string>${x(password)}</string>
+</dict>
+</dict></array>
+<key>PayloadDisplayName</key><string>${x(name)}</string>
+<key>PayloadIdentifier</key><string>dev.oae.claude-gateway.${vpnId}</string>
+<key>PayloadUUID</key><string>${randomUUID().toUpperCase()}</string>
+<key>PayloadType</key><string>Configuration</string>
+<key>PayloadVersion</key><integer>1</integer>
+</dict></plist>
 `;
 }
 
@@ -749,47 +812,82 @@ function clientOs(req) {
   return "mac";
 }
 
-async function claudeConnect(req, res, session, agent, label) {
+async function claudeConnect(req, res, session, agent, label, choice) {
   const gw = claudeGateways()[agent.claudeHost];
   const ca = claudeCa();
   if (!agent.claudeHost || !gw?.serverPublicKey || !ca) {
     return appsPage(req, res, `<p class="error">${esc(agent.name)} is still being set up. Try again in a minute.</p>`);
   }
-  const { publicKey, privateKey } = generateKeyPairSync("x25519");
-  const pub = wgKey(publicKey.export({ format: "jwk" }).x);
-  const priv = wgKey(privateKey.export({ format: "jwk" }).d);
+  const vpn = choice === "ikev2" && gw.ikeServer ? "ikev2" : "wireguard";
   const id = `cgw-${randomBytes(6).toString("hex")}`;
-  let ip = "";
-  await claudePeers.update((all) => {
-    if (Object.values(all).filter((p) => p.sub === session.sub).length >= MAX_APP_TOKENS_PER_PERSON) {
-      throw Object.assign(new Error("too many apps"), { status: 409 });
-    }
-    const used = new Set(Object.values(all).filter((p) => p.claudeHost === agent.claudeHost).map((p) => p.ip));
-    for (let i = 2; i < 255 && !ip; i += 1) if (!used.has(`${gw.subnet}.${i}`)) ip = `${gw.subnet}.${i}`;
-    if (!ip) throw Object.assign(new Error("gateway full"), { status: 409 });
-    all[pub] = { sub: session.sub, email: session.email ?? "", claudeHost: agent.claudeHost, ip, id, label, created: new Date().toISOString() };
-    return all;
-  });
-  log("app.connected", { sub: session.sub, host: agent.host, id, label, runtime: "claude-gateway" });
-  const tunnel = `[Interface]\nPrivateKey = ${priv}\nAddress = ${ip}/32\n\n[Peer]\nPublicKey = ${gw.serverPublicKey}\nEndpoint = ${gw.endpoint}\nAllowedIPs = ${gw.tunnelIp}/32\nPersistentKeepalive = 25\n`;
+  const record = { sub: session.sub, email: session.email ?? "", claudeHost: agent.claudeHost, id, label, created: new Date().toISOString() };
+  const tooMany = (all) => Object.values(all).filter((p) => p.sub === session.sub).length >= MAX_APP_TOKENS_PER_PERSON;
+  let tunnel = "";
+  let password = "";
+  if (vpn === "wireguard") {
+    const { publicKey, privateKey } = generateKeyPairSync("x25519");
+    const pub = wgKey(publicKey.export({ format: "jwk" }).x);
+    const priv = wgKey(privateKey.export({ format: "jwk" }).d);
+    let ip = "";
+    await claudePeers.update((all) => {
+      if (tooMany(all)) throw Object.assign(new Error("too many apps"), { status: 409 });
+      const used = new Set(Object.values(all).filter((p) => p.claudeHost === agent.claudeHost).map((p) => p.ip));
+      for (let i = 2; i < 255 && !ip; i += 1) if (!used.has(`${gw.subnet}.${i}`)) ip = `${gw.subnet}.${i}`;
+      if (!ip) throw Object.assign(new Error("gateway full"), { status: 409 });
+      all[pub] = { ...record, ip };
+      return all;
+    });
+    tunnel = `[Interface]\nPrivateKey = ${priv}\nAddress = ${ip}/32\n\n[Peer]\nPublicKey = ${gw.serverPublicKey}\nEndpoint = ${gw.endpoint}\nAllowedIPs = ${gw.tunnelIp}/32\nPersistentKeepalive = 25\n`;
+  } else {
+    // The username is the device's id; the password is made here, shown once and kept for the
+    // VPN server (it needs the password itself for EAP-MSCHAPv2).
+    password = randomBytes(18).toString("base64url");
+    await claudePeers.update((all) => {
+      if (tooMany(all)) throw Object.assign(new Error("too many apps"), { status: 409 });
+      all[`ike:${id}`] = { ...record, kind: "ikev2", password };
+      return all;
+    });
+  }
+  log("app.connected", { sub: session.sub, host: agent.host, id, label, runtime: "claude-gateway", vpn });
   const fileBase = `${agent.name}-${label}`.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 60);
+  const vpnName = `${agent.name} (${label})`.replace(/[^A-Za-z0-9 ._()-]+/g, "-").slice(0, 60);
+  const ike = vpn === "ikev2" ? { name: vpnName, server: gw.ikeServer, tunnelIp: gw.tunnelIp, user: id, password } : null;
   const bootstrap = `https://${agent.claudeHost}:8443/user/bootstrap`;
   const os = clientOs(req);
   const mine = CLAUDE_OS[os];
-  const script = (o) => CLAUDE_OS[o].script(agent.claudeHost, gw.tunnelIp, gw.fingerprint, ca);
+  const script = (o) => CLAUDE_OS[o].script(agent.claudeHost, gw.tunnelIp, gw.fingerprint, ca, vpn, o === "windows" ? ike : null);
   const others = Object.keys(CLAUDE_OS)
     .filter((o) => o !== os)
     .map((o) => download(CLAUDE_OS[o].file, script(o), `${CLAUDE_OS[o].label} setup script`))
     .join(" · ");
+  let connectStep;
+  let downloads;
+  if (vpn === "wireguard") {
+    downloads = `${download(`${fileBase}.conf`, tunnel, "your tunnel file")} and ${download(mine.file, script(os), "the setup script")}`;
+    connectStep = `<li>Tunnel: ${mine.tunnel} Run one WireGuard tunnel at a time. It works within a minute.</li>`;
+  } else {
+    const details = `<table><tr><td>Server and remote ID</td><td><code>${esc(ike.server)}</code></td></tr>
+<tr><td>Username</td><td><code>${esc(id)}</code></td></tr><tr><td>Password</td><td><code class="secret">${esc(password)}</code></td></tr></table>`;
+    if (os === "mac") {
+      downloads = `${download(`${fileBase}.mobileconfig`, macIkev2Profile(ike), "the VPN profile")} and ${download(mine.file, script(os), "the setup script")}`;
+      connectStep = `<li>VPN: double-click the profile, then open <b>System Settings → General → Device Management</b> (or Profiles), install it and confirm with your password. Switch it on in <b>System Settings → VPN</b>. It carries only this gateway's traffic and works within a minute. To set it up by hand instead: <b>Add VPN Configuration → IKEv2</b>, authentication <b>Username</b>: ${details}</li>`;
+    } else if (os === "windows") {
+      downloads = download(mine.file, script(os), "the setup script");
+      connectStep = `<li>VPN: the setup script added <b>${esc(vpnName)}</b>. Connect it in <b>Settings → Network &amp; internet → VPN</b> and sign in with: ${details}</li>`;
+    } else {
+      downloads = download(mine.file, script(os), "the setup script");
+      connectStep = `<li>VPN: in NetworkManager add an <b>IPsec/IKEv2 (strongswan)</b> VPN (package network-manager-strongswan), authentication <b>EAP</b>, route only <code>${esc(gw.tunnelIp)}/32</code>: ${details}</li>`;
+    }
+  }
   const body = `<p class="muted">Set up for ${esc(mine.label)}. Another computer: ${others}.</p>
 <ol>
-<li>Download ${download(`${fileBase}.conf`, tunnel, "your tunnel file")} and ${download(mine.file, script(os), "the setup script")}.</li>
+<li>Download ${downloads}.</li>
 <li>Run the setup script once: <code>${esc(mine.run)}</code>. It makes this gateway your Claude Code sign-in; to keep it apart from another setup, set <code>CLAUDE_CONFIG_DIR</code> when you run it and when you start Claude Code.</li>
-<li>Tunnel: ${mine.tunnel} Run one WireGuard tunnel at a time. It works within a minute.</li>
+${connectStep}
 <li><b>Claude Code</b> (2.1.295 or later): open a new terminal and run <code>claude</code>. Trust the gateway only if its fingerprint is <code>${esc(gw.fingerprint)}</code>, then sign in.</li>
 ${os === "linux" ? "" : `<li><b>Claude Desktop</b>: Help → Troubleshooting → Enable Developer Mode; Developer → Configure Third-Party Inference… → Source. Bootstrap config URL:<code class="secret">${esc(bootstrap)}</code>Leave the OIDC fields empty, save, then <b>Sign in with your organization</b>.</li>`}
 </ol>
-<p class="muted">The tunnel file holds a private key that is shown only now: keep it to yourself. Disconnecting below, or losing access to ${esc(agent.name)}, closes the tunnel.${os === "mac" ? "" : " Tested on macOS; " + esc(mine.label) + " follows the same steps with that system's tools."}</p>`;
+<p class="muted">${vpn === "wireguard" ? "The tunnel file holds a private key" : "The password (also inside the VPN profile)"} is shown only now: keep it to yourself. Disconnecting below, or losing access to ${esc(agent.name)}, closes the connection.${os === "mac" ? "" : " Tested on macOS; " + esc(mine.label) + " follows the same steps with that system's tools."}</p>`;
   return send(res, 200, PAGE_HEADERS, page(`Connect ${agent.name}`, `${body}<p><a href="/apps">Done</a></p>`));
 }
 

@@ -4,7 +4,8 @@
 #
 #   oae-claude-sync install   settings file, private CA, the timer
 #   oae-claude-sync sync      for every Claude Gateway Agent: TLS certificate, Keycloak client,
-#                             WireGuard + Traefik, laptop peers; removes what belongs to deleted ones
+#                             WireGuard + Traefik, laptop peers; the built-in VPN (IKEv2) server;
+#                             removes what belongs to deleted ones
 #   oae-claude-sync status    gateways, their ports and peers
 #
 # Settings: /opt/oce/prod/claude.env (CLAUDE_KC_ISSUER, CLAUDE_KC_CLIENT_ID, CLAUDE_PUBLIC_HOST,
@@ -24,6 +25,8 @@ GATEWAYS_CM=oae-claude-gateways        # read by the edge's /apps: what a hand-o
 OCE_NET=oce
 WG_IMAGE=lscr.io/linuxserver/wireguard:1.0.20260223-r0-ls128@sha256:b677c3f46d524921c8a7c91873479eb7bab190d098fddbbd887ce333ec078c90
 TRAEFIK_IMAGE=traefik:v3.6.22@sha256:d85749d4d10d970ed2b3a7cb2406d9b9da1cdd6ea975a39c727aab809d73136a
+# The built-in VPN (IKEv2) server, deploy/oae/claude-gateway/ike (strongSwan 5.9.14-r1).
+IKE_IMAGE=docker.io/oideibrett/oae-claude-ike@sha256:9cd924ad7f1da538c5a089ff45405069d7804a4fb9df6b84153d13f79a07db74
 log() { echo "oae-claude-sync: $*"; }
 die() { log "ERROR: $*"; exit 1; }
 settings() {
@@ -103,7 +106,7 @@ wg_up() {
   [ -f "$d/server.key" ] || { wg_tool 'wg genkey' > "$d/server.key"; wg_tool "echo $(cat "$d/server.key") | wg pubkey" > "$d/server.pub"; }
   {
     printf '[Interface]\nAddress = 10.77.%s.1/24\nListenPort = 51820\nPrivateKey = %s\n' "$n" "$(cat "$d/server.key")"
-    jq -r --arg h "$h" 'to_entries[] | select(.value.claudeHost == $h) | "\n[Peer]\n# \(.value.email) \(.value.label)\nPublicKey = \(.key)\nAllowedIPs = \(.value.ip)/32"' <<<"$PEERS"
+    jq -r --arg h "$h" 'to_entries[] | select(.value.claudeHost == $h and (.value.kind // "wireguard") == "wireguard") | "\n[Peer]\n# \(.value.email) \(.value.label)\nPublicKey = \(.key)\nAllowedIPs = \(.value.ip)/32"' <<<"$PEERS"
   } > "$d/wg_confs/wg0.conf.new"
   cat > "$d/traefik/routes.yml" <<EOF
 tcp:
@@ -144,6 +147,105 @@ wg_down() {
   rm -rf "$STATE/wg/$1"
 }
 
+# --------------------------------------------------------------------------- built-in VPN (IKEv2)
+# One strongSwan for the installation, for the VPN clients built into macOS and Windows: UDP 500 and
+# 4500, server name vpn.agents.<OAE host> with a Let's Encrypt certificate from the host's Traefik
+# (the edge's rules directory), so laptops trust it without our CA. Each gateway keeps its private
+# address 10.77.<n>.1 here too; each laptop (EAP-MSCHAPv2 username and password from /apps) gets a
+# connection whose only traffic selector is its own gateway. Traefik in the same network namespace
+# passes :8443 through to each gateway by name, as in the WireGuard containers.
+IKE_DIR=$STATE/ike
+ike_name() { local h; h=$(sed -n 's/^OAE_HOST=//p' $PROD/edge.env 2>/dev/null); [ -n "$h" ] && echo "vpn.agents.$h"; }
+# ike_cert NAME: ask Traefik for the certificate, then copy it out of acme.json; 1 until it exists.
+ike_cert() {
+  local name=$1 rules acme tmp
+  rules=$(ls -d /etc/komodo/stacks/*/config/traefik/rules 2>/dev/null | head -1)
+  [ -n "$rules" ] || { log "built-in VPN: no Traefik rules directory"; return 1; }
+  acme="$(dirname "$(dirname "$rules")")/letsencrypt/acme.json"
+  tmp=$(mktemp)
+  printf '# Written by oae-claude-sync: the certificate of the Claude Gateway built-in VPN server.\nhttp:\n  routers:\n    oae-claude-vpn:\n      entryPoints: [websecure]\n      rule: "Host(`%s`)"\n      service: oae-claude-vpn\n      tls: { certResolver: letsencrypt }\n  services:\n    oae-claude-vpn:\n      loadBalancer: { servers: [{ url: "http://127.0.0.1:9" }] }\n' "$name" > "$tmp"
+  if cmp -s "$tmp" "$rules/oae-claude-vpn.yml"; then rm -f "$tmp"; else install -m 644 "$tmp" "$rules/oae-claude-vpn.yml"; rm -f "$tmp"; fi
+  local cert key
+  cert=$(jq -r --arg d "$name" '[.[].Certificates[]? | select(.domain.main == $d)][0].certificate // empty' "$acme" 2>/dev/null)
+  key=$(jq -r --arg d "$name" '[.[].Certificates[]? | select(.domain.main == $d)][0].key // empty' "$acme" 2>/dev/null)
+  [ -n "$cert" ] && [ -n "$key" ] || return 1
+  mkdir -p "$IKE_DIR/swanctl/x509" "$IKE_DIR/swanctl/x509ca" "$IKE_DIR/swanctl/private"
+  base64 -d <<<"$cert" > "$IKE_DIR/chain.pem.new"
+  if ! cmp -s "$IKE_DIR/chain.pem.new" "$IKE_DIR/chain.pem" 2>/dev/null; then
+    mv "$IKE_DIR/chain.pem.new" "$IKE_DIR/chain.pem"
+    rm -f "$IKE_DIR"/swanctl/x509ca/*.crt
+    awk -v d="$IKE_DIR/swanctl" '/BEGIN CERTIFICATE/{n++} {print > ((n==1) ? d"/x509/server.crt" : d"/x509ca/ca"n".crt")}' "$IKE_DIR/chain.pem"
+    (umask 077; base64 -d <<<"$key" > "$IKE_DIR/swanctl/private/server.key")
+    IKE_RELOAD=1
+  else rm -f "$IKE_DIR/chain.pem.new"; fi
+}
+# ike_up GATEWAYS: GATEWAYS has one "n host target" line per gateway.
+ike_up() {
+  local gws=$1 name; name=$(ike_name) || { log "built-in VPN: no edge (edge.env), skipped"; return 1; }
+  if [ -z "$gws" ]; then ike_down; return 1; fi
+  mkdir -p "$IKE_DIR/traefik"; chmod 700 "$IKE_DIR"
+  IKE_RELOAD=0
+  ike_cert "$name" || { log "built-in VPN: waiting for the certificate of $name"; return 1; }
+  # Connections and secrets: one per laptop, limited to its own gateway.
+  local conf="$IKE_DIR/swanctl/swanctl.conf"
+  {
+    echo "connections {"
+    jq -r --arg gws "$gws" --arg name "$name" '
+      ($gws | split("\n") | map(select(. != "") | split(" ") | {key: .[1], value: .[0]}) | from_entries) as $slot
+      | to_entries[] | select(.value.kind == "ikev2" and $slot[.value.claudeHost] != null)
+      | "  p-\(.value.id) {\n    version = 2\n    pools = clients\n    send_cert = always\n    unique = replace\n    local {\n      auth = pubkey\n      certs = server.crt\n      id = \($name)\n    }\n    remote {\n      auth = eap-mschapv2\n      eap_id = \(.value.id)\n    }\n    children {\n      gw {\n        local_ts = 10.77.\($slot[.value.claudeHost]).1/32\n      }\n    }\n  }"' <<<"$PEERS"
+    echo "}"
+    echo "pools {"; echo "  clients {"; echo "    addrs = 10.78.0.0/16"; echo "  }"; echo "}"
+    echo "secrets {"
+    jq -r 'to_entries[] | select(.value.kind == "ikev2" and (.value.password | test("^[A-Za-z0-9_-]{16,64}$")))
+      | "  eap-\(.value.id) {\n    id = \(.value.id)\n    secret = \"\(.value.password)\"\n  }"' <<<"$PEERS"
+    echo "}"
+  } > "$conf.new"
+  chmod 600 "$conf.new"
+  local gone=""
+  if ! cmp -s "$conf.new" "$conf" 2>/dev/null; then
+    gone=$(comm -23 <(grep -o '^  p-[a-z0-9-]*' "$conf" 2>/dev/null | tr -d ' ' | sort) <(grep -o '^  p-[a-z0-9-]*' "$conf.new" | tr -d ' ' | sort))
+    IKE_RELOAD=1
+  fi
+  mv "$conf.new" "$conf"
+  # Traefik: each gateway by name to its NodePort.
+  {
+    echo "tcp:"; echo "  routers:"
+    while read -r n h target; do [ -n "$n" ] && printf '    gw%s: { entryPoints: [gateway], rule: "HostSNI(`%s`)", service: gw%s, tls: { passthrough: true } }\n' "$n" "$h" "$n"; done <<<"$gws"
+    echo "  services:"
+    while read -r n h target; do [ -n "$n" ] && printf '    gw%s: { loadBalancer: { servers: [{ address: "%s" }] } }\n' "$n" "$target"; done <<<"$gws"
+  } > "$IKE_DIR/traefik/routes.yml"
+  chmod 755 "$IKE_DIR/traefik"; chmod 644 "$IKE_DIR/traefik/routes.yml"
+  if [ "$(docker inspect -f '{{.State.Running}}' oae-claude-ike 2>/dev/null)" != true ]; then
+    docker rm -f oae-claude-ike oae-claude-ike-traefik >/dev/null 2>&1 || true
+    docker run -d --name oae-claude-ike --restart unless-stopped --network $OCE_NET --cap-add NET_ADMIN \
+      -p 500:500/udp -p 4500:4500/udp -v "$IKE_DIR/swanctl:/etc/swanctl:ro" "$IKE_IMAGE" >/dev/null
+    docker run -d --name oae-claude-ike-traefik --restart unless-stopped --network container:oae-claude-ike \
+      -v "$IKE_DIR/traefik:/etc/traefik/dynamic:ro" "$TRAEFIK_IMAGE" --entrypoints.gateway.address=:8443 \
+      --providers.file.directory=/etc/traefik/dynamic --log.level=WARN --global.checknewversion=false \
+      --global.sendanonymoususage=false >/dev/null
+    log "built-in VPN server $name on UDP 500 and 4500"
+    sleep 3
+  elif [ "$IKE_RELOAD" = 1 ]; then
+    docker exec oae-claude-ike swanctl --load-all --noprompt >/dev/null 2>&1 && log "built-in VPN: connections reloaded"
+    # A removed laptop loses its tunnel now, not when it next rekeys.
+    for c in $gone; do docker exec oae-claude-ike swanctl --terminate --ike "$c" --force >/dev/null 2>&1 || true; done
+  fi
+  [ "$(docker inspect -f '{{.State.Running}}' oae-claude-ike-traefik 2>/dev/null)" = true ] ||
+    docker start oae-claude-ike-traefik >/dev/null 2>&1 || true
+  # Each gateway's address on the loopback (lost on a container restart, so set every run).
+  local want have a
+  want=$(awk 'NF {print "10.77." $1 ".1/32"}' <<<"$gws" | sort)
+  have=$(docker exec oae-claude-ike ip -4 -o addr show dev lo 2>/dev/null | grep -o '10\.77\.[0-9]*\.1/32' | sort)
+  for a in $(comm -23 <(echo "$want") <(echo "$have")); do docker exec oae-claude-ike ip addr add "$a" dev lo; done
+  for a in $(comm -13 <(echo "$want") <(echo "$have")); do docker exec oae-claude-ike ip addr del "$a" dev lo; done
+  IKE_SERVER=$name
+}
+ike_down() {
+  docker rm -f oae-claude-ike oae-claude-ike-traefik >/dev/null 2>&1 || true
+  rm -f "$IKE_DIR/swanctl/swanctl.conf"
+}
+
 # -------------------------------------------------------------------------------------------- sync
 cmd_sync() {
   settings; ensure_ca
@@ -160,7 +262,7 @@ cmd_sync() {
     ($meta | to_entries | map(select(.value.runtime == "claude-gateway")) | map({(.value.claudeHost): .key}) | add // {}) as $edge
     | with_entries(select(($edge[.value.claudeHost] // "") as $e | $e != "" and ($acl[$e][.value.sub] // null) != null))' <<<"$PEERS")
   domains=$(kc_email_domains)
-  seen=""; published='{}'
+  seen=""; published='{}'; local ike_gws=""
   while read -r svc; do
     [ -n "$svc" ] || continue
     local ns base h label node nodeport target n port secret d
@@ -202,11 +304,16 @@ cmd_sync() {
     if [ -n "$node" ]; then
       target="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$OCE_NET\").IPAddress}}" "$node"):$nodeport"
       wg_up "$n" "$h" "$target"
+      ike_gws+="$n $h $target"$'\n'
     fi
     published=$(jq -c --arg h "$h" --arg ep "$CLAUDE_PUBLIC_HOST:$port" --arg pub "$(cat "$STATE/wg/$n/server.pub" 2>/dev/null)" \
       --arg net "10.77.$n" --arg fp "$(fingerprint "$d/tls.crt")" \
       '.[$h] = {endpoint: $ep, serverPublicKey: $pub, subnet: $net, tunnelIp: "\($net).1", fingerprint: $fp}' <<<"$published")
   done < <(jq -c '.items[]' <<<"$svcs")
+  # The built-in VPN: /apps offers it only once its server is up.
+  IKE_SERVER=""
+  ike_up "$ike_gws" || true
+  [ -z "$IKE_SERVER" ] || published=$(jq -c --arg s "$IKE_SERVER" 'map_values(. + {ikeServer: $s})' <<<"$published")
   # What /apps needs for a hand-off (no secrets): endpoints, server keys, fingerprints, the CA.
   kubectl -n $EDGE_NS create cm $GATEWAYS_CM --from-literal=gateways.json="$published" \
     --from-file=ca.crt="$STATE/ca/ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -244,6 +351,9 @@ cmd_status() {
   jq -r 'to_entries[] | "\(.value)  \(.key)"' "$STATE/alloc.json" 2>/dev/null | while read -r n h; do
     echo "$h  UDP $((CLAUDE_WG_PORT_BASE + n - 1))  $(docker exec oae-claude-wg-$n wg show wg0 peers 2>/dev/null | wc -l) peer(s)"
   done
+  if docker exec oae-claude-ike true 2>/dev/null; then
+    echo "built-in VPN $(ike_name)  UDP 500/4500  $(grep -c '^  p-' "$IKE_DIR/swanctl/swanctl.conf" 2>/dev/null) laptop(s), $(docker exec oae-claude-ike swanctl --list-sas 2>/dev/null | grep -c ESTABLISHED) connected"
+  fi
 }
 
 cmd_install() {
@@ -279,7 +389,7 @@ OnUnitActiveSec=60
 WantedBy=timers.target
 EOF
   systemctl daemon-reload && systemctl enable --now oae-claude-sync.timer
-  log "installed; open UDP $CLAUDE_WG_PORT_BASE-$((CLAUDE_WG_PORT_BASE + CLAUDE_WG_PORTS - 1)) in the cloud firewall"
+  log "installed; open UDP $CLAUDE_WG_PORT_BASE-$((CLAUDE_WG_PORT_BASE + CLAUDE_WG_PORTS - 1)), 500 and 4500 in the cloud firewall"
 }
 
 case "${1:-}" in
