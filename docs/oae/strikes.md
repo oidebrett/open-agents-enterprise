@@ -133,9 +133,16 @@ runtime image = OCE runtime + pinned Claude Code with an admin-managed `apiKeyHe
 only; Dedicated Claude Code Pod not built. See `docs/oae/claude-harness.md`. Images from `oae`
 via CI (`oae-images.yml`) still open.
 
-- `oae-images.yml`: build and publish controller and runtime images from `oae` to
-  `ghcr.io/oidebrett/open-agents-enterprise-*` (amd64 + arm64); manidae package
-  switches to them.
+- **OAE images — in progress** (branch `strike/4-oae-images`): [`docs/oae/images.md`](images.md).
+  Controller and runtime are built **from source** at the `oae` commit, so `oae` no longer needs an
+  upstream *published*-image commit (removes the gate in `OAE.md` "Syncing from upstream"). The
+  runtime is `deploy/runtime/Dockerfile` (OpenClaw from the pinned source) with Claude Code + Teams
+  layered via `runtime-claude`'s existing `ARG OCE_RUNTIME_IMAGE` — pointed at our from-source base
+  instead of a published image. One shared build path (`deploy/oae/images/build-images.sh`) used by
+  `.github/workflows/oae-images.yml` (OAE-owned, `workflow_dispatch`, publishes multi-arch to
+  `ghcr.io/oidebrett/open-agents-enterprise-*`, tag `sha-<commit>`).
+  - ⬜ First real build/publish, then manidae package switches to the OAE images.
+  - ⬜ Verify on Oracle via `oae-upgrade`, then pin the digests in manidae (release gate).
 - Upstream track: RFC for a `claude` harness (model on RFC 0003/0005); OpenClaw PR
   adding `claude` to `ACPX_NATIVE_AGENT_IDS` and a remote (WebSocket) transport to
   `acpx`.

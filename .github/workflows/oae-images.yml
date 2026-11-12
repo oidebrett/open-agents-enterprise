@@ -1,0 +1,75 @@
+# Build and publish OAE's own controller and runtime images from the `oae` branch, so OAE can sit
+# on any commit instead of only on commits upstream has published images for (OAE.md "Syncing from
+# upstream"; docs/oae/images.md; strike 4). OAE-owned workflow — NOT one of upstream's dormant
+# workflows (OAE.md "GitHub Actions"). Manual only; it never fires on push.
+name: OAE Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or commit to build (default oae)
+        required: false
+        default: oae
+        type: string
+      push:
+        description: Push the built images to GHCR (off = build-only dry run)
+        required: false
+        default: false
+        type: boolean
+      mutable_tag:
+        description: Extra mutable tag alongside sha-<commit> (e.g. latest); empty to skip
+        required: false
+        default: ""
+        type: string
+      hermes:
+        description: Also build the OAE Hermes image
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oae-images-${{ inputs.push && 'publish' || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io/oidebrett/open-agents-enterprise-*
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24.22.1"
+
+      # arm64 is built under emulation. OAE images are built per sync (infrequent), so emulation is
+      # an acceptable first cut; move to native arm64 runners if build time becomes a problem.
+      - uses: docker/setup-qemu-action@29109295f81e9208a445ab03645b4dc8c3b405e7 # v3.6.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push }}
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish is multi-arch (amd64 + emulated arm64). A dry run builds amd64 only and --loads it,
+      # so the whole chain — including the runtime layer that needs runtime-base — is exercised fast.
+      - name: Build${{ inputs.push && ' and publish' || ' (dry run)' }} OAE images
+        run: |
+          deploy/oae/images/build-images.sh \
+            --platform ${{ inputs.push && 'linux/amd64,linux/arm64 --push' || 'linux/amd64' }} \
+            ${{ inputs.hermes && '--hermes' || '' }} \
+            ${{ inputs.mutable_tag != '' && format('--tag {0}', inputs.mutable_tag) || '' }}
