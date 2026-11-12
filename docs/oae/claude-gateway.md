@@ -15,8 +15,19 @@ non-OAE servers. This design maps the same pieces onto OCE's model, as Hermes do
 
 Claude Code and Claude Desktop accept a gateway only at a **private address** (RFC 1918,
 100.64.0.0/10, ULA, loopback); the check runs on the laptop. The edge's public
-`agent-<hash>.agents.<host>` cannot serve them. Each gateway Agent therefore gets its own
-**WireGuard** endpoint, and `/apps` hands a person a tunnel instead of an app token.
+`agent-<hash>.agents.<host>` cannot serve them, and the exception Claude Code offers
+(`gatewayInternalNetworks`) needs the laptop itself on a publicly numbered network (tested
+2026-11-12). So laptops reach a gateway over a VPN, and each person picks one on `/apps`:
+
+- **Built-in VPN (IKEv2)**, the client macOS and Windows already have: one strongSwan per
+  installation at `vpn.agents.<host>` (UDP 500/4500, Let's Encrypt certificate through the host's
+  Traefik), username and password per laptop, split tunnel to the gateway's address only.
+  Proven on macOS 2026-11-12 (profile install asks for the Mac's admin password once); Windows
+  follows Microsoft's per-user `Add-VpnConnection` and is not yet tested.
+- **WireGuard app**: each gateway Agent's own WireGuard endpoint (UDP 51830–51849).
+
+The gateway has the same private address (10.77.<n>.1) on both, so its name and certificate do
+not depend on the choice.
 
 ## Pieces
 
@@ -28,7 +39,8 @@ Claude Code and Claude Desktop accept a gateway only at a **private address** (R
 | NetworkPolicy | tenant namespace | in: only the gateway's WireGuard; out: DNS, public HTTPS (Anthropic, the installation's Keycloak), metadata address excluded |
 | Service (NodePort, `externalTrafficPolicy: Local`) | tenant namespace | the gateway's port for its WireGuard container on the `oce` Docker network |
 | `oae-claude-sync` (timer, root) | host, `deploy/oae/claude-gateway/` | per gateway Agent: Keycloak client, TLS certificate from the host CA, WireGuard + Traefik containers, peers from `/apps`; removes all of it with the Agent |
-| `/apps` "Connect Claude Code / Claude Desktop" | edge `authz/server.mjs` | makes the laptop's WireGuard key pair, records the public key for the sync, shows the hand-off once |
+| `/apps` "Connect Claude Code / Claude Desktop" | edge `authz/server.mjs` | built-in VPN: makes a username and password (macOS profile, Windows PowerShell); WireGuard: makes the key pair and keeps the public key; shows the hand-off once |
+| Built-in VPN server | host, `oae-claude-ike` + `oae-claude-ike-traefik` (image `deploy/oae/claude-gateway/ike`) | IKEv2/EAP-MSCHAPv2; one connection per laptop, limited to its gateway; removed laptops are cut off at once |
 | Host CA (name-constrained to the private domain) | host, `/opt/oae-claude/ca` (root-only) | signs each gateway's certificate; never in the cluster |
 
 ## Per gateway Agent
@@ -66,7 +78,8 @@ Claude Code settings), the Desktop bootstrap URL and the certificate fingerprint
   deploy/oae/claude-gateway/oae-claude-sync install` (the secret first in
   `/opt/oce/prod/secure/claude-kc-client-secret`). manidae-cloud does this when the OAE form has
   the Claude Gateway client, and opens UDP 51830–51849.
-- **Firewall**: inbound UDP 51830–51849 (one port per gateway, up to 20).
+- **Firewall**: inbound UDP 51830–51849 (one port per gateway, up to 20), and UDP 500 and 4500
+  for the built-in VPN.
 
 ## Lifecycle notes
 
