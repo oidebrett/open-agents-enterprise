@@ -7,7 +7,8 @@
 #                                       which the backup-job pushes to the deployment's GitHub repo)
 #   oae-backup decrypt DIR KEY OUT      decrypt a snapshot with the private key (any machine with age)
 #
-# A snapshot: db.sql.gz (pg_dump), db-roles.sql, k8s-secrets.json, one volume-<namespace>-<claim>.tar.gz
+# A snapshot: db.sql.gz (pg_dump), db-roles.sql, k8s-secrets.json, k8s-objects.json (Agent
+# namespaces and volume claims), one volume-<namespace>-<claim>.tar.gz
 # per Agent volume (SQLite files copied with SQLite's online backup, so Agents keep running) and
 # prod.tar.gz (/opt/oce/prod: installation ID, keys, values). Each is encrypted with age to the
 # public key in /opt/oce/prod/backup.recipient; the private key never comes to the server.
@@ -147,6 +148,15 @@ cmd_stage() {
           labels: .metadata.labels, annotations: ((.metadata.annotations // {}) | with_entries(select(.key | test("kubectl.kubernetes.io") | not)))}}]}' \
     > "$work/k8s-secrets.json"
   seal k8s-secrets.json "$work/k8s-secrets.json" "$new" "$out"
+  # The Agents' namespaces and volume claims (labels, sizes; no secrets): a restore recreates them
+  # and fills the volumes before the platform starts the Agents.
+  { kubectl get ns -o json | jq '[.items[] | select(.metadata.name | startswith("oce-"))
+        | {apiVersion, kind, metadata: {name: .metadata.name, labels: .metadata.labels, annotations: ((.metadata.annotations // {}) | with_entries(select(.key | test("kubectl.kubernetes.io") | not)))}}]'
+    kubectl get pvc -A -o json | jq '[.items[] | select(.metadata.namespace | startswith("oce-"))
+        | {apiVersion, kind, metadata: {name: .metadata.name, namespace: .metadata.namespace, labels: .metadata.labels},
+           spec: {accessModes: .spec.accessModes, resources: .spec.resources, storageClassName: .spec.storageClassName, volumeMode: .spec.volumeMode}}]'
+  } | jq -s '{namespaces: .[0], claims: .[1]}' > "$work/k8s-objects.json"
+  seal k8s-objects.json "$work/k8s-objects.json" "$new" "$out"
 
   # 3. Agent volumes (Claude Gateway session stores are left out: people sign in again).
   local vols; vols=$(kubectl get pv -o json | jq -c '.items[] | select(.status.phase == "Bound")
