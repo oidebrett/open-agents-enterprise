@@ -22,6 +22,12 @@ What you end up with, per OAE deployment:
 Keycloak needs a machine with Docker and a **public HTTPS name** (for example
 `keycloak.example.com`) that both people's browsers and the OAE servers can reach.
 
+Publish it **without a login page in front of it** (no proxy authentication such as Pangolin's
+resource login): the OAE servers call `/realms/*` and the Claude Gateway sync calls
+`/admin/realms/*` themselves, and a redirect to another login breaks sign-in and Claude Gateways
+(tested 2026-11-12). Keycloak's own admin login protects its admin console; if you want more,
+restrict only `/admin/master` and the admin console path, never `/realms/*`.
+
 1. Copy this directory (`compose.yaml`) to the machine.
 2. Create the secrets file (never in git):
 

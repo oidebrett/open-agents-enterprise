@@ -640,6 +640,12 @@ json.dump(s, open(p, "w"), indent=2)
 PY
 echo "Claude Code settings written to $CFG/settings.json (set CLAUDE_CONFIG_DIR to keep them elsewhere)."`;
 
+// The setup scripts keep one CA file per OAE installation (~/.claude-gateway/ca-<id>.crt) and a
+// bundle of all of them (ca.crt) that NODE_EXTRA_CA_CERTS names, so a laptop can use gateways of
+// several installations. A ca.crt from before this scheme is kept as ca-previous.crt.
+const caId = (ca) => createHash("sha256").update(ca.trim()).digest("hex").slice(0, 12);
+const sedHost = (gw) => gw.replace(/\./g, "\\.");
+
 // How to bring the connection up, as the setup scripts' last words.
 const VPN_HINT = {
   wireguard: {
@@ -659,13 +665,17 @@ function claudeScriptMac(gw, ip, fingerprint, ca, vpn = "wireguard") {
 # Claude Gateway: one-time setup for this Mac. Run: bash setup-claude-gateway-mac.sh
 set -e
 cd "$(dirname "$0")"
-grep -q " ${gw}" /etc/hosts || echo "${ip} ${gw}" | sudo tee -a /etc/hosts >/dev/null
+# This gateway's hosts line, replacing any earlier one for the same name.
+sudo sed -i '' '/[[:space:]]${sedHost(gw)}$/d' /etc/hosts
+echo "${ip} ${gw}" | sudo tee -a /etc/hosts >/dev/null
 mkdir -p ~/.claude-gateway
-cat > ~/.claude-gateway/ca.crt <<'CA'
+if [ -f ~/.claude-gateway/ca.crt ] && ! ls ~/.claude-gateway/ca-*.crt >/dev/null 2>&1; then mv ~/.claude-gateway/ca.crt ~/.claude-gateway/ca-previous.crt; fi
+cat > ~/.claude-gateway/ca-${caId(ca)}.crt <<'CA'
 ${ca.trim()}
 CA
+cat ~/.claude-gateway/ca-*.crt > ~/.claude-gateway/ca.crt
 # Name-constrained to the gateway's private domain: it cannot vouch for any other site.
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/.claude-gateway/ca.crt
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/.claude-gateway/ca-${caId(ca)}.crt
 ${settingsPython(gw)}
 grep -q NODE_EXTRA_CA_CERTS ~/.zshrc 2>/dev/null || echo 'export NODE_EXTRA_CA_CERTS=$HOME/.claude-gateway/ca.crt' >> ~/.zshrc
 # Claude Desktop's Code tab runs Claude Code without your shell's settings: give apps the CA too,
@@ -691,16 +701,20 @@ function claudeScriptLinux(gw, ip, fingerprint, ca, vpn = "wireguard") {
 # Claude Gateway: one-time setup for this Linux machine. Run: bash setup-claude-gateway-linux.sh
 set -e
 cd "$(dirname "$0")"
-grep -q " ${gw}" /etc/hosts || echo "${ip} ${gw}" | sudo tee -a /etc/hosts >/dev/null
+# This gateway's hosts line, replacing any earlier one for the same name.
+sudo sed -i '/[[:space:]]${sedHost(gw)}$/d' /etc/hosts
+echo "${ip} ${gw}" | sudo tee -a /etc/hosts >/dev/null
 mkdir -p ~/.claude-gateway
-cat > ~/.claude-gateway/ca.crt <<'CA'
+if [ -f ~/.claude-gateway/ca.crt ] && ! ls ~/.claude-gateway/ca-*.crt >/dev/null 2>&1; then mv ~/.claude-gateway/ca.crt ~/.claude-gateway/ca-previous.crt; fi
+cat > ~/.claude-gateway/ca-${caId(ca)}.crt <<'CA'
 ${ca.trim()}
 CA
+cat ~/.claude-gateway/ca-*.crt > ~/.claude-gateway/ca.crt
 # System trust (name-constrained to the gateway's private domain).
 if [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
-  sudo cp ~/.claude-gateway/ca.crt /usr/local/share/ca-certificates/claude-gateway-ca.crt && sudo update-ca-certificates >/dev/null
+  sudo cp ~/.claude-gateway/ca-${caId(ca)}.crt /usr/local/share/ca-certificates/claude-gateway-${caId(ca)}.crt && sudo update-ca-certificates >/dev/null
 elif command -v trust >/dev/null; then
-  sudo trust anchor --store ~/.claude-gateway/ca.crt
+  sudo trust anchor --store ~/.claude-gateway/ca-${caId(ca)}.crt
 else
   echo "Add ~/.claude-gateway/ca.crt to your system's trusted certificates by hand."
 fi
@@ -721,16 +735,23 @@ function claudeScriptWindows(gw, ip, fingerprint, ca, vpn = "wireguard", ike = n
 $ErrorActionPreference = 'Stop'
 $GW = '${gw}'
 $hosts = Join-Path $env:WINDIR 'System32\\drivers\\etc\\hosts'
-if (-not (Select-String -Path $hosts -Pattern (' ' + $GW) -SimpleMatch -Quiet)) { Add-Content -Path $hosts -Value ('${ip} ' + $GW) }
+# This gateway's hosts line, replacing any earlier one for the same name.
+$keep = Get-Content $hosts | Where-Object { $_ -notmatch ('\\s' + [regex]::Escape($GW) + '$') }
+Set-Content -Path $hosts -Value $keep
+Add-Content -Path $hosts -Value ('${ip} ' + $GW)
 $dir = Join-Path $env:USERPROFILE '.claude-gateway'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $caPath = Join-Path $dir 'ca.crt'
+if ((Test-Path $caPath) -and -not (Get-ChildItem $dir -Filter 'ca-*.crt')) { Move-Item $caPath (Join-Path $dir 'ca-previous.crt') }
+$mine = Join-Path $dir 'ca-${caId(ca)}.crt'
 $ca = @'
 ${ca.trim()}
 '@
-[IO.File]::WriteAllText($caPath, $ca + [Environment]::NewLine)
+[IO.File]::WriteAllText($mine, $ca + [Environment]::NewLine)
+$bundle = (Get-ChildItem $dir -Filter 'ca-*.crt' | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+[IO.File]::WriteAllText($caPath, $bundle)
 # Name-constrained to the gateway's private domain: it cannot vouch for any other site.
-Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\\LocalMachine\\Root | Out-Null
+Import-Certificate -FilePath $mine -CertStoreLocation Cert:\\LocalMachine\\Root | Out-Null
 $cfg = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
 New-Item -ItemType Directory -Force -Path $cfg | Out-Null
 $sp = Join-Path $cfg 'settings.json'

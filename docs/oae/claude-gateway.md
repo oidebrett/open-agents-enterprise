@@ -26,8 +26,20 @@ Claude Code and Claude Desktop accept a gateway only at a **private address** (R
   follows Microsoft's per-user `Add-VpnConnection` and is not yet tested.
 - **WireGuard app**: each gateway Agent's own WireGuard endpoint (UDP 51830–51849).
 
-The gateway has the same private address (10.77.<n>.1) on both, so its name and certificate do
-not depend on the choice.
+The gateway has the same private address on both (`<CLAUDE_NET>.<n>.1`), so its name and
+certificate do not depend on the choice. Each installation picks its own `CLAUDE_NET` (10.64 to
+10.191, from its installation ID; installs before 2026-11-12 keep 10.77), so a laptop connected to
+two OAE installations does not see one address twice. The laptop scripts keep one CA file per
+installation plus a bundle (`~/.claude-gateway/ca.crt`) and replace a gateway's hosts line rather
+than adding another.
+
+## How many gateways
+
+One per installation is the normal case: one gateway serves everyone granted, signs each person
+in, logs per person and can give Keycloak groups different models. Claude Desktop holds one
+gateway at a time anyway. Add another only for a separate Anthropic key (billing), separate PII
+rules, or groups that must not share one. Several gateways work (each its own address, WireGuard
+port and Keycloak client; the built-in VPN limits each laptop to its own gateway).
 
 ## Pieces
 
@@ -84,6 +96,8 @@ Claude Code settings), the Desktop bootstrap URL and the certificate fingerprint
 ## Lifecycle notes
 
 - The sync restarts a gateway whose sign-in Secret changed (the gateway reads it at start).
+- The sync stops with an error when it gets no Keycloak token (for example a login page in front
+  of Keycloak), instead of writing empty sign-in settings.
 - Deleting the Agent removes its workload (controller), then within a minute its WireGuard and
   Traefik containers, Keycloak client, certificate, sync-made Secrets and laptop peers (sync).
   Its volume stays until the Namespace is deleted, as for other Agents.
