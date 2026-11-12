@@ -6,6 +6,8 @@
 #   oae-backup stage [--out DIR]        write one encrypted snapshot (default: <setup stack>/config/oae,
 #                                       which the backup-job pushes to the deployment's GitHub repo)
 #   oae-backup decrypt DIR KEY OUT      decrypt a snapshot with the private key (any machine with age)
+#   oae-backup restore DIR --yes        restore a DECRYPTED snapshot onto a fresh OAE install of the same
+#                                       name (docs/oae/backup.md); replaces this installation's state
 #
 # A snapshot: db.sql.gz (pg_dump), db-roles.sql, k8s-secrets.json, k8s-objects.json (Agent
 # namespaces and volume claims), one volume-<namespace>-<claim>.tar.gz
@@ -207,9 +209,107 @@ cmd_decrypt() {
   log "decrypted $(ls "$dir"/*.age | wc -l) files into $out"
 }
 
+
+# A short-lived Pod that mounts claim CLAIM in NS on NODE and unpacks ARCHIVE into it, as the Agents'
+# user (1000) under the namespace's restricted Pod Security.
+HELPER_IMAGE=docker.io/curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
+fill_claim() {
+  local ns=$1 claim=$2 node=$3 archive=$4 pod
+  pod="oae-restore-$(printf %s "$claim" | sha256sum | cut -c1-10)"
+  kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait >/dev/null
+  kubectl -n "$ns" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata: { name: $pod, labels: { app.kubernetes.io/managed-by: oae-backup } }
+spec:
+  restartPolicy: Never
+  nodeSelector: { kubernetes.io/hostname: "$node" }
+  securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+  containers:
+    - name: restore
+      image: $HELPER_IMAGE
+      command: ["sleep", "3600"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
+      volumeMounts: [{ name: data, mountPath: /data }]
+  volumes: [{ name: data, persistentVolumeClaim: { claimName: $claim } }]
+YAML
+  kubectl -n "$ns" wait --for=condition=Ready "pod/$pod" --timeout=300s >/dev/null || die "restore helper for $ns/$claim did not start"
+  kubectl -n "$ns" exec "$pod" -- sh -c 'find /data -mindepth 1 -delete 2>/dev/null; true'
+  kubectl -n "$ns" exec -i "$pod" -- tar -xzf - -C /data < "$archive"
+  kubectl -n "$ns" exec "$pod" -- sh -c 'find /data -type f | wc -l' | xargs -I{} log "  $ns/$claim: {} files restored"
+  kubectl -n "$ns" delete pod "$pod" --wait >/dev/null
+}
+
+cmd_restore() {
+  [ "$(id -u)" = 0 ] || die "run as root"
+  local dir=${1:?DIR (a decrypted snapshot)}; shift || true
+  [ "${1:-}" = --yes ] || die "this replaces the installation's database, Secrets, Agent volumes and keys: add --yes"
+  local f; for f in manifest.json db.sql.gz k8s-secrets.json k8s-objects.json prod.tar.gz; do
+    [ -s "$dir/$f" ] || die "$dir/$f missing (decrypt first: oae-backup decrypt)"; done
+  . /opt/oce/env.sh
+  export KUBECONFIG=${KUBECONFIG:-$PROD/kubeconfig}
+  local host old_host db
+  host=$(sed -n 's/^OAE_HOST=//p' $PROD/edge.env 2>/dev/null); old_host=$(jq -r .host "$dir/manifest.json"); db=$(jq -r .database "$dir/manifest.json")
+  [ -z "$old_host" ] || [ "$host" = "$old_host" ] || die "this server is $host, the backup is of $old_host: restore onto a deployment with the same name"
+  log "restoring $(jq -r .finished "$dir/manifest.json") snapshot of $old_host (installation $(jq -r .installationId "$dir/manifest.json"))"
+
+  # 1. Pause what writes: OAE's timers, the platform.
+  local timers="oae-edge-sync.timer oae-claude-sync.timer oae-backup.timer oce-tenant-rbac.timer"
+  systemctl stop $timers 2>/dev/null || true
+  kubectl -n openclaw-system scale deploy --all --replicas=0 >/dev/null
+  kubectl -n openclaw-system wait --for=delete pod -l app.kubernetes.io/name=openclaw-enterprise --timeout=180s >/dev/null 2>&1 || true
+  log "platform paused"
+
+  # 2. This server's state from the backup: installation ID, keys, sign-in secrets, Claude Gateway CA,
+  #    VPN keys and tunnel range. Kept: the new database passwords and URLs, cluster access, Helm
+  #    values and the new backup key.
+  local t; t=$(mktemp -d /var/tmp/oae-restore.XXXXXX); trap 'rm -rf "$t"' EXIT
+  tar -xzf "$dir/prod.tar.gz" -C "$t"
+  local old=$t/opt/oce/prod
+  cp -a "$PROD" "$PROD.before-restore.$(date +%s)"
+  install -m 600 "$old/installation-id" $PROD/installation-id
+  for f in "$old"/secure/*; do
+    case $(basename "$f") in occ-application-url|occ-migration-url) continue ;; esac
+    install -m 600 "$f" "$PROD/secure/$(basename "$f")"
+  done
+  [ -f "$old/claude.env" ] && install -m 600 "$old/claude.env" $PROD/claude.env
+  [ -f "$old/edge-state.json" ] && install -m 600 "$old/edge-state.json" $PROD/edge-state.json
+  if [ -d "$old/claude" ]; then rm -rf $PROD/claude; cp -a "$old/claude" $PROD/claude; fi
+  log "server keys and state restored (previous copy in $PROD.before-restore.*)"
+
+  # 3. The database: installation ID, Namespaces, Agents, people, audit.
+  docker exec oce-postgres psql -U postgres -v ON_ERROR_STOP=1 -q -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE)" -c "CREATE DATABASE \"$db\""
+  gunzip -c "$dir/db.sql.gz" | docker exec -i oce-postgres psql -U postgres -d "$db" -v ON_ERROR_STOP=1 -q >/dev/null
+  log "database $db restored"
+
+  # 4. Namespaces and volume claims, then Secrets (the platform's except the new database's).
+  jq -c '.namespaces[]' "$dir/k8s-objects.json" | while read -r o; do kubectl apply -f - <<<"$o" >/dev/null; done
+  jq '{apiVersion: "v1", kind: "List", items: [.items[] | select(.metadata.namespace != "openclaw-system" or (.metadata.name | test("^occ-database") | not))]}' \
+    "$dir/k8s-secrets.json" | kubectl apply --server-side --force-conflicts -f - >/dev/null
+  log "Secrets restored ($(jq '.items | length' "$dir/k8s-secrets.json") in the backup, the new database's kept)"
+  jq -c '.claims[]' "$dir/k8s-objects.json" | while read -r o; do
+    kubectl apply -f - <<<"$o" >/dev/null
+  done
+
+  # 5. Each Agent's volume, before its Agent starts.
+  jq -c '.volumes[]' "$dir/manifest.json" | while read -r v; do
+    local ns claim node file
+    ns=$(jq -r .ns <<<"$v"); claim=$(jq -r .claim <<<"$v"); node=$(jq -r .node <<<"$v"); file=$(jq -r '.file | sub("\\.age$"; "")' <<<"$v")
+    [ -s "$dir/$file" ] || { log "WARNING: $file missing, $ns/$claim left empty"; continue; }
+    fill_claim "$ns" "$claim" "$node" "$dir/$file"
+  done
+
+  # 6. Start the platform and the timers; the platform brings the Agents back.
+  kubectl -n openclaw-system scale deploy --all --replicas=1 >/dev/null
+  kubectl -n openclaw-system rollout status deploy/openclaw-enterprise-api --timeout=300s >/dev/null || log "WARNING: the API is slow to start"
+  systemctl start $timers 2>/dev/null || true
+  log "restored: the platform is starting the Agents; check them in the console"
+}
+
 case "${1:-}" in
   install) shift; cmd_install "$@" ;;
   stage) shift; cmd_stage "$@" ;;
   decrypt) shift; cmd_decrypt "$@" ;;
-  *) sed -n '2,15p' "$0"; exit 2 ;;
+  restore) shift; cmd_restore "$@" ;;
+  *) sed -n '2,17p' "$0"; exit 2 ;;
 esac
