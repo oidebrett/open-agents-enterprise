@@ -2163,17 +2163,6 @@ function renderAgentForm(
   // A refused Installation read stays refused: its access block offers a permission reread instead.
   const retryCapabilityDiscovery = button("Retry capability check", () => {
     void loadInstallationCapabilities();
-    void (async () => {
-      try {
-        const capabilities = responseFields(await request("/oae/api/capabilities"));
-        if (capabilities.claudeGateway === true && context.isCurrent()) {
-          claudeGatewayAvailable = true;
-          updateControls();
-        }
-      } catch {
-        // No edge (no single sign-on): no Claude Gateway.
-      }
-    })();
   });
   const recoveryMessage = element("p", { className: "muted" });
   const requireRepositoryReload = () => {
@@ -3429,6 +3418,18 @@ function renderAgentForm(
     }
   }
   void loadInstallationCapabilities();
+  // OAE: Claude Gateway only where the edge reports its sync (GET /oae/api/capabilities).
+  void (async () => {
+    try {
+      const capabilities = responseFields(await request("/oae/api/capabilities"));
+      if (capabilities.claudeGateway === true && context.isCurrent()) {
+        claudeGatewayAvailable = true;
+        updateControls();
+      }
+    } catch {
+      // No edge (no single sign-on): no Claude Gateway.
+    }
+  })();
   async function submitProvisioningAttempt(attempt: ProvisioningAttempt, retryUrl?: string) {
     // A retry of a job known to have failed. Read before the request: an admitted first
     // attempt also gains a retry URL, and after an unknown outcome the job may have
