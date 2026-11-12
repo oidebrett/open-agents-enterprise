@@ -1,0 +1,205 @@
+#!/bin/bash
+# oae-backup — encrypted snapshots of an OAE installation for manidae-cloud's backup-job
+# (docs/oae/backup.md). Run as root on the OAE server.
+#
+#   oae-backup install                  age (pinned), the timer (every 6 hours)
+#   oae-backup stage [--out DIR]        write one encrypted snapshot (default: <setup stack>/config/oae,
+#                                       which the backup-job pushes to the deployment's GitHub repo)
+#   oae-backup decrypt DIR KEY OUT      decrypt a snapshot with the private key (any machine with age)
+#
+# A snapshot: db.sql.gz (pg_dump), db-roles.sql, k8s-secrets.json, one volume-<namespace>-<claim>.tar.gz
+# per Agent volume (SQLite files copied with SQLite's online backup, so Agents keep running) and
+# prod.tar.gz (/opt/oce/prod: installation ID, keys, values). Each is encrypted with age to the
+# public key in /opt/oce/prod/backup.recipient; the private key never comes to the server.
+# manifest.json (plain) lists what is inside. An unchanged file keeps last run's ciphertext, so git
+# stores it once.
+set -euo pipefail
+umask 077
+PROD=/opt/oce/prod
+TOOLS=/opt/oce/tools/bin
+RECIPIENT=$PROD/backup.recipient
+CACHE=$PROD/backup-cache
+AGE_VERSION=v1.2.1
+# (case, not an associative array: decrypt also runs on macOS's bash 3.2)
+age_sha256() {
+  case $1 in
+    amd64) echo 7df45a6cc87d4da11cc03a539a7470c15b1041ab2b396af088fe9990f7c79d50 ;;
+    arm64) echo 57fd79a7ece5fe501f351b9dd51a82fbee1ea8db65a8839db17f5c080245e99f ;;
+  esac
+}
+log() { echo "oae-backup: $*"; }
+die() { log "ERROR: $*"; exit 1; }
+age_bin() { command -v age 2>/dev/null || { [ -x $TOOLS/age ] && echo $TOOLS/age; } || die "age is not installed (oae-backup install)"; }
+
+cmd_install() {
+  [ "$(id -u)" = 0 ] || die "run as root"
+  local arch; case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported $(uname -m)" ;; esac
+  if [ ! -x $TOOLS/age ]; then
+    local t; t=$(mktemp -d)
+    curl -fsSL -o "$t/age.tgz" "https://github.com/FiloSottile/age/releases/download/$AGE_VERSION/age-$AGE_VERSION-linux-$arch.tar.gz"
+    echo "$(age_sha256 $arch)  $t/age.tgz" | sha256sum -c --quiet || die "age download checksum mismatch"
+    tar -xzf "$t/age.tgz" -C "$t"; mkdir -p $TOOLS; install -m 755 "$t/age/age" $TOOLS/age; rm -rf "$t"
+  fi
+  [ -s $RECIPIENT ] || die "put the backup public key (age1...) in $RECIPIENT"
+  grep -qE '^age1[0-9a-z]{58}$' $RECIPIENT || die "$RECIPIENT is not an age public key"
+  install -m 755 "$(readlink -f "$0")" /usr/local/bin/oae-backup
+  cat > /etc/systemd/system/oae-backup.service <<'EOF'
+[Unit]
+Description=OAE encrypted snapshot for the backup-job
+After=docker.service
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/local/bin/oae-backup stage
+EOF
+  cat > /etc/systemd/system/oae-backup.timer <<'EOF'
+[Unit]
+Description=OAE encrypted snapshot every 6 hours
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload && systemctl enable --now oae-backup.timer
+  log "installed (age $AGE_VERSION, snapshot every 6 hours)"
+}
+
+# The host path of a local-path volume: PVs live inside the k3d node container, whose
+# /var/lib/rancher/k3s is a Docker volume.
+host_path() {
+  local node=$1 path=$2 src
+  src=$(docker inspect "$node" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/rancher/k3s"}}{{.Source}}{{end}}{{end}}')
+  [ -n "$src" ] || return 1
+  echo "$src${path#/var/lib/rancher/k3s}"
+}
+
+# copy_volume SRC DST: files as they are, SQLite databases through SQLite's online backup (a
+# consistent copy while the Agent writes), never their -wal/-shm files.
+copy_volume() {
+  local src=$1 dst=$2
+  mkdir -p "$dst"
+  (cd "$src" && find . -type f ! -name '*-wal' ! -name '*-shm' -print0) | while IFS= read -r -d '' f; do
+    mkdir -p "$dst/$(dirname "$f")"
+    if [ "$(head -c 15 "$src/$f" 2>/dev/null)" = "SQLite format 3" ]; then
+      python3 - "$src/$f" "$dst/$f" <<'PY' || cp -p "$src/$f" "$dst/$f"
+import sqlite3, sys
+s = sqlite3.connect(sys.argv[1], timeout=30)
+d = sqlite3.connect(sys.argv[2])
+s.backup(d)
+d.close(); s.close()
+PY
+    else
+      cp -p "$src/$f" "$dst/$f"
+    fi
+  done
+  (cd "$src" && find . -type d -empty -print0) | (cd "$dst" && xargs -0 -r mkdir -p)
+}
+
+# seal NAME PLAINFILE OUTDIR OLDDIR: encrypt, or reuse last run's ciphertext if unchanged.
+seal() {
+  local name=$1 plain=$2 out=$3 old=$4 sum
+  sum=$(sha256sum "$plain" | cut -d' ' -f1)
+  if [ -f "$CACHE/$name.sha256" ] && [ "$(cat "$CACHE/$name.sha256")" = "$sum" ] && [ -f "$old/$name.age" ]; then
+    cp -p "$old/$name.age" "$out/$name.age"
+  else
+    "$AGE" -R "$RECIPIENT" -o "$out/$name.age" "$plain"
+    echo "$sum" > "$CACHE/$name.sha256"
+  fi
+  rm -f "$plain"
+}
+
+cmd_stage() {
+  [ "$(id -u)" = 0 ] || die "run as root"
+  local out=""
+  [ "${1:-}" = --out ] && out=${2:?--out DIR}
+  if [ -z "$out" ]; then
+    local stack; stack=$(ls -d /etc/komodo/stacks/*_setup-stack 2>/dev/null | head -1)
+    [ -n "$stack" ] || die "no setup stack (backups come with support Level 2 or 3); use --out"
+    out=$stack/config/oae
+  fi
+  [ -s $RECIPIENT ] || die "no backup public key in $RECIPIENT"
+  AGE=$(age_bin)
+  exec 9>/run/oae-backup.lock; flock -n 9 || die "another snapshot is running"
+  . /opt/oce/env.sh
+  export KUBECONFIG=${KUBECONFIG:-$PROD/kubeconfig}
+  mkdir -p "$CACHE" "$(dirname "$out")"
+  # Globals: the EXIT trap runs after this function has returned.
+  NEW="$out.new"; WORK=$(mktemp -d /var/tmp/oae-backup.XXXXXX)
+  local new=$NEW work=$WORK
+  trap 'rm -rf "$WORK" "$NEW"' EXIT
+  rm -rf "$new"; mkdir -p "$new"
+  local started; started=$(date -u +%FT%TZ)
+
+  # 1. The platform database, and its roles (passwords excluded).
+  local db; db=$(docker exec oce-postgres psql -U postgres -Atc "select datname from pg_database where datname not in ('postgres') and not datistemplate" | head -1)
+  # Plain SQL with a fixed \restrict key: unlike the custom format and the default random key it
+  # carries nothing that changes per run, so an unchanged database keeps its ciphertext.
+  docker exec oce-postgres pg_dump -U postgres --no-comments --restrict-key=oaebackup "$db" | gzip -n > "$work/db.sql.gz"
+  docker exec oce-postgres pg_dumpall -U postgres --globals-only --no-role-passwords --no-comments --restrict-key=oaebackup > "$work/db-roles.sql"
+  seal db.sql.gz "$work/db.sql.gz" "$new" "$out"; seal db-roles.sql "$work/db-roles.sql" "$new" "$out"
+
+  # 2. Kubernetes Secrets: Agents' credentials (tenant namespaces), the platform's, the edge's.
+  kubectl get secret -A -o json | jq '{items: [.items[]
+      | select(.metadata.namespace == "openclaw-system" or .metadata.namespace == "oae-edge" or (.metadata.namespace | startswith("oce-")))
+      | select(.type != "kubernetes.io/service-account-token" and (.type | startswith("helm.sh/") | not))
+      | {apiVersion, kind, type, data, metadata: {name: .metadata.name, namespace: .metadata.namespace,
+          labels: .metadata.labels, annotations: ((.metadata.annotations // {}) | with_entries(select(.key | test("kubectl.kubernetes.io") | not)))}}]}' \
+    > "$work/k8s-secrets.json"
+  seal k8s-secrets.json "$work/k8s-secrets.json" "$new" "$out"
+
+  # 3. Agent volumes (Claude Gateway session stores are left out: people sign in again).
+  local vols; vols=$(kubectl get pv -o json | jq -c '.items[] | select(.status.phase == "Bound")
+      | select((.spec.claimRef.namespace | startswith("oce-")) and (.spec.claimRef.name | startswith("claude-gw-") | not))
+      | {ns: .spec.claimRef.namespace, claim: .spec.claimRef.name, size: .spec.capacity.storage,
+         node: .spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0],
+         path: (.spec.local.path // .spec.hostPath.path)}')
+  local claims='[]'
+  while read -r v; do
+    [ -n "$v" ] || continue
+    local ns claim node path src name
+    ns=$(jq -r .ns <<<"$v"); claim=$(jq -r .claim <<<"$v"); node=$(jq -r .node <<<"$v"); path=$(jq -r .path <<<"$v")
+    src=$(host_path "$node" "$path") || { log "WARNING: no host path for $ns/$claim"; continue; }
+    [ -d "$src" ] || { log "WARNING: $src missing for $ns/$claim"; continue; }
+    name="volume-$ns-$claim.tar.gz"
+    copy_volume "$src" "$work/vol"
+    tar -C "$work/vol" --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - . | gzip -n > "$work/$name"
+    rm -rf "$work/vol"
+    seal "$name" "$work/$name" "$new" "$out"
+    claims=$(jq -c --argjson v "$v" --arg f "$name.age" '. + [$v + {file: $f} | del(.path)]' <<<"$claims")
+  done <<<"$vols"
+
+  # 4. The server's own state (installation ID, keys, sign-in secrets, Claude Gateway CA/VPN keys).
+  tar -C / --sort=name --mtime='@0' --exclude='opt/oce/prod/backup-cache' -cf - opt/oce/prod | gzip -n > "$work/prod.tar.gz"
+  seal prod.tar.gz "$work/prod.tar.gz" "$new" "$out"
+
+  # 5. What is inside (plain: no secrets).
+  jq -n --arg started "$started" --arg finished "$(date -u +%FT%TZ)" \
+    --arg host "$(sed -n 's/^OAE_HOST=//p' $PROD/edge.env 2>/dev/null)" \
+    --arg installation "$(cat $PROD/installation-id 2>/dev/null)" \
+    --arg ref "$(git -C /opt/oce/src rev-parse HEAD 2>/dev/null)" \
+    --arg recipient "$(cat $RECIPIENT)" --arg db "$db" --argjson volumes "$claims" \
+    '{format: 1, started: $started, finished: $finished, host: $host, installationId: $installation,
+      oaeRef: $ref, database: $db, recipient: $recipient, volumes: $volumes,
+      decrypt: "oae-backup decrypt <this dir> <private key file> <out dir>, or age -d -i <key> <file>.age"}' > "$new/manifest.json"
+  chmod 644 "$new"/*; chmod 755 "$new"
+
+  rm -rf "$out"; mv "$new" "$out"
+  log "snapshot in $out: $(ls "$out" | wc -l) files, $(du -sh "$out" | cut -f1), $(jq length <<<"$claims") Agent volume(s)"
+}
+
+cmd_decrypt() {
+  local dir=${1:?DIR} key=${2:?KEY} out=${3:?OUT} f
+  AGE=$(age_bin)
+  mkdir -p "$out"
+  for f in "$dir"/*.age; do "$AGE" -d -i "$key" -o "$out/$(basename "${f%.age}")" "$f"; done
+  cp "$dir/manifest.json" "$out/" 2>/dev/null || true
+  log "decrypted $(ls "$dir"/*.age | wc -l) files into $out"
+}
+
+case "${1:-}" in
+  install) shift; cmd_install "$@" ;;
+  stage) shift; cmd_stage "$@" ;;
+  decrypt) shift; cmd_decrypt "$@" ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
+esac
