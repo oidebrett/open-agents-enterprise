@@ -1,13 +1,22 @@
 ---
 name: oae-upstream-sync
-description: Check how far Open Agents Enterprise (the `oae` branch) is behind upstream OpenClaw Enterprise, report what a merge involves (conflicts, fork commits upstream now has, relevant fixes and RFCs), and when asked, carry out the merge on a sync branch. Run it periodically (every week or two) or when upstream publishes new images.
+description: Periodically compare Open Agents Enterprise (the `oae` branch) with upstream OpenClaw Enterprise, sort upstream changes into take / replaces-ours / keep-ours-aligned, report what a merge involves, and when asked carry out the merge on a sync branch and verify it on the Oracle testbed (oae-upgrade) before it reaches `oae` and manidae-cloud. Run every week or two, or when upstream publishes new images.
 ---
 
 # OAE upstream sync
 
+**The goal.** OAE stays as close to OCE as it can while being a superset of it. The shared platform
+(control plane, console, IAM, Kubernetes driver, OpenClaw, channels, upgrades) follows upstream;
+OAE adds what OCE's OpenClaw-and-OpenAI focus will likely never carry: Hermes, the Claude Code
+harness, Claude Gateway, people's access through the edge and `/apps`, the OpenAI-compatible
+provider, Teams on Embedded Agents, backups and manidae packaging. Every sync asks three questions
+of each upstream change: **take it**, **does it replace something of ours**, and **how do we keep
+ours aligned**.
+
 The fork rules are in `OAE.md` (add, don't edit; upstream first; `sync/upstream-*` branches). This
-skill applies them. Two modes: **report** (default, read-only) and **merge** (only when the user
-asks for it after reading a report).
+skill applies them. Modes: **report** (default, read-only), then **merge** and **verify on the
+testbed** (only when the user asks, after reading a report). The testbed is in
+`docs/oae/testbed.md`.
 
 ## 1. Report (always first)
 
@@ -25,7 +34,15 @@ It fetches `upstream` and `origin`, then prints (read-only; a throwaway worktree
 - upstream commits worth reading (security, OIDC/sessions, Kubernetes, Helm, migrations,
   channels, harnesses) and RFCs added or changed.
 
-Turn it into a short note for the user, in plain language:
+Turn it into a short note for the user, in plain language, with one table that sorts what matters:
+
+| Class                | Meaning                                                                                                                                  | Action                                                                                                                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Take**             | Upstream fixes and features in the shared platform (security, sign-in, Kubernetes, Helm, migrations, console, OpenClaw)                  | Merge as is                                                                                                                                                                               |
+| **Replaces ours**    | Upstream now does something OAE built (e.g. its OIDC Agent chat vs our edge; reusable model providers vs our OpenAI-compatible provider) | Read the RFC and code; if it covers our use, plan to move onto it and retire ours in a follow-up, keeping our extras as a thin layer on top                                               |
+| **Keep ours, align** | OAE-only capabilities upstream will not carry (Hermes, Claude Gateway, `/apps`, backups)                                                 | Keep them in OAE-owned files; when upstream changes a seam they use (harness resolver, Compute Driver, trusted-proxy auth), move our hook onto the new seam instead of patching around it |
+
+Then:
 
 1. **Can we move?** `oae` must sit on an upstream commit whose runtime image exists, unless OAE
    builds that runtime image itself (`deploy/oae/runtime-claude` extends upstream's runtime; see
@@ -75,12 +92,29 @@ Run the same conformance suite on the target upstream commit as well and compare
 test names: only failures new on the sync branch count (some tests need SSH, TLS or sockets a
 container lacks and fail on both).
 
-Commit the merge listing each resolution, push `sync/upstream-<sha>`, build images from it, deploy
-to the test box (the Oracle OAE; confirm its address with the user first) and check: console
-sign-in, create and deploy an OpenClaw, a Hermes and a Claude Gateway Agent, `/apps`, a phone or
-Hermes Desktop connection, one Claude Code session through a gateway. Only then
-`git checkout oae && git merge --ff-only sync/upstream-<sha>`, push, and drop fork commits and
-docs the merge made redundant in follow-up commits. Update `OAE.md`'s "Base today" line.
+Commit the merge listing each resolution, push `sync/upstream-<sha>`, and build its controller and
+edge images (multi-arch, pushed by digest; `OAE.md`).
+
+## 3. Verify on the testbed (only when asked)
+
+The Oracle OAE (`docs/oae/testbed.md`). Confirm its address with the user before connecting, and
+never touch the AgentGateway beside it.
+
+```bash
+# on the box: deploy-by-git, as oae-upgrade does (it fetches the commit itself)
+sudo oae-upgrade status
+sudo oae-upgrade apply --ref <sync branch sha> --controller <image@sha256:…> --edge <image@sha256:…>
+```
+
+Run the testbed's verification checklist (`docs/oae/testbed.md`) and report each item. On any
+failure: `sudo oae-upgrade rollback`, fix on the sync branch, repeat. A sync that adds database
+migrations cannot be rolled back by images: export the database first (the testbed doc says how).
+
+Only when the checklist passes: `git checkout oae && git merge --ff-only sync/upstream-<sha>`,
+push, then in follow-up commits drop fork code the merge made redundant (the "replaces ours"
+items, once verified) and update `OAE.md`'s "Base today" line. Then, separately and with the user,
+pin the new commit and images in manidae-cloud (`oce.py`) and deploy preprod. Leave the testbed on
+the merged version.
 
 ## Don'ts
 
@@ -88,4 +122,7 @@ docs the merge made redundant in follow-up commits. Update `OAE.md`'s "Base toda
 - Don't rewrite or force-push `oae` or `main`.
 - Don't pull in an upstream commit without published runtime images unless OAE builds the
   runtime image from that commit.
-- Don't bump manidae-cloud's OAE pin until the sync branch is deployed and checked.
+- Don't bump manidae-cloud's OAE pin until the sync branch passed the testbed checklist.
+- Don't reinstall the testbed to test a candidate: `oae-upgrade` keeps its state; reinstall only
+  when it is beyond repair (`docs/oae/testbed.md`).
+- Don't install `oae-backup` on the testbed: its default folder is the AgentGateway's backups.

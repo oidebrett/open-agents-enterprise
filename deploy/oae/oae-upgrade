@@ -1,0 +1,111 @@
+#!/bin/bash
+# oae-upgrade — move an installed OAE to another commit and its images in place, keeping its data
+# (docs/oae/testbed.md). Run as root on the OAE server. The Oracle testbed uses it to verify
+# upstream merges (.claude/skills/oae-upstream-sync) before they reach manidae-cloud.
+#
+#   oae-upgrade status
+#   oae-upgrade apply --ref SHA --controller IMAGE@sha256:… --edge IMAGE@sha256:… [--runtime IMAGE@sha256:…]
+#   oae-upgrade rollback        back to the version before the last apply
+#
+# apply checks out SHA in /opt/oce/src (fetched by URL), rebuilds the occ CLI, renders the installation
+# profile with the new images and runs helm upgrade (the same steps as the install), then updates the
+# edge and the host helpers (oae-edge, oae-claude-sync, oae-backup) from that checkout. Each apply is
+# recorded in /opt/oce/prod/upgrade-history.jsonl. The database is migrated forward by the new
+# controller: a rollback across a migration needs the database from before it (oae-backup).
+set -euo pipefail
+PROD=/opt/oce/prod
+SRC=/opt/oce/src
+REPO=${OAE_REPO:-https://github.com/oidebrett/open-agents-enterprise.git}
+HISTORY=$PROD/upgrade-history.jsonl
+log() { echo "oae-upgrade: $*"; }
+die() { log "ERROR: $*"; exit 1; }
+need_digest() { [[ $1 =~ ^[a-z0-9./-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]] || die "$2 must be pinned by digest: $1"; }
+
+current() {
+  jq -nc --arg ref "$(git -C $SRC rev-parse HEAD)" \
+    --arg controller "$(jq -r .controlPlane.controllerImage $PROD/occ/profile-input.json)" \
+    --arg runtime "$(jq -r .runtime.image $PROD/occ/profile-input.json)" \
+    --arg edge "$(sed -n 's/^OAE_EDGE_IMAGE=//p' $PROD/edge.env 2>/dev/null)" \
+    '{ref: $ref, controller: $controller, runtime: $runtime, edge: $edge}'
+}
+
+cmd_status() {
+  current | jq .
+  [ -s $HISTORY ] && { echo "last applies:"; tail -3 $HISTORY | jq -c '{at, to: .to.ref[0:8], from: .from.ref[0:8]}'; }
+  . /opt/oce/env.sh
+  kubectl -n openclaw-system get deploy -o custom-columns=NAME:.metadata.name,READY:.status.readyReplicas --no-headers
+}
+
+apply_version() {  # apply_version REF CONTROLLER RUNTIME EDGE
+  local ref=$1 controller=$2 runtime=$3 edge=$4 host
+  . /opt/oce/env.sh
+  host=$(jq -r .controlPlane.authBaseUrl $PROD/occ/profile-input.json); host=${host#https://}
+  local from; from=$(current)
+
+  # 1. The checkout and its CLI.
+  [ -z "$(git -C $SRC status --porcelain --untracked-files=no)" ] || die "$SRC has local changes"
+  git -C $SRC fetch -q "$REPO" "$ref" 2>/dev/null || git -C $SRC fetch -q "$REPO"
+  git -C $SRC checkout -q --detach "$ref"
+  (cd $SRC && go build -trimpath -o bin/occ ./cmd/occ)
+  log "checkout $(git -C $SRC rev-parse --short HEAD)"
+
+  # 2. The platform: the install's own steps with the new images.
+  local P=$PROD
+  jq --arg c "$controller" --arg r "$runtime" '.controlPlane.controllerImage = $c | .runtime.image = $r' \
+    $P/occ/profile-input.json > $P/occ/profile-input.next.json
+  mv $P/occ/profile-input.next.json $P/occ/profile-input.json
+  (cd $SRC && node scripts/render-installation-profile.mjs --profile openclaw --input $P/occ/profile-input.json \
+    --out-dir $P/occ) >/dev/null || { cat $P/occ/preflight.json; die "profile rendering failed"; }
+  (cd $SRC && helm upgrade oce deploy/helm/openclaw-enterprise --kube-context "$(kubectl config current-context)" \
+    --namespace openclaw-system -f $P/occ/values.yaml -f $P/occ/site-values.yaml --wait --timeout 15m) >/dev/null
+  log "platform upgraded (controller ${controller##*@sha256:} )"
+
+  # 3. The edge and the host helpers, from the same checkout.
+  if [ -f $P/edge.env ]; then
+    sed -i "s#^OAE_EDGE_IMAGE=.*#OAE_EDGE_IMAGE=$edge#" $P/edge.env
+    install -m 755 $SRC/deploy/oae/edge/oae-edge /usr/local/bin/oae-edge
+    /usr/local/bin/oae-edge install >/dev/null
+    kubectl -n oae-edge rollout status deploy/oae-edge-authz --timeout=300s >/dev/null
+    log "edge upgraded"
+  fi
+  [ -e /usr/local/bin/oae-claude-sync ] && install -m 755 $SRC/deploy/oae/claude-gateway/oae-claude-sync /usr/local/bin/oae-claude-sync
+  [ -e /usr/local/bin/oae-backup ] && install -m 755 $SRC/deploy/oae/backup/oae-backup /usr/local/bin/oae-backup
+
+  # 4. Record, then a first check.
+  jq -nc --arg at "$(date -u +%FT%TZ)" --argjson from "$from" --argjson to "$(current)" \
+    '{at: $at, from: $from, to: $to}' >> $HISTORY
+  local code; code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "https://$host/console/" || true)
+  log "done: console https://$host/console/ answers $code"
+}
+
+cmd_apply() {
+  [ "$(id -u)" = 0 ] || die "run as root"
+  local ref="" controller="" edge="" runtime=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --ref) ref=$2; shift 2 ;; --controller) controller=$2; shift 2 ;;
+      --edge) edge=$2; shift 2 ;; --runtime) runtime=$2; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  [[ $ref =~ ^[0-9a-f]{40}$ ]] || die "--ref must be a full commit SHA"
+  need_digest "$controller" --controller; need_digest "$edge" --edge
+  [ -n "$runtime" ] || runtime=$(jq -r .runtime.image $PROD/occ/profile-input.json)
+  need_digest "$runtime" --runtime
+  apply_version "$ref" "$controller" "$runtime" "$edge"
+}
+
+cmd_rollback() {
+  [ "$(id -u)" = 0 ] || die "run as root"
+  [ -s $HISTORY ] || die "no apply recorded"
+  local prev; prev=$(tail -1 $HISTORY | jq -c .from)
+  log "rolling back to $(jq -r '.ref[0:8]' <<<"$prev")"
+  apply_version "$(jq -r .ref <<<"$prev")" "$(jq -r .controller <<<"$prev")" "$(jq -r .runtime <<<"$prev")" "$(jq -r .edge <<<"$prev")"
+}
+
+case "${1:-}" in
+  status) cmd_status ;;
+  apply) shift; cmd_apply "$@" ;;
+  rollback) cmd_rollback ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
+esac
