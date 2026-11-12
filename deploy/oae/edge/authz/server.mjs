@@ -14,7 +14,7 @@
 //   makes every OCE change (accounts, SSO identity, AccessBindings) with that session, and the edge
 //   only looks people up in the directory and records which SSO subject an OCE Principal is.
 import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
 import * as oidc from "openid-client";
@@ -992,6 +992,11 @@ async function consoleApi(req, res, url) {
   const fail = (status, message) => json(status, { error: { code: status === 403 ? "FORBIDDEN" : "OAE_EDGE", message } });
   if (req.method !== "GET" && (req.headers.origin !== OCE_URL || !/^application\/json\b/.test(String(req.headers["content-type"] ?? "")))) {
     return fail(403, "Cross-origin request refused.");
+  }
+  // What this installation offers the Create Agent form (no secrets, so no administrator check):
+  // Claude Gateway Agents need the host's oae-claude-sync, which publishes gateways.json.
+  if (req.method === "GET" && url.pathname === "/oae/api/capabilities") {
+    return json(200, { data: { claudeGateway: existsSync(`${CLAUDE_DIR}/gateways.json`) } });
   }
   const admin = await consoleAdministrator(req);
   if (!admin) return fail(403, "Managing people requires Installation administration.");
