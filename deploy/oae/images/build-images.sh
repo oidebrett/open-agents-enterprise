@@ -22,8 +22,10 @@
 #     --registry REF   image name prefix (default: ghcr.io/oidebrett/open-agents-enterprise)
 #     --platform LIST  buildx platforms (default: host arch; CI passes linux/amd64,linux/arm64)
 #     --push           push the final images (and the runtime-base) to the registry by digest
-#     --only LIST      build only these (comma list of: controller,runtime,hermes); default
-#                      controller,runtime. "runtime" implies its runtime-base.
+#     --dry-run        build to validate only; keep nothing (no load, no push). The Claude layer
+#                      is skipped (it needs the base materialised). Good for a CI "does it build".
+#     --only LIST      build only these (comma list of: controller,runtime,runtime-base,hermes);
+#                      default controller,runtime. "runtime" implies its runtime-base.
 #     --hermes         shorthand to add hermes to the build set
 #     --tag TAG        extra mutable tag alongside sha-<commit> (e.g. latest)
 #     -h|--help
@@ -36,6 +38,7 @@ cd "$repo"
 registry="ghcr.io/oidebrett/open-agents-enterprise"
 platform=""
 push=0
+dry_run=0
 hermes=0
 extra_tag=""
 only=""
@@ -45,6 +48,7 @@ while [ $# -gt 0 ]; do
     --registry) registry="$2"; shift 2 ;;
     --platform) platform="$2"; shift 2 ;;
     --push) push=1; shift ;;
+    --dry-run) dry_run=1; shift ;;
     --only) only=",$2,"; shift 2 ;;
     --hermes) hermes=1; shift ;;
     --tag) extra_tag="$2"; shift 2 ;;
@@ -122,24 +126,30 @@ echo "  registry:        $registry"
 echo "  platforms:       ${platform:-<host arch>}"
 echo "  node base:       $node_base_image"
 echo "  openclaw source: ${openclaw_args[0]:+${openclaw_args[0]#OPENCLAW_COMMIT=}}${openclaw_args[0]:-<not building runtime>}"
-echo "  push:            $([ "$push" = 1 ] && echo yes || echo 'no (local only)')"
+echo "  output:          $([ "$push" = 1 ] && echo 'push to registry' || { [ "$dry_run" = 1 ] && echo 'dry run (discard)' || echo 'local load'; })"
 echo
 
 platform_args=()
 [ -n "$platform" ] && platform_args=(--platform "$platform")
 
-# Pushes go to the registry by digest. A single-arch local build loads into the engine so it can be
-# run. A multi-arch build cannot --load, so without --push it is built and discarded — a dry run
-# that validates the Dockerfiles across both arches without publishing anything.
+[ "$push" = 1 ] && [ "$dry_run" = 1 ] && { echo "--push and --dry-run are mutually exclusive" >&2; exit 2; }
+
+# Output mode. Pushes go to the registry by digest; a single-arch local build --loads into the
+# engine so it can be run; a build with no destination (--dry-run, or multi-arch without --push) is
+# built and discarded — a "does it build" check.
 #
 # The OAE runtime layer (step 3) needs runtime-base to exist as an image: available when we push it
-# (by digest) or when a single-arch build --loads it, but NOT in a multi-arch discard dry run. Skip
-# that one layer there; the self-contained images (controller, runtime-base, hermes) still build.
+# (by digest) or when a single-arch build --loads it, but NOT when the base was discarded. Skip that
+# one layer there; the self-contained images (controller, runtime-base, hermes) still build.
 base_available=1
 if [ "$push" = 1 ]; then
   output_args=(--push)
+elif [ "$dry_run" = 1 ]; then
+  output_args=() # build, keep nothing
+  base_available=0
+  echo "dry run: images built and discarded; runtime (Claude) layer skipped"
 elif [[ "$platform" == *,* ]]; then
-  output_args=() # multi-arch dry run: build, keep nothing
+  output_args=() # multi-arch cannot --load: build, keep nothing
   base_available=0
   echo "multi-arch without --push: dry run (images built and discarded; runtime layer skipped)"
 else
