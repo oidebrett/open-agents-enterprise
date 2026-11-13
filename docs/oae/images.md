@@ -55,8 +55,25 @@ needs the default `GITHUB_TOKEN` with `packages: write`.
 
 The `runtime-base` build compiles OpenClaw from source (pnpm install, `build:docker`, `ui:build`,
 plus bridge tests) and needs a real builder: ≥ 4 CPU and ≥ 12 GiB RAM (upstream's own threshold).
-On a shared host, cap BuildKit parallelism (upstream uses `max-parallelism = 2`) so the build does
-not crowd co-resident services.
+On a shared host, run it in a `docker-container` buildx builder with a CPU/memory cap and limited
+parallelism so it cannot crowd co-resident services:
+
+```bash
+printf '[worker.oci]\n  max-parallelism = 1\n' > /tmp/bk.toml
+docker buildx create --name oae-capped --driver docker-container \
+  --driver-opt cpuset-cpus=0-2 --driver-opt memory=14g --buildkitd-config /tmp/bk.toml --bootstrap
+BUILDX_BUILDER=oae-capped deploy/oae/images/build-images.sh --only runtime-base
+```
+
+Upstream's CI uses `max-parallelism = 2` on large dedicated runners. On a small shared box (e.g. the
+Oracle testbed: 4 vCPU / 23 GiB running the AgentGateway), two heavy Node stages at once exhaust a
+14 GiB cap, so use `max-parallelism = 1` — the heavy stages then run one at a time within the cap.
+
+Proven on the Oracle testbed (2026-11-13, native arm64): controller, `runtime-base` (OpenClaw
+built from source) and the full `runtime` (Claude Code 2.1.312 + OpenClaw 2026.10.8 + Teams) all
+built from the `oae` commit with the capped builder and no impact on the co-resident AgentGateway.
+A build box without Node supplies the pins via env (`NODE_BASE_IMAGE`, `OPENCLAW_COMMIT`,
+`OPENCLAW_SOURCE_SHA256`, `OPENCLAW_BUILD_TIMESTAMP`).
 
 ## After publishing
 
