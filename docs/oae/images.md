@@ -21,7 +21,8 @@ The key move: `runtime-claude/Dockerfile` already takes `ARG OCE_RUNTIME_IMAGE`.
 at **our from-source `runtime-base`** instead of upstream's published runtime — no Dockerfile change,
 the published-image dependency is simply no longer used.
 
-Registry prefix: `ghcr.io/oidebrett/open-agents-enterprise-*`, tag `sha-<oae-commit>`.
+Registry prefix: `docker.io/oideibrett/open-agents-enterprise-*`, tag `sha-<oae-commit>` (Docker Hub,
+to match the manidae-cloud OAE pins and the edge image).
 
 The build reuses upstream's own pins so a sync that bumps them is picked up automatically:
 `NODE_BASE_IMAGE` from `scripts/ci/test-suites/images-packaging.json`, and the OpenClaw source
@@ -36,7 +37,7 @@ One script, shared by CI and by-hand runs:
 # local, host arch, no push (single arch --loads the chain end to end)
 deploy/oae/images/build-images.sh
 
-# publish multi-arch to GHCR
+# publish multi-arch to Docker Hub
 deploy/oae/images/build-images.sh --platform linux/amd64,linux/arm64 --push --tag latest
 ```
 
@@ -49,7 +50,7 @@ is only built when `runtime-base` is materialised (a push, or a single-arch `--l
 [`.github/workflows/oae-images.yml`](../../.github/workflows/oae-images.yml) — **OAE-owned**, not one
 of upstream's dormant workflows (OAE.md "GitHub Actions"). `workflow_dispatch` only; it never fires
 on push. Inputs: `ref` (default `oae`), `push` (off = dry run), `mutable_tag`, `hermes`. Publishing
-needs the default `GITHUB_TOKEN` with `packages: write`.
+pushes to Docker Hub, so it needs repo secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
 
 ## Resource notes
 
