@@ -133,9 +133,24 @@ runtime image = OCE runtime + pinned Claude Code with an admin-managed `apiKeyHe
 only; Dedicated Claude Code Pod not built. See `docs/oae/claude-harness.md`. Images from `oae`
 via CI (`oae-images.yml`) still open.
 
-- `oae-images.yml`: build and publish controller and runtime images from `oae` to
-  `ghcr.io/oidebrett/open-agents-enterprise-*` (amd64 + arm64); manidae package
-  switches to them.
+- **OAE images — in progress** (branch `strike/4-oae-images`): [`docs/oae/images.md`](images.md).
+  Controller and runtime are built **from source** at the `oae` commit, so `oae` no longer needs an
+  upstream *published*-image commit (removes the gate in `OAE.md` "Syncing from upstream"). The
+  runtime is `deploy/runtime/Dockerfile` (OpenClaw from the pinned source) with Claude Code + Teams
+  layered via `runtime-claude`'s existing `ARG OCE_RUNTIME_IMAGE` — pointed at our from-source base
+  instead of a published image. One shared build path (`deploy/oae/images/build-images.sh`) used by
+  `.github/workflows/oae-images.yml` (OAE-owned, `workflow_dispatch`, publishes multi-arch to
+  `ghcr.io/oidebrett/open-agents-enterprise-*`, tag `sha-<commit>`).
+  - ✅ All three images built from source and verified on the Oracle testbed (2026-11-13, native
+    arm64), with a capped `docker-container` builder (`max-parallelism=1`, 3 CPU, 14 GiB) and no
+    impact on the co-resident AgentGateway: controller (Node 24.22.1, 64 migrations); `runtime-base`
+    (OpenClaw 2026.10.8 from source, codex 0.163.0-alpha.2, provenance matches the pin); `runtime`
+    (Claude Code 2.1.312 + OpenClaw + Teams). The trial fixed two bugs in `build-images.sh` (serialize
+    heavy stages to avoid OOM; layer builds use their own dir as context).
+  - ⬜ First real **publish**: run `oae-images.yml` with `push` (multi-arch to GHCR). Belongs in CI /
+    a dedicated build box, not the live testbed.
+  - ⬜ manidae package switches to the OAE images; verify on Oracle via `oae-upgrade`, then pin the
+    digests in manidae (release gate).
 - Upstream track: RFC for a `claude` harness (model on RFC 0003/0005); OpenClaw PR
   adding `claude` to `ACPX_NATIVE_AGENT_IDS` and a remote (WebSocket) transport to
   `acpx`.
