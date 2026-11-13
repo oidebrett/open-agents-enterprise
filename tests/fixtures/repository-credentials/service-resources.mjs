@@ -21,8 +21,8 @@ export async function createGitHubTokenServiceFactory(
   },
 ) {
   const [{ createGitHubDriverFactory }, { createGitHubStaticTokenOwner }] = await Promise.all([
-    appModule("drivers/repo/github/credentials/factory"),
-    appModule("drivers/repo/github/credentials/static-token"),
+    appModule("drivers/repo/github/access/factory"),
+    appModule("drivers/repo/github/access/static-token"),
   ]);
   const owner = createGitHubStaticTokenOwner({ token: Buffer.from(token) });
   resources.after(() => owner.close());
@@ -73,18 +73,23 @@ export async function startServiceListeners(
     tls,
     upstreamOrigins,
     trustedUpstreamOrigins = new Set(upstreamOrigins),
-    providerQueue,
     log,
   },
 ) {
   const [{ createCredentialService }, { startListeners }] = await Promise.all([
-    appModule("drivers/repo/credentials/service"),
-    appModule("drivers/repo/credentials/server"),
+    import("./service.ts"),
+    appModule("drivers/repo/access/server"),
   ]);
-  const service = createCredentialService({ config, factory, clock, providerQueue });
+  const service = createCredentialService({ config, factory, clock });
   let listeners;
+  let closing = false;
+  // Registered first, so it runs last: teardown must have closed the listeners it started.
+  resources.after(() => assert.ok(listeners === undefined || closing, "listeners never closed"));
   // Separate hooks retain every cleanup failure and keep upstreams alive for revocation.
-  resources.after(() => listeners?.close());
+  resources.after(() => {
+    closing = true;
+    return listeners?.close();
+  });
   resources.after(() => shutdownService(service, clock));
   resources.after(() => listeners?.stopAdmission());
   listeners = await startListeners({
@@ -143,9 +148,7 @@ export async function startStaticTokenService(resources, options) {
 }
 
 export async function writeSessionClientConfiguration(resources, { opened, ca }) {
-  const { writeClientConfiguration } = await appModule(
-    "drivers/repo/github/credentials/client/config",
-  );
+  const { writeClientConfiguration } = await appModule("drivers/repo/github/access/client/config");
   const parent = await temporaryDirectory(resources, "rcs-client-");
   await chmod(parent, 0o700);
   const clientDirectory = join(parent, "session");

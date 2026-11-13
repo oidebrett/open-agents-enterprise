@@ -1,7 +1,7 @@
 ---
 created: 2026-08-24
-updated: 2026-10-26
-last_updated_session: authoring-run/dc3e84d5-d5f9-44fa-870c-a8497b2c5379
+updated: 2026-11-04
+last_updated_session: authoring-run/390095eb-01a9-4e24-b609-791b49f19f81
 ---
 
 # Harness Authentication Binding Flow
@@ -157,6 +157,13 @@ indefinitely; drafts, selected versions, and pending deployments block source de
 `apps/controller/src/drivers/compute/kubernetes/index.ts:prepareHarnessAuth`,
 `KubernetesComputeDriver.prepareRevision`
 
+For `credential_source`, `KubernetesComputeDriver.admittedCredentialSourceType`
+checks the saved Credential Gateway ID before querying its current type catalog
+in preparation and runtime activation. A replacement Gateway receives no catalog
+call. The existing Harness authentication validator refuses the mismatch and
+still checks the source type, login mode, and paired Sandbox. Catalog lookup
+passes only an abort signal; it does not read or send a credential.
+
 Compute projects the admitted Secret into the combined embedded workload as
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or, for explicit custom providers,
 `OCE_MODEL_API_KEY`. `harnessModelAuthentication` and `requireProviderApiKeys`
@@ -271,9 +278,9 @@ integration described in the [Driver reference](../reference/drivers/openshell-c
   `OCC_TEST_HARNESS_K3D_REAL=1` exercises the API binding/deploy path with
   disposable Kubernetes/PostgreSQL, genuine images, and an authorized API key,
   requiring a provider-backed turn from both dedicated Codex and embedded OpenClaw.
-- [Managed-account testing](../testing/slack.md#chatgpt-service-accounts) separately requires
-  provider authorization, an issued ChatGPT credential, and a real Codex turn;
-  API fixtures prove only admission or persistence.
+- [Service-account coverage](../testing/slack.md#service-account-coverage) checks
+  lifecycle, API, and persistence behavior. It does not prove live provider
+  credential revocation or model turns.
 - Verify Secret projections only on intended consumers, source-deletion guards,
   Agent revision metadata, dispatch denial after revoked grants, and failed
   auth preventing readiness. Use synthetic sentinels for serialized resources,
@@ -295,6 +302,8 @@ integration described in the [Driver reference](../reference/drivers/openshell-c
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-30 07:41: Check the recorded Credential Gateway before catalog lookup in the accompanying Compute fix. (authoring-run/ea326acd-648d-4ca4-a2c6-afdd4cb4771e - 429951edfc002c1c6ef98970696e655e03ba3ec7)
 
 - 2026-10-26 06:25: Document embedded custom-provider Secret projection and isolated probe binding in the accompanying implementation. (authoring-run/dc3e84d5-d5f9-44fa-870c-a8497b2c5379 - 835094105cb0feba10ab0f82243bd6fe7e146931)
 

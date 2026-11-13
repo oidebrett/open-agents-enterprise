@@ -15,32 +15,43 @@ import {
   ConfigurationHarnessError,
 } from "../../packages/occ/src/index.ts";
 import { assertCleanupFailure } from "../helpers/compute-cleanup-failure.mjs";
+import { unreadableGatewayPasswordRefusal } from "../helpers/refusal-text.mjs";
 import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
 
-test("Docker preflight rejects an interrupted response and can retry", async () => {
+test("Docker preflight identifies request timeout and caller cancellation without losing retry", async () => {
   // Redirect only the socket address in an isolated child. The real Driver,
   // Node HTTP client and response stream run against a local fault server.
   const source = String.raw`
 import assert from "node:assert/strict";
 import http from "node:http";
 import { syncBuiltinESMExports } from "node:module";
-let interrupt = true;
+let mode = "reset";
+let cancel;
+let transportError;
+let nativeRequests = 0;
+let timeoutReceived;
 const paths = [];
 const server = http.createServer((request, response) => {
   assert.equal(request.method, "GET");
   paths.push(request.url);
   if (request.url === "/_ping") {
     response.end("OK");
-  } else if (request.url === "/version" && interrupt) {
-    // Send headers and part of the advertised body before the peer closes.
+  } else if (request.url === "/version" && mode !== "success" && mode !== "caller") {
+    if (mode === "timeout") timeoutReceived = Date.now();
+    // A reset rejects promptly; an unfinished body reaches the real request deadline.
     response.writeHead(200, { "content-type": "application/json", "content-length": "100" });
     response.write('{"Platform":');
-    setTimeout(() => response.destroy(), 10);
+    if (mode === "reset") setTimeout(() => response.destroy(), 10);
   } else if (request.url === "/version") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ Platform: { Name: "Docker Engine" } }));
   } else {
-    assert.equal(request.url, "/images/fixture-runtime%3Alocal/json");
+    assert.equal(request.url, "/images/private-image-selection%3Alocal/json");
+    if (mode === "caller") {
+      // No response headers: exercise request error handling as well as the body stream.
+      cancel();
+      return;
+    }
     response.writeHead(200, { "content-type": "application/json" });
     response.end("{}");
   }
@@ -48,24 +59,86 @@ const server = http.createServer((request, response) => {
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const nativeRequest = http.request;
 http.request = (options, callback) => {
+  nativeRequests += 1;
   assert.equal(options.socketPath, "/var/run/docker.sock");
-  return nativeRequest({ ...options, socketPath: undefined, host: "127.0.0.1", port: server.address().port }, callback);
+  const request = nativeRequest({ ...options, socketPath: undefined, host: "127.0.0.1", port: server.address().port }, (response) => {
+    response.once("error", (error) => { transportError = error; });
+    callback(response);
+  });
+  request.once("error", (error) => { transportError = error; });
+  return request;
 };
 syncBuiltinESMExports();
 let timer;
 try {
   const { DockerComputeDriver } = await import(process.argv[1]);
-  const driver = new DockerComputeDriver({ images: { gateway: "fixture-runtime:local", agent: "fixture-runtime:local" } });
+  const { withComputeAbortSignal, withComputeOperationDeadline } = await import(new URL("../operation-context.ts", process.argv[1]));
+  const driver = new DockerComputeDriver({ images: { gateway: "private-image-selection:local", agent: "private-image-selection:local" } });
+  // Cancelling after entering the owner scope must not inspect or rewrite the raw reason.
+  const selfCaused = new Error("original cancellation");
+  selfCaused.cause = selfCaused;
+  const accessorCause = new Error("original cancellation");
+  Object.defineProperty(accessorCause, "cause", { get() { throw new Error("cause must not be read"); } });
+  for (const reason of [selfCaused, accessorCause]) {
+    const controller = new AbortController();
+    await assert.rejects(withComputeAbortSignal(controller.signal, () => {
+      controller.abort(reason);
+      return driver.preflight();
+    }), (error) => {
+      assert.equal(error, reason);
+      assert.equal(error.message, "original cancellation");
+      return true;
+    });
+    assert.equal(nativeRequests, 0, "pre-aborted owner must not open an HTTP request");
+  }
   const result = await Promise.race([
     driver.preflight().then(() => ({ status: "resolved" }), (error) => ({ status: "rejected", code: error.code })),
     new Promise((resolve) => { timer = setTimeout(() => resolve({ status: "pending" }), 1_500); }),
   ]);
   assert.equal(result.status, "rejected", "Docker preflight remained pending after an interrupted response");
   assert.equal(result.code, "ECONNRESET");
-  // A later complete response must still reach image qualification normally.
-  interrupt = false;
+  clearTimeout(timer);
+
+  mode = "timeout";
+  const timeoutStarted = Date.now();
+  await assert.rejects(driver.preflight(), (error) => {
+    assert.equal(error, transportError, "preserve the original transport error");
+    assert.equal(error.name, "AbortError");
+    assert.equal(error.code, "ABORT_ERR");
+    assert.equal(error.cause.name, "TimeoutError");
+    const diagnostic = /^Docker GET version: request timeout after (\d+) ms \(request timeout 10000 ms; deadline ([^)]+)\)\.$/.exec(error.message);
+    assert.ok(diagnostic, error.message);
+    assert.ok(Number(diagnostic[1]) >= 10_000);
+    const deadline = Date.parse(diagnostic[2]);
+    assert.ok(deadline >= timeoutStarted + 10_000 - 100);
+    assert.ok(deadline <= timeoutReceived + 10_000 + 100);
+    return true;
+  });
+
+  mode = "caller";
+  for (const reason of [new Error("private-owner-cancellation-detail"), NaN]) {
+    const controller = new AbortController();
+    const deadlineAt = new Date(Date.now() + 5_000).toISOString();
+    cancel = () => controller.abort(reason);
+    await assert.rejects(
+      withComputeOperationDeadline({ signal: controller.signal, deadlineAt }, () => driver.preflight()),
+      (error) => {
+        assert.equal(error, transportError, "do not replace the caller's transport error");
+        assert.equal(error.code, "ABORT_ERR");
+        assert.equal(error.name, "AbortError");
+        assert.equal(error.cause, reason);
+        assert.match(error.message, /^Docker GET image-inspect: caller cancellation after \d+ ms/);
+        assert.ok(error.message.includes("request timeout 10000 ms; deadline " + deadlineAt));
+        assert.doesNotMatch(error.message, /private-image-selection|private-owner-cancellation-detail/);
+        return true;
+      },
+    );
+  }
+
+  // Failed calls must not leave the Driver cancelled: later qualification still succeeds.
+  mode = "success";
   await driver.preflight();
-  assert.deepEqual(paths, ["/_ping", "/version", "/_ping", "/version", "/images/fixture-runtime%3Alocal/json", "/images/fixture-runtime%3Alocal/json"]);
+  assert.deepEqual(paths, ["/_ping", "/version", "/_ping", "/version", "/_ping", "/version", "/images/private-image-selection%3Alocal/json", "/_ping", "/version", "/images/private-image-selection%3Alocal/json", "/_ping", "/version", "/images/private-image-selection%3Alocal/json", "/images/private-image-selection%3Alocal/json"]);
 } finally {
   clearTimeout(timer);
   http.request = nativeRequest;
@@ -78,8 +151,9 @@ try {
     "../../apps/controller/src/drivers/compute/docker/index.ts",
     import.meta.url,
   );
+  // This case intentionally waits for the unchanged ten-second Docker request deadline.
   await promisify(execFile)(process.execPath, ["--input-type=module", "-e", source, driver.href], {
-    timeout: 10_000,
+    timeout: 30_000,
   });
 });
 
@@ -436,7 +510,7 @@ test("Docker Compute gateway containers use password auth by default and preserv
   const passwordLaunch = await gatewayContainerLaunch({
     gateway: {
       tls: { enabled: false },
-      auth: { password: { source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" } },
+      auth: { password: { source: "env", provider: "default", id: "OPENCLAW_GATEWAY_PASSWORD" } },
     },
   });
   assert.match(passwordLaunch.environment.OPENCLAW_GATEWAY_PASSWORD ?? "", /^[0-9a-f]{64}$/);
@@ -449,7 +523,7 @@ test("Docker Compute gateway containers use password auth by default and preserv
   );
   assert.deepEqual(
     JSON.parse(passwordLaunch.environment.OPENCLAW_CONFIG_JSON).gateway.auth.password,
-    { source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" },
+    { source: "env", provider: "default", id: "OPENCLAW_GATEWAY_PASSWORD" },
   );
   assert.equal(passwordLaunch.revision.configuration.gateway.auth.mode, undefined);
 
@@ -479,7 +553,7 @@ test("Docker Compute gateway containers use password auth by default and preserv
     gateway: {
       auth: {
         mode: "trusted-proxy",
-        password: { source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" },
+        password: { source: "env", provider: "default", id: "OPENCLAW_GATEWAY_PASSWORD" },
       },
     },
   });
@@ -494,9 +568,13 @@ test("Docker Compute gateway containers use password auth by default and preserv
   assert.deepEqual(
     JSON.parse(trustedProxyWithPasswordLaunch.environment.OPENCLAW_CONFIG_JSON).gateway.auth
       .password,
-    { source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" },
+    { source: "env", provider: "default", id: "OPENCLAW_GATEWAY_PASSWORD" },
   );
 });
+
+const generatedPassword = { source: "env", provider: "default", id: "OPENCLAW_GATEWAY_PASSWORD" };
+const passwordAuth = (password, mode = "password") => ({ gateway: { auth: { mode, password } } });
+const exactly = (text) => new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 
 test("Docker Compute rejects unsupported native gateway settings at admission and before Docker engine access", async () => {
   const driver = new DockerComputeDriver({
@@ -552,6 +630,44 @@ test("Docker Compute rejects unsupported native gateway settings at admission an
       "plugins.entries.codex.config.appServer.approvalPolicy",
       /appServer\.approvalPolicy must not be "untrusted"/,
     ],
+    // OpenClaw resolves the password in both auth modes, with the Configuration's own secrets: its
+    // schema refuses an object without a text provider or with other keys (exit 78), and the
+    // Gateway exits on a provider or allowlist that cannot serve it (finding 3061).
+    ...[
+      [passwordAuth({ source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" }), "providerless"],
+      [
+        passwordAuth({ source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" }, "trusted-proxy"),
+        "providerless",
+      ],
+      [
+        {
+          ...passwordAuth({ source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" }),
+          secrets: { defaults: { env: "custom" } },
+        },
+        "providerless",
+        "env",
+        "custom",
+      ],
+      [
+        passwordAuth({ source: "env", provider: null, id: "OPENCLAW_GATEWAY_PASSWORD" }),
+        "providerless",
+      ],
+      [passwordAuth({ ...generatedPassword, note: "x" }), "keys"],
+      [passwordAuth({ ...generatedPassword, provider: "vault" }), "provider", "vault"],
+      [
+        {
+          ...passwordAuth(generatedPassword),
+          secrets: { providers: { default: { source: "env", allowlist: ["OTHER"] } } },
+        },
+        "allowlist",
+        "OPENCLAW_GATEWAY_PASSWORD",
+      ],
+      [passwordAuth({ source: "vault", provider: "default", id: "X" }), "shape"],
+    ].map(([configuration, ...refused]) => [
+      configuration,
+      "gateway.auth.password",
+      exactly(unreadableGatewayPasswordRefusal(...refused)),
+    ]),
   ]) {
     const revision = dockerGatewayRevision(driver, configuration);
     let networkAccesses = 0;
@@ -592,6 +708,29 @@ test("Docker Compute rejects unsupported native gateway settings at admission an
   ]) {
     assert.doesNotThrow(() => driver.validateGatewaySettings({ gateway: { auth } }));
   }
+  // References OpenClaw reads: the alias secrets.defaults.env names, a configured env provider
+  // whose allowlist lists the name, and another variable the Configuration's bindings may set.
+  for (const configuration of [
+    {
+      ...passwordAuth({ ...generatedPassword, provider: "custom" }),
+      secrets: { defaults: { env: "custom" } },
+    },
+    {
+      ...passwordAuth({ ...generatedPassword, provider: "vault" }),
+      secrets: {
+        providers: { vault: { source: "env", allowlist: ["OPENCLAW_GATEWAY_PASSWORD"] } },
+      },
+    },
+    passwordAuth(
+      { source: "env", provider: "default", id: "MY_GATEWAY_PASSWORD" },
+      "trusted-proxy",
+    ),
+  ]) {
+    assert.doesNotThrow(
+      () => driver.validateGatewaySettings(configuration),
+      JSON.stringify(configuration),
+    );
+  }
 });
 
 test("Docker prepares configuration before starting a managed Gateway", async () => {
@@ -605,6 +744,10 @@ test("Docker prepares configuration before starting a managed Gateway", async ()
       if (specifier === "node:fs") {
         return {
           chmodSync() {},
+          // This fresh Gateway has no pending maintenance marker.
+          lstatSync() {
+            throw Object.assign(new Error("File not found"), { code: "ENOENT" });
+          },
           mkdirSync() {},
           readdirSync: () => [],
           writeFileSync(path) {
@@ -1037,6 +1180,14 @@ for (const mode of ["embedded", "dedicated"]) {
     let initializerExit = 1;
     let setupFinished = false;
     let runtimeStarts = 0;
+    // A lost setup start response (Docker started setup, the Driver sees a request timeout),
+    // then a failed inspect of that setup container.
+    let loseSetupStart = false;
+    let failSetupInspect = false;
+    const requestTimeout = () =>
+      new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    const isSetup = (container) =>
+      container?.Config.Labels["org.openclaw.enterprise.role"] === "workspace-setup";
     driver.request = async (method, path, body) => {
       const url = new URL(path, "http://docker.invalid");
       if (method === "GET" && url.pathname.startsWith("/networks/")) {
@@ -1077,6 +1228,10 @@ for (const mode of ["embedded", "dedicated"]) {
         /^\/containers\/([^/]+)(?:\/(\w+))?$/.exec(url.pathname) ?? [];
       const name = decodeURIComponent(encodedName ?? "");
       if (method === "GET" && action === "json") {
+        if (failSetupInspect && isSetup(containers.get(name))) {
+          failSetupInspect = false;
+          throw requestTimeout();
+        }
         return containers.get(name);
       }
       if (method === "PUT" && action === "archive") {
@@ -1089,8 +1244,14 @@ for (const mode of ["embedded", "dedicated"]) {
       }
       if (method === "POST" && action === "start") {
         const container = containers.get(name);
-        if (container.Config.Labels["org.openclaw.enterprise.role"] === "workspace-setup") {
+        if (isSetup(container)) {
           assert.equal(deliveries.length > 0, true);
+          if (loseSetupStart) {
+            loseSetupStart = false;
+            failSetupInspect = true;
+            container.State = { Running: true };
+            throw requestTimeout();
+          }
           container.State = { Running: false, ExitCode: initializerExit };
           setupFinished = initializerExit === 0;
         } else {
@@ -1145,6 +1306,36 @@ for (const mode of ["embedded", "dedicated"]) {
       assert.equal(runtimeStarts, 0);
       assert.equal(containers.size, 0, "failed initializer and private payload must be removed");
       assert.equal(volumes.size, 2, "retry retains exact-Agent durable storage");
+
+      // The start response is lost after Docker started setup, and the inspect that would
+      // tell a running setup from a stopped one fails too. The attempt fails, but the Driver
+      // must leave the setup: removal would SIGKILL a setup that may hold OpenClaw's state
+      // lock (finding 3115).
+      loseSetupStart = true;
+      await assert.rejects(driver.prepareRevision(revision, { workspaceSetup: setup }), {
+        name: "TimeoutError",
+      });
+      assert.equal(
+        failSetupInspect,
+        false,
+        "the Driver inspected the setup after the failed start",
+      );
+      const leftSetup = [...containers.values()].find(isSetup);
+      assert.equal(
+        leftSetup?.State.Running,
+        true,
+        "a setup that may run is not stopped or removed",
+      );
+      // The next attempt inspects it again: while it runs, the attempt is unready and leaves it.
+      assert.equal(
+        (await driver.prepareRevision(revision, { workspaceSetup: setup })).ready,
+        false,
+      );
+      assert.equal([...containers.values()].find(isSetup), leftSetup);
+      assert.equal(leftSetup.State.Running, true);
+      assert.equal(runtimeStarts, 0, "no runtime starts while setup may run");
+      // The setup ends on its own; the attempt below removes it and proceeds normally.
+      leftSetup.State = { Running: false, ExitCode: 0 };
       initializerExit = 0;
       assert.equal((await driver.prepareRevision(revision, { workspaceSetup: setup })).ready, true);
       assert.deepEqual(
@@ -1465,7 +1656,7 @@ test("Docker dispatches embedded recovery only while Engine can verify the old s
         completed: true,
       };
       // The workspace already exists. Exercise normal Gateway creation, observation and replacement.
-      driver.initializeWorkspace = async () => {};
+      driver.initializeWorkspace = async () => true;
       const lifecycle = driver.request;
       let removed = false;
       driver.request = async (method, path, data) => {

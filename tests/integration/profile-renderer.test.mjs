@@ -3,6 +3,7 @@ import {
   ConfigurationValidationError as SharedConfigurationValidationError,
 } from "../../packages/contracts/src/index.ts";
 import assert from "node:assert/strict";
+import { oidcEnrollmentPolicy } from "../../apps/controller/src/auth/oidc-enrollment.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
@@ -32,8 +33,9 @@ import {
   KubernetesComputeDriver,
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
+import { validateBackendDefinitions } from "../../packages/occ/src/backends.ts";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
-import { fileTemporaryDirectory } from "../helpers/temporary-directory.mjs";
+import { fileTemporaryDirectory, temporaryDirectorySync } from "../helpers/temporary-directory.mjs";
 import { helmTemplate } from "../helpers/production-chart.mjs";
 import {
   RenderRefusal,
@@ -74,7 +76,6 @@ function baseInput(overrides = {}) {
       gatewayClassName: "eg",
       gatewayApiKeySecretName: "occ-private-gateway-key",
       agentNativeAdminDomain: "agents.oce.example.internal",
-      sharedCookieDomain: "oce.example.internal",
       gatewayTrustedProxyCidrs: ["192.0.2.12/32"],
       pluginStatusProxySourceCidrs: ["192.0.2.13/32"],
       nodeSelector: { "oce-role": "control" },
@@ -364,8 +365,9 @@ test("renderer supports exactly the openclaw and codex profiles", () => {
   const openclaw = renderCli("openclaw", baseInput());
   assert.equal(openclaw.summary.ok, true);
   assert.equal(openclaw.preflight.profile, "openclaw");
-  assert.match(openclaw.installation, /id: occ-plugin/);
-  assert.doesNotMatch(openclaw.installation, /id: codex-plugin/);
+  assert.deepEqual(loadYaml(openclaw.installation).drivers.plugin, [
+    { id: "occ-plugin", configuration: {} },
+  ]);
   assert.match(openclaw.values, /agentNativeAdmin:\n {2}enabled: true/);
   assert.match(openclaw.values, /repositoryCredentials:\n {2}enabled: false/);
   assert.match(openclaw.values, /slackProxy:\n {2}enabled: true/);
@@ -382,8 +384,9 @@ test("renderer supports exactly the openclaw and codex profiles", () => {
   const codex = renderCli("codex", codexInput());
   assert.equal(codex.summary.ok, true);
   assert.equal(codex.preflight.profile, "codex");
-  assert.match(codex.installation, /id: codex-plugin/);
-  assert.match(codex.installation, /catalogSource: hosted/);
+  assert.deepEqual(loadYaml(codex.installation).drivers.plugin, [
+    { id: "codex-plugin", configuration: { catalogSource: "hosted" } },
+  ]);
   assert.doesNotMatch(codex.installation, /service_account: chatgpt-service-accounts/);
   assert.match(codex.values, /slackProxy:\n {2}enabled: true/);
   assert.match(
@@ -416,8 +419,7 @@ test("preflight rejects noncanonical SHA-256 image digests", async (t) => {
   for (const profile of ["openclaw", "codex"]) {
     const input = profile === "codex" ? codexInput() : baseInput();
     input.repository = repositoryConfiguration();
-    const directory = mkdtempSync(join(tmpdir(), "oce-profile-digest-"));
-    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const directory = temporaryDirectorySync(t, "oce-profile-digest-");
     for (const [section, key] of [
       ["controlPlane", "controllerImage"],
       ["runtime", "image"],
@@ -488,8 +490,7 @@ test("managed ChatGPT service-account wiring is optional and explicit", async ()
 test("profiles reject invalid Helm release names before emitting deployment files", async (t) => {
   for (const profile of ["openclaw", "codex"]) {
     const input = profile === "codex" ? codexInput() : baseInput();
-    const directory = mkdtempSync(join(tmpdir(), `oce-release-name-${profile}-`));
-    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const directory = temporaryDirectorySync(t, `oce-release-name-${profile}-`);
     for (const releaseName of ["r".repeat(54), "Oce", "oce-", "oce..example", "oce example"]) {
       // A failed rerender must also remove files from a previously valid release.
       await render(profile, input, directory);
@@ -682,8 +683,7 @@ test(
       // Provider ranges must survive rendering; individual DNS answers are not stable.
       const input = profile === "codex" ? codexInput() : baseInput();
       input.repository = repositoryConfiguration(["140.82.112.0/20", "192.30.252.0/22"]);
-      const directory = mkdtempSync(join(tmpdir(), `oce-profile-egress-${profile}-`));
-      t.after(() => rmSync(directory, { recursive: true, force: true }));
+      const directory = temporaryDirectorySync(t, `oce-profile-egress-${profile}-`);
       const output = renderCli(profile, input, directory, repository, dns.server);
       const manifests = helmTemplate(output);
       assert.match(manifests, /repository-credentials/);
@@ -779,6 +779,8 @@ test("hosted discovery DNS failures revoke stale deployment artifacts", async (t
   const preflight = JSON.parse(readFileSync(join(dns.directory, "preflight.json"), "utf8"));
   assert.equal(preflight.ok, false);
   assert.ok(preflight.errors.join("\n").includes("IPv4 addresses for chatgpt.com."));
+  // One host must resolve so a broken DNS fixture cannot satisfy the refusal case.
+  assert.doesNotMatch(preflight.errors.join("\n"), /IPv4 addresses for auth\.openai\.com\./);
   assert.match(preflight.errors.join("\n"), /modelDiscoveryCidrs/);
   assert.match(preflight.errors.join("\n"), /retry|re-?render|supply|set|provide|configure/i);
   assert.equal(existsSync(join(dns.directory, "values.yaml")), false);
@@ -930,24 +932,45 @@ const repositorySecretKeys = [
   "publicCaSecretName",
 ];
 
-function withGitHubSignIn(input, github) {
-  const {
-    agentNativeAdminDomain: _domain,
-    sharedCookieDomain: _cookieDomain,
-    ...controlPlane
-  } = input.controlPlane;
+function withGoogleSignIn(input, google) {
+  const controlPlane = input.controlPlane;
   return {
     ...input,
-    controlPlane: { ...controlPlane, recoveryUserId: "recovery-admin_1", github },
+    controlPlane: { ...controlPlane, recoveryUserId: "recovery-admin_1", google },
   };
 }
+
+test("preflight refuses Backend ID collisions only when both Backends are configured", async (t) => {
+  const repository = { ...repositoryConfiguration(), backendId: "chatgpt-primary" };
+  await assertPreflightFailure(
+    "codex",
+    managedCodexInput({ repository }),
+    /Generated Backend IDs must be unique; repository\.backendId .*chatgpt-primary.* is already used/,
+  );
+
+  // The name is not reserved: it is valid when no ChatGPT Backend is generated.
+  const repositoryOnly = await render("codex", codexInput({ repository }));
+  assert.equal(repositoryOnly.summary.ok, true);
+  assert.match(repositoryOnly.installation, /id: chatgpt-primary\n {4}type: github/);
+  const distinct = await render(
+    "codex",
+    managedCodexInput({ repository: repositoryConfiguration() }),
+  );
+  assert.equal(distinct.summary.ok, true);
+  assert.match(distinct.installation, /id: chatgpt-primary\n {4}type: chatgpt/);
+  assert.match(distinct.installation, /id: github-primary\n {4}type: github/);
+  for (const output of [repositoryOnly, distinct]) {
+    t.after(() => rmSync(output.directory, { recursive: true, force: true }));
+    validateBackendDefinitions(loadYaml(output.installation).backend);
+  }
+});
 
 test(
   "preflight refuses sign-in Secrets that ChatGPT or repository credentials use, as Helm does",
   { skip: helmSkip },
   async () => {
     const input = managedCodexInput({ repository: repositoryConfiguration() });
-    const accepted = await render("codex", withGitHubSignIn(input, {}));
+    const accepted = await render("codex", withGoogleSignIn(input, {}));
     assert.equal(accepted.summary.ok, true, accepted.preflight.errors.join("\n"));
     helmTemplate(accepted);
     for (const secretName of [
@@ -962,22 +985,22 @@ test(
       // the chart's order, so either setting can be the one refused.
       await assertPreflightFailure(
         "codex",
-        withGitHubSignIn(input, { secretName }),
-        /controlPlane\.github\.secretName must name a dedicated Secret|must name a dedicated Secret; \S+ is also controlPlane\.github\.secretName\./,
+        withGoogleSignIn(input, { secretName }),
+        /controlPlane\.google\.secretName must name a dedicated Secret|must name a dedicated Secret; \S+ is also controlPlane\.google\.secretName\./,
       );
       // The same name placed over the accepted values makes the chart refuse it too.
       const override = join(accepted.directory, `github-${secretName}.json`);
-      writeFileSync(override, JSON.stringify({ auth: { github: { secretName } } }));
+      writeFileSync(override, JSON.stringify({ auth: { google: { secretName } } }));
       const error = await renderError(() => helmTemplate(accepted, [override]));
       assert.match(
         `${error.stdout ?? ""}${error.stderr ?? ""}`,
-        /auth\.github\.secretName must name a dedicated Secret|must name a dedicated Secret; \S+ is also auth\.github\.secretName/,
+        /auth\.google\.secretName must name a dedicated Secret|must name a dedicated Secret; \S+ is also auth\.google\.secretName/,
       );
     }
     // Without managed ChatGPT accounts the chart does not reserve that Secret name.
     const unmanaged = await render(
       "codex",
-      withGitHubSignIn(codexInput(), { secretName: "occ-chatgpt-admin" }),
+      withGoogleSignIn(codexInput(), { secretName: "occ-chatgpt-admin" }),
     );
     assert.equal(unmanaged.summary.ok, true, unmanaged.preflight.errors.join("\n"));
     helmTemplate(unmanaged);
@@ -1203,7 +1226,7 @@ for (const { name, profile = "openclaw", input = baseInput, cases } of [
     name: "preflight refuses credential Secrets named like the log collector's",
     profile: "codex",
     input: () => {
-      const input = withGitHubSignIn(
+      const input = withGoogleSignIn(
         managedCodexInput({ repository: repositoryConfiguration() }),
         {},
       );
@@ -1216,7 +1239,7 @@ for (const { name, profile = "openclaw", input = baseInput, cases } of [
     // Finding 1054: the database CA Secret counts too, as in the chart's table.
     cases: [
       "controlPlane.gatewayApiKeySecretName",
-      "controlPlane.github.secretName",
+      "controlPlane.google.secretName",
       "controlPlane.databaseCa.secretName",
       "codex.managedServiceAccounts.adminSecretName",
       ...repositorySecretKeys.map((key) => `repository.${key}`),
@@ -1231,11 +1254,11 @@ for (const { name, profile = "openclaw", input = baseInput, cases } of [
     // (finding 1046; the Helm-backed case is in profile-preflight-chart-parity).
     name: "preflight refuses sign-in Secrets named like the Gateway Secrets the chart generates",
     input: () => {
-      const input = withGitHubSignIn(baseInput(), {});
+      const input = withGoogleSignIn(baseInput(), {});
       input.controlPlane.google = {};
       return input;
     },
-    cases: ["github", "google"].flatMap((provider) =>
+    cases: ["google"].flatMap((provider) =>
       generatedGatewaySecrets("oce").map(({ name, role }) => [
         `controlPlane.${provider}.secretName`,
         [name],
@@ -1572,15 +1595,15 @@ test("preflight rejects inputs that Helm would reject", async () => {
     "codex",
     codexInput(),
     "controlPlane.agentNativeAdminDomain",
-    ["agents.other.example.internal"],
-    "must be inside controlPlane.sharedCookieDomain",
+    ["agents.unrelated.com"],
+    "must share a non-public DNS suffix",
   );
   await assertFieldRefusals(
     "codex",
     codexInput(),
     "controlPlane.authBaseUrl",
-    ["https://console.example.internal"],
-    "host must be inside controlPlane.sharedCookieDomain",
+    ["https://console.unrelated.com"],
+    "and controlPlane.agentNativeAdminDomain must share a non-public DNS suffix",
   );
 
   // The API refuses a public-suffix cookie domain at startup (tldts, private registries
@@ -1591,14 +1614,13 @@ test("preflight rejects inputs that Helm would reject", async () => {
         ...baseInput().controlPlane,
         authBaseUrl: `https://console.${sharedCookieDomain}`,
         agentNativeAdminDomain: `agents.${sharedCookieDomain}`,
-        sharedCookieDomain,
       },
     });
-  for (const sharedCookieDomain of ["co.uk", "github.io", "CO.UK", "192.0.2.1"]) {
+  for (const sharedCookieDomain of ["co.uk", "github.io", "CO.UK"]) {
     await assertPreflightFailure(
       "codex",
       nativeAdminUnder(sharedCookieDomain),
-      /controlPlane.sharedCookieDomain must not be a public suffix/,
+      /must share a non-public DNS suffix/,
     );
   }
   for (const sharedCookieDomain of ["example.co.uk", "oce.github.io"]) {
@@ -1610,7 +1632,7 @@ test("preflight rejects inputs that Helm would reject", async () => {
     codexInput(),
     "controlPlane.authBaseUrl",
     ["http://console.oce.example.internal"],
-    "must use HTTPS with native admin",
+    "must use HTTPS for shared browser sessions",
   );
 
   // The API and the bootstrap Job accept only an absolute HTTP(S) origin.
@@ -1710,7 +1732,6 @@ test("preflight rejects auth base URLs whose host percent-encodes an ASCII byte"
         ...baseInput().controlPlane,
         authBaseUrl,
         agentNativeAdminDomain: "agents.example.com",
-        sharedCookieDomain: "example.com",
       },
     });
   const asciiRefusal =
@@ -1757,11 +1778,11 @@ test("preflight rejects auth base URLs whose host percent-encodes an ASCII byte"
     "openclaw",
     externalSignInInput({
       trustedProxy: { preset: "ingress-nginx", cidrs: ["10.42.0.0/16"] },
-      authBaseUrl: "https://ex%C3%A4.com",
+      authBaseUrl: "https://ex%C3%A4.oce.example.internal",
     }),
   );
   assert.equal(nonAscii.summary.ok, true, nonAscii.preflight.errors.join("\n"));
-  assert.match(nonAscii.values, /baseUrl: "https:\/\/ex%C3%A4\.com"/);
+  assert.match(nonAscii.values, /baseUrl: "https:\/\/ex%C3%A4\.oce\.example\.internal"/);
   if (!helmSkip) {
     helmTemplate(nonAscii);
   }
@@ -1800,8 +1821,11 @@ test("preflight rejects IPv4-mapped auth base URL hosts and encoded invisible ch
     }
   }
   for (const authBaseUrl of ["https://[::192.0.2.1]", "https://[::ffff:1:2:3]:8443"]) {
-    const output = await render("openclaw", externalSignInInput({ authBaseUrl }));
-    assert.equal(output.summary.ok, true, output.preflight.errors.join("\n"));
+    await assertPreflightFailure(
+      "openclaw",
+      externalSignInInput({ authBaseUrl }),
+      /must share a non-public DNS suffix/,
+    );
   }
 });
 
@@ -1834,6 +1858,21 @@ test("trusted proxy client address headers render lowercase", async () => {
 
 // The API lowercases both domains at startup, and the chart accepts only lowercase.
 test("native admin domains render lowercase for the chart", async () => {
+  const longest = `${"a.".repeat(97)}oce.example.internal`;
+  assert.equal(longest.length, 214);
+  const boundaryInput = (domain) =>
+    codexInput({
+      controlPlane: { ...baseInput().controlPlane, agentNativeAdminDomain: domain },
+    });
+  assert.equal((await render("codex", boundaryInput(longest))).summary.ok, true);
+  for (const length of [215, 217, 253]) {
+    await assertPreflightFailure(
+      "codex",
+      boundaryInput(`${"a".repeat(length - longest.length)}${longest}`),
+      /controlPlane.agentNativeAdminDomain must not exceed 214 characters/,
+    );
+  }
+
   const output = await render(
     "codex",
     codexInput({
@@ -1841,14 +1880,13 @@ test("native admin domains render lowercase for the chart", async () => {
         ...baseInput().controlPlane,
         authBaseUrl: "https://Console.Example.co.uk",
         agentNativeAdminDomain: "Agents.Example.co.uk",
-        sharedCookieDomain: "Example.co.uk",
       },
     }),
   );
   assert.equal(output.summary.ok, true, output.preflight.errors.join("\n"));
   assert.match(
     output.values,
-    /agentNativeAdmin:\n {2}enabled: true\n {2}domain: agents\.example\.co\.uk\n {2}sharedCookieDomain: example\.co\.uk\n/,
+    /agentNativeAdmin:\n {2}enabled: true\n {2}domain: agents\.example\.co\.uk\n/,
   );
   if (!helmSkip) {
     const manifests = helmTemplate(output);
@@ -1856,7 +1894,7 @@ test("native admin domains render lowercase for the chart", async () => {
       manifests,
       /name: OCC_AGENT_NATIVE_ADMIN_DOMAIN\n\s+value: "agents\.example\.co\.uk"/,
     );
-    assert.match(manifests, /name: OCC_AUTH_COOKIE_DOMAIN\n\s+value: "example\.co\.uk"/);
+    assert.doesNotMatch(manifests, /name: OCC_AUTH_COOKIE_DOMAIN/);
   }
 });
 
@@ -1983,13 +2021,12 @@ test("profiles pass an optional observability URL to Installation startup YAML",
 });
 
 function externalSignInInput(signIn = {}) {
-  const { agentNativeAdminDomain, sharedCookieDomain, ...controlPlane } = baseInput().controlPlane;
-  assert.ok(agentNativeAdminDomain && sharedCookieDomain);
+  const controlPlane = baseInput().controlPlane;
   return baseInput({
     controlPlane: {
       ...controlPlane,
       recoveryUserId: "recovery-admin_1",
-      github: { egressCidrs: ["140.82.112.0/20"] },
+      google: { egressCidrs: ["140.82.112.0/20"] },
       ...signIn,
     },
   });
@@ -2000,23 +2037,23 @@ test(
   { skip: helmSkip },
   async () => {
     const trustedProxy = { preset: "ingress-nginx", cidrs: ["10.42.0.0/16"] };
-    const github = await render("openclaw", externalSignInInput({ trustedProxy }));
-    assert.equal(github.summary.ok, true);
-    // GitHub and Google sign-in support host-only cookies only, so native admin stays off.
-    assert.match(github.values, /agentNativeAdmin:\n {2}enabled: false\n/);
-    assert.match(github.values, /recoveryUserId: recovery-admin_1/);
+    const googleDefault = await render("openclaw", externalSignInInput({ trustedProxy }));
+    assert.equal(googleDefault.summary.ok, true);
+    // Google native browser access remains unsupported.
+    assert.match(googleDefault.values, /agentNativeAdmin:\n {2}enabled: false\n/);
+    assert.match(googleDefault.values, /recoveryUserId: recovery-admin_1/);
     assert.match(
-      github.values,
-      /github:\n {4}enabled: true\n {4}egressCidrs:\n {6}- 140\.82\.112\.0\/20/,
+      googleDefault.values,
+      /google:\n {4}enabled: true\n {4}egressCidrs:\n {6}- 140\.82\.112\.0\/20/,
     );
-    assert.match(github.values, /trustedProxy:\n {4}preset: ingress-nginx/);
-    assert.doesNotMatch(github.preflight.warnings.join("\n"), /trustedProxy is not set/);
-    assert.doesNotMatch(github.preflight.prerequisites.join("\n"), /native admin domain/);
-    const manifests = helmTemplate(github);
-    assert.match(manifests, /name: OCC_AUTH_GITHUB_CLIENT_ID/);
-    assert.match(manifests, /name: OCC_AUTH_GITHUB_RECOVERY_USER_ID\n\s+value: "recovery-admin_1"/);
+    assert.match(googleDefault.values, /trustedProxy:\n {4}preset: ingress-nginx/);
+    assert.doesNotMatch(googleDefault.preflight.warnings.join("\n"), /trustedProxy is not set/);
+    assert.doesNotMatch(googleDefault.preflight.prerequisites.join("\n"), /native admin domain/);
+    const manifests = helmTemplate(googleDefault);
+    assert.match(manifests, /name: OCC_AUTH_GOOGLE_CLIENT_ID/);
+    assert.match(manifests, /name: OCC_AUTH_RECOVERY_USER_ID\n\s+value: "recovery-admin_1"/);
     assert.match(manifests, /name: OCC_AUTH_TRUSTED_PROXY_CIDRS\n\s+value: "10\.42\.0\.0\/16"/);
-    assert.doesNotMatch(manifests, /OCC_AUTH_GITHUB_ALLOWED_/);
+    assert.doesNotMatch(manifests, /OCC_AUTH_GOOGLE_ALLOWED_/);
     // The API reads the scheme as URL parsing does, so an uppercase HTTPS origin is valid.
     const uppercase = await render(
       "openclaw",
@@ -2027,28 +2064,10 @@ test(
       helmTemplate(uppercase),
       /name: OCC_AUTH_BASE_URL\n\s+value: "HTTPS:\/\/Console\.OCE\.example\.internal"/,
     );
-    const allowlisted = await render(
-      "openclaw",
-      externalSignInInput({
-        trustedProxy,
-        github: { allowedOrgs: ["acme"], allowedTeams: ["other/platform"] },
-      }),
-    );
-    assert.equal(allowlisted.summary.ok, true, allowlisted.preflight.errors.join("\n"));
-    assert.match(
-      allowlisted.values,
-      /allowedOrgs:\n {6}- acme\n {4}allowedTeams:\n {6}- other\/platform/,
-    );
-    const allowlistManifests = helmTemplate(allowlisted);
-    assert.match(allowlistManifests, /name: OCC_AUTH_GITHUB_ALLOWED_ORGS\n\s+value: "acme"/);
-    assert.match(
-      allowlistManifests,
-      /name: OCC_AUTH_GITHUB_ALLOWED_TEAMS\n\s+value: "other\/platform"/,
-    );
     // Password sign-in stays open to every account unless recovery-only is chosen.
-    assert.doesNotMatch(github.values, /passwordSignIn/);
+    assert.doesNotMatch(googleDefault.values, /passwordSignIn/);
     assert.doesNotMatch(manifests, /OCC_AUTH_PASSWORD_SIGN_IN/);
-    assert.doesNotMatch(github.preflight.prerequisites.join("\n"), /identity attached/);
+    assert.doesNotMatch(googleDefault.preflight.prerequisites.join("\n"), /identity attached/);
     const recoveryOnly = await render(
       "openclaw",
       externalSignInInput({ trustedProxy, passwordSignIn: "recovery-only" }),
@@ -2057,7 +2076,7 @@ test(
     assert.match(recoveryOnly.values, /passwordSignIn: recovery-only/);
     assert.match(
       recoveryOnly.preflight.prerequisites.join("\n"),
-      /GitHub, Google or OIDC identity attached to every ordinary account/,
+      /Google or OIDC identity attached to every ordinary account/,
     );
     assert.match(
       helmTemplate(recoveryOnly),
@@ -2068,7 +2087,6 @@ test(
       "codex",
       codexInput({
         controlPlane: externalSignInInput({
-          github: undefined,
           google: { allowedDomains: ["example.com"] },
         }).controlPlane,
       }),
@@ -2084,7 +2102,7 @@ test(
     const oidc = await render(
       "openclaw",
       externalSignInInput({
-        github: undefined,
+        google: undefined,
         oidc: {
           issuer: "https://sso.example.com/realms/acme",
           authorizationUrl: "https://sso.example.com/realms/acme/protocol/openid-connect/auth",
@@ -2098,8 +2116,9 @@ test(
     );
     assert.equal(oidc.summary.ok, true, oidc.preflight.errors.join("\n"));
     assert.match(oidc.values, /oidc:\n {4}enabled: true\n/);
+    assert.match(oidc.values, /agentNativeAdmin:\n {2}enabled: true\n/);
     assert.match(oidc.values, /issuer: https:\/\/sso\.example\.com\/realms\/acme\n/);
-    assert.doesNotMatch(oidc.values, /github:/);
+    assert.doesNotMatch(oidc.values, /google:/);
     const oidcManifests = helmTemplate(oidc);
     assert.match(
       oidcManifests,
@@ -2108,12 +2127,48 @@ test(
     assert.match(oidcManifests, /name: OCC_AUTH_OIDC_TOKEN_AUTH\n\s+value: "client_secret_basic"/);
     assert.match(oidcManifests, /name: OCC_AUTH_OIDC_DISPLAY_NAME\n\s+value: "Acme SSO"/);
     assert.match(oidcManifests, /name: openclaw-enterprise-api-oidc-login-egress/);
+    for (const requireVerifiedEmail of [undefined, true, false, null, "false"]) {
+      const input = externalSignInInput({
+        google: undefined,
+        oidc: {
+          issuer: "https://sso.example.com/realms/acme",
+          authorizationUrl: "https://sso.example.com/realms/acme/protocol/openid-connect/auth",
+          tokenUrl: "https://sso.example.com/realms/acme/protocol/openid-connect/token",
+          jwksUrl: "https://sso.example.com/realms/acme/protocol/openid-connect/certs",
+          enrollment: {
+            admission: { groupsClaim: "groups", anyOf: ["members"] },
+            createAccount: { enabled: true, role: null, requireVerifiedEmail },
+          },
+        },
+      });
+      if (requireVerifiedEmail === null || typeof requireVerifiedEmail === "string") {
+        await assert.rejects(
+          () => render("openclaw", input),
+          /requireVerifiedEmail must be a boolean/,
+        );
+      } else {
+        const enrolled = await render("openclaw", input);
+        assert.equal(enrolled.summary.ok, true, enrolled.preflight.errors.join("\n"));
+        assert.equal(
+          oidcEnrollmentPolicy(loadYaml(enrolled.values).auth.oidc.enrollment).createAccount
+            .requireVerifiedEmail,
+          requireVerifiedEmail ?? true,
+        );
+        input.controlPlane.oidc.enrollment.createAccount = { requireVerifiedEmail };
+        const admissionOnly = await render("openclaw", input);
+        const disabled = oidcEnrollmentPolicy(
+          loadYaml(admissionOnly.values).auth.oidc.enrollment,
+        ).createAccount;
+        assert.equal(disabled.enabled, false);
+        assert.equal(disabled.requireVerifiedEmail, requireVerifiedEmail ?? true);
+      }
+    }
     // The API trims each OIDC URL with JavaScript's trim before its checks, and so do the chart
     // and the renderer, which keep the value as written.
     const padded = await render(
       "openclaw",
       externalSignInInput({
-        github: undefined,
+        google: undefined,
         oidc: {
           issuer: " https://sso.example.com/realms/acme ",
           authorizationUrl: "\thttps://sso.example.com/realms/acme/protocol/openid-connect/auth",
@@ -2138,9 +2193,9 @@ test(
   },
 );
 
-// Operators render from a plain checkout: installation-profiles.md asks for `pnpm install`
-// only with native admin, whose public suffix check loads tldts. Copy the sources the renderer
-// can import, without any node_modules, into a directory outside the repository.
+// A plain checkout must emit preflight diagnostics when shared-session validation
+// dependencies are missing. Copy the renderer sources without node_modules outside
+// the repository.
 function checkoutWithoutDependencies() {
   const root = mkdtempSync(join(tmpdir(), "oce-profile-checkout-"));
   const sources = [
@@ -2164,50 +2219,34 @@ function checkoutWithoutDependencies() {
   return root;
 }
 
-test("profiles render without installed dependencies unless native admin is on", async (t) => {
+test("profiles require the public suffix list for shared browser sessions", async (t) => {
   const root = checkoutWithoutDependencies();
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const [profile, input] of [
-    ["openclaw", externalSignInInput()],
-    ["codex", codexInput({ controlPlane: externalSignInInput().controlPlane })],
-  ]) {
-    const directory = mkdtempSync(join(tmpdir(), `oce-profile-${profile}-`));
-    t.after(() => rmSync(directory, { recursive: true, force: true }));
-    let output;
-    try {
-      output = renderCli(profile, input, directory, root);
-    } catch (error) {
-      assert.fail(`${profile} render failed without node_modules:\n${error.profileRendererOutput}`);
-    }
-    assert.equal(output.summary.ok, true, output.preflight.errors.join("\n"));
-    assert.match(output.values, /agentNativeAdmin:\n {2}enabled: false\n/);
+  for (const input of [baseInput(), externalSignInInput()]) {
+    const directory = temporaryDirectorySync(t, "oce-profile-shared-session-");
+    const error = await renderError(() => renderCli("openclaw", input, directory, root));
+    assert.match(
+      error.profileRendererOutput,
+      /Shared browser sessions need the public suffix list: run pnpm install first\./,
+    );
+    const preflight = JSON.parse(readFileSync(join(directory, "preflight.json"), "utf8"));
+    assert.equal(preflight.ok, false);
+    assert.equal(existsSync(join(directory, "values.yaml")), false);
   }
-
-  // Native admin needs the API's public suffix list, so it asks for the install, with a preflight.
-  const directory = mkdtempSync(join(tmpdir(), "oce-profile-native-admin-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const error = await renderError(() => renderCli("openclaw", baseInput(), directory, root));
-  assert.match(
-    error.profileRendererOutput,
-    /controlPlane\.sharedCookieDomain needs the public suffix list: run pnpm install first\./,
-  );
-  const preflight = JSON.parse(readFileSync(join(directory, "preflight.json"), "utf8"));
-  assert.equal(preflight.ok, false);
-  assert.equal(existsSync(join(directory, "values.yaml")), false);
 });
 
 test("preflight warns, without failing, when no trusted proxy is set", async () => {
-  const github = await render("openclaw", externalSignInInput());
-  assert.equal(github.summary.ok, true);
+  const googleDefault = await render("openclaw", externalSignInInput());
+  assert.equal(googleDefault.summary.ok, true);
   assert.match(
-    github.preflight.warnings.join("\n"),
+    googleDefault.preflight.warnings.join("\n"),
     /controlPlane\.trustedProxy is not set: .*external sign-in starts have no per-client limit/,
   );
   assert.match(
-    github.preflight.warnings.join("\n"),
+    googleDefault.preflight.warnings.join("\n"),
     /trustedProxy is not set: .*Behind an HTTP proxy, API calls fail with 403 until it is set\./,
   );
-  assert.doesNotMatch(github.values, /trustedProxy:/);
+  assert.doesNotMatch(googleDefault.values, /trustedProxy:/);
   const password = await render("openclaw", baseInput());
   assert.equal(password.summary.ok, true);
   assert.match(
@@ -2228,9 +2267,8 @@ test("preflight rejects external sign-in Secret names Kubernetes refuses", async
     jwksUrl: "https://tenant.idp.example.test/.well-known/jwks.json",
   };
   for (const [provider, signIn] of [
-    ["github", { github: { secretName: "Bad_Name" } }],
-    ["google", { github: undefined, google: { secretName: "Bad_Name" } }],
-    ["oidc", { github: undefined, oidc: { ...oidc, secretName: "Bad_Name" } }],
+    ["google", { google: { secretName: "Bad_Name" } }],
+    ["oidc", { google: undefined, oidc: { ...oidc, secretName: "Bad_Name" } }],
   ]) {
     await assertPreflightFailure(
       "openclaw",
@@ -2239,9 +2277,8 @@ test("preflight rejects external sign-in Secret names Kubernetes refuses", async
     );
   }
   for (const signIn of [
-    { github: { secretName: "github.login-v2" } },
-    { github: undefined, google: { secretName: "google.login-v2" } },
-    { github: undefined, oidc: { ...oidc, secretName: "oidc.login-v2" } },
+    { google: { secretName: "google.login-v2" } },
+    { google: undefined, oidc: { ...oidc, secretName: "oidc.login-v2" } },
   ]) {
     assert.equal((await render("openclaw", externalSignInInput(signIn))).summary.ok, true);
   }
@@ -2250,30 +2287,23 @@ test("preflight rejects external sign-in Secret names Kubernetes refuses", async
 test("preflight rejects external sign-in and trusted proxy inputs Helm would reject", async () => {
   await assertPreflightFailure(
     "openclaw",
-    externalSignInInput({ github: { allowedTeams: ["platform"] } }),
-    /controlPlane.github.allowedTeams\[0\] must be a lowercase org\/team-slug entry/,
-  );
-  await assertPreflightFailure(
-    "openclaw",
-    externalSignInInput({
-      github: { allowedOrgs: Array.from({ length: 11 }, (_, index) => `org${index}`) },
-    }),
-    /allowedOrgs and allowedTeams list at most 10 entries together/,
+    externalSignInInput({ github: {} }),
+    /controlPlane.github was removed/,
   );
   await assertPreflightFailure(
     "openclaw",
     externalSignInInput({ recoveryUserId: undefined }),
-    /controlPlane.recoveryUserId is required with controlPlane.github, controlPlane.google or controlPlane.oidc/,
+    /controlPlane.recoveryUserId is required with controlPlane.google or controlPlane.oidc/,
   );
   await assertPreflightFailure(
     "openclaw",
     baseInput({ controlPlane: { ...baseInput().controlPlane, recoveryUserId: "admin" } }),
-    /controlPlane.recoveryUserId requires controlPlane.github, controlPlane.google or controlPlane.oidc/,
+    /controlPlane.recoveryUserId requires controlPlane.google or controlPlane.oidc/,
   );
   await assertPreflightFailure(
     "openclaw",
     baseInput({ controlPlane: { ...baseInput().controlPlane, passwordSignIn: "recovery-only" } }),
-    /controlPlane.passwordSignIn requires controlPlane.github, controlPlane.google or controlPlane.oidc/,
+    /controlPlane.passwordSignIn requires controlPlane.google or controlPlane.oidc/,
   );
   await assertPreflightFailure(
     "openclaw",
@@ -2282,8 +2312,8 @@ test("preflight rejects external sign-in and trusted proxy inputs Helm would rej
   );
   await assertPreflightFailure(
     "openclaw",
-    externalSignInInput({ agentNativeAdminDomain: "agents.oce.example.internal" }),
-    /controlPlane.agentNativeAdminDomain is not consumed with external sign-in/,
+    externalSignInInput({ sharedCookieDomain: "oce.example.internal" }),
+    /controlPlane.sharedCookieDomain is not supported/,
   );
   await assertPreflightFailure(
     "openclaw",
@@ -2292,12 +2322,12 @@ test("preflight rejects external sign-in and trusted proxy inputs Helm would rej
   );
   await assertPreflightFailure(
     "openclaw",
-    externalSignInInput({ github: { clientSecret: "inline" } }),
-    /controlPlane.github.clientSecret is not supported/,
+    externalSignInInput({ google: { clientSecret: "inline" } }),
+    /controlPlane.google.clientSecret is not supported/,
   );
   for (const [provider, key, value] of [
-    ["github", "clientIdKey", "bad/key"],
-    ["github", "clientSecretKey", "."],
+    ["google", "clientIdKey", "bad/key"],
+    ["google", "clientSecretKey", "."],
     ["google", "clientSecretKey", "a".repeat(254)],
     ["google", "clientIdKey", "..client-id"],
     ["oidc", "clientIdKey", "bad/key"],
@@ -2306,7 +2336,7 @@ test("preflight rejects external sign-in and trusted proxy inputs Helm would rej
     await assertPreflightFailure(
       "openclaw",
       externalSignInInput({
-        github: undefined,
+        google: undefined,
         [provider]:
           provider === "oidc"
             ? {
@@ -2322,8 +2352,8 @@ test("preflight rejects external sign-in and trusted proxy inputs Helm would rej
     );
   }
   for (const signIn of [
-    { github: { clientIdKey: ".hidden" } },
-    { github: undefined, google: { clientSecretKey: "a".repeat(253) } },
+    { google: { clientIdKey: ".hidden" } },
+    { google: { clientSecretKey: "a".repeat(253) } },
   ]) {
     assert.equal((await render("openclaw", externalSignInInput(signIn))).summary.ok, true);
   }
@@ -2381,13 +2411,13 @@ test("preflight rejects external sign-in and trusted proxy inputs Helm would rej
   ]) {
     await assertPreflightFailure(
       "openclaw",
-      externalSignInInput({ github: undefined, oidc: { ...oidc, ...override } }),
+      externalSignInInput({ google: undefined, oidc: { ...oidc, ...override } }),
       message,
     );
   }
   await assertPreflightFailure(
     "openclaw",
-    externalSignInInput({ github: undefined, oidc: { ...oidc, jwksUrl: undefined } }),
+    externalSignInInput({ google: undefined, oidc: { ...oidc, jwksUrl: undefined } }),
     /controlPlane.oidc.jwksUrl must be a nonempty string/,
   );
   await assertPreflightFailure(
@@ -2729,7 +2759,6 @@ test("preflight rejects a Google hosted domain the chart and API refuse", async 
   assert.equal(domain253.length, 253);
   const googleInput = (allowedDomains) =>
     externalSignInInput({
-      github: undefined,
       google: { allowedDomains },
     });
   for (const allowedDomains of [["example.123"], ["example.1"], [domain254]]) {
@@ -2854,34 +2883,57 @@ test("preflight rejects Codex seccomp paths the compute driver refuses", async (
   assert.match(accepted.installation, /codexSeccompProfile: profiles\/codex\.json/);
 });
 
-test("the codex profile carries a Codex model endpoint under Compute startup's rule", async () => {
-  const field = "runtime.codexModelBaseUrl";
-  await assertFieldRefusals(
-    "openclaw",
-    baseInput(),
-    field,
-    ["https://models.example.com/v1"],
-    "is only consumed by the codex profile",
+test("both profiles carry the shared model endpoint under Compute startup's rule", async () => {
+  const field = "runtime.modelProvider.baseUrl";
+  const shared = { protocol: "openai-responses", baseUrl: "https://models.example.com/v1" };
+  const native = await render("openclaw", {
+    ...baseInput(),
+    runtime: { ...baseInput().runtime, modelProvider: shared },
+  });
+  assert.deepEqual(
+    loadYaml(native.installation).drivers.compute.configuration.runtime.modelProvider,
+    shared,
+  );
+  const capable = await render(
+    "codex",
+    codexInput({ runtime: { modelProvider: { ...shared, supportsStandaloneWebSearch: true } } }),
+  );
+  assert.equal(
+    loadYaml(capable.installation).drivers.compute.configuration.runtime.modelProvider
+      .supportsStandaloneWebSearch,
+    true,
   );
   const accepted = await render(
     "codex",
-    codexInput({ runtime: { codexModelBaseUrl: "https://Models.Example.com:443/v1/" } }),
+    codexInput({
+      runtime: {
+        modelProvider: {
+          protocol: "openai-responses",
+          baseUrl: "https://Models.Example.com:443/v1/",
+        },
+      },
+    }),
   );
   const compute = loadYaml(accepted.installation).drivers.compute.configuration;
   // Written as Compute normalizes it, and accepted by Compute startup.
-  assert.equal(compute.runtime.codexModelBaseUrl, "https://models.example.com/v1");
+  assert.equal(compute.runtime.modelProvider?.baseUrl, "https://models.example.com/v1");
   const backslashScheme = await render(
     "codex",
-    codexInput({ runtime: { codexModelBaseUrl: "https:\\\\192.0.2.1/v1" } }),
+    codexInput({
+      runtime: {
+        modelProvider: { protocol: "openai-responses", baseUrl: "https:\\\\192.0.2.1/v1" },
+      },
+    }),
   );
   assert.equal(
-    loadYaml(backslashScheme.installation).drivers.compute.configuration.runtime.codexModelBaseUrl,
+    loadYaml(backslashScheme.installation).drivers.compute.configuration.runtime.modelProvider
+      ?.baseUrl,
     "https://192.0.2.1/v1",
   );
   requireConfiguration(KubernetesComputeDriver, compute);
   assert.equal(
     loadYaml((await render("codex", codexInput())).installation).drivers.compute.configuration
-      .runtime.codexModelBaseUrl,
+      .runtime.modelProvider?.baseUrl,
     undefined,
   );
   // Each refusal is Compute startup's (finding 1292 spellings included), with its own message.
@@ -2928,12 +2980,21 @@ test("the codex profile carries a Codex model endpoint under Compute startup's r
     // A spelling refusal comes first, whatever host the parser would read.
     ["https:/192.168.1/v1", "must start with https:// (the // after the scheme is missing)."],
   ]) {
-    await assertFieldRefusals("codex", codexInput(), field, [value], message);
+    await assertFieldRefusals(
+      "codex",
+      codexInput({ runtime: { modelProvider: shared } }),
+      field,
+      [value],
+      message,
+    );
     assert.throws(
       () =>
         requireConfiguration(KubernetesComputeDriver, {
           ...compute,
-          runtime: { ...compute.runtime, codexModelBaseUrl: value },
+          runtime: {
+            ...compute.runtime,
+            modelProvider: { protocol: "openai-responses", baseUrl: value },
+          },
         }),
       // Compute startup has no separate nonempty-string refusal; its general rule covers it.
       SharedConfigurationValidationError,
@@ -2955,7 +3016,10 @@ test("the codex profile carries a Codex model endpoint under Compute startup's r
     ["https://[2001:db8::1]/v1", "is an IPv6 address but Harness model egress allows only IPv4"],
     ["https://10.0.0.1/v1", "has an IPv4 host in 10.0.0.0/8 which Harness model egress excludes"],
   ]) {
-    const warned = await render("codex", codexInput({ runtime: { codexModelBaseUrl: value } }));
+    const warned = await render(
+      "codex",
+      codexInput({ runtime: { modelProvider: { protocol: "openai-responses", baseUrl: value } } }),
+    );
     assert.ok(
       warned.preflight.warnings.includes(
         `${field} ${blocked}: the generated policy will not admit it unless another NetworkPolicy does.`,
@@ -2963,7 +3027,7 @@ test("the codex profile carries a Codex model endpoint under Compute startup's r
       value,
     );
     const configured = loadYaml(warned.installation).drivers.compute.configuration;
-    assert.equal(configured.runtime.codexModelBaseUrl, value);
+    assert.equal(configured.runtime.modelProvider?.baseUrl, value);
     requireConfiguration(KubernetesComputeDriver, configured);
   }
 });
@@ -3007,3 +3071,58 @@ test("profile transport Secret prefixes agree with controller startup admission"
     }
   }
 });
+
+test(
+  "profiles explicitly opt guarded OIDC into host-only native admin",
+  { skip: helmSkip },
+  async () => {
+    const input = externalSignInInput({
+      google: undefined,
+      oidc: {
+        issuer: "https://sso.example.com/realms/acme",
+        authorizationUrl: "https://sso.example.com/authorize",
+        tokenUrl: "https://sso.example.com/token",
+        jwksUrl: "https://sso.example.com/jwks",
+        egressCidrs: ["198.51.100.0/24"],
+      },
+      authBaseUrl: "https://console.example.com",
+      agentNativeAdminDomain: "agents.example.com",
+      agentNativeAdminSessionMode: "host-only-exchange",
+    });
+    const output = await render("openclaw", input);
+    assert.equal(output.summary.ok, true);
+    assert.deepEqual(loadYaml(output.values).agentNativeAdmin, {
+      enabled: true,
+      domain: "agents.example.com",
+      sessionMode: "host-only-exchange",
+    });
+    const shared = await render("openclaw", {
+      ...input,
+      controlPlane: { ...input.controlPlane, agentNativeAdminSessionMode: "shared-cookie" },
+    });
+    // The chart owns the shared default; profiles must not revive a manual cookie domain.
+    assert.deepEqual(loadYaml(shared.values).agentNativeAdmin, {
+      enabled: true,
+      domain: "agents.example.com",
+    });
+    const manifests = helmTemplate(output);
+    assert.match(
+      manifests,
+      /name: OCC_AGENT_NATIVE_ADMIN_SESSION_MODE\n\s+value: "host-only-exchange"/,
+    );
+    assert.doesNotMatch(manifests, /OCC_AUTH_COOKIE_DOMAIN/);
+    assert.match(output.preflight.prerequisites.join("\n"), /External sign-in Secrets created/);
+    for (const changes of [
+      { sharedCookieDomain: "example.com" },
+      { agentNativeAdminDomain: "agents.other.com" },
+      { google: {} },
+      { oidc: undefined },
+      { agentNativeAdminSessionMode: "unknown" },
+    ]) {
+      await assert.rejects(
+        render("openclaw", { ...input, controlPlane: { ...input.controlPlane, ...changes } }),
+        /profile renderer refused/,
+      );
+    }
+  },
+);

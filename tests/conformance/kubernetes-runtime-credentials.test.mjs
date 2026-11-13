@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { Linter } from "eslint";
@@ -27,8 +26,9 @@ import {
 } from "../../packages/occ/src/index.ts";
 import { readJsonLinesSync } from "../helpers/json-lines.mjs";
 import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
+import { temporaryDirectorySync } from "../helpers/temporary-directory.mjs";
 
-const { AGENT_RUNTIME_ENTRYPOINT } = runtimeEntrypoints;
+const { COMPUTE_AGENT_RUNTIME_ENTRYPOINT: AGENT_RUNTIME_ENTRYPOINT } = runtimeEntrypoints;
 const namespace = Object.freeze({
   id: "ns_runtime_00000000-0000-4000-8000-000000000001",
   name: "Runtime credential tenant",
@@ -86,6 +86,7 @@ function credentialFixture({
   twoCluster = false,
   secretReadStatus = undefined,
   secretCreateStatus = undefined,
+  observeCreatedSecret = (secret) => secret,
   deploymentListStatus = undefined,
 } = {}) {
   const configured = options();
@@ -201,7 +202,7 @@ function credentialFixture({
       }
       assert.equal(request.namespace, controlNamespace?.metadata.name ?? namespaceName);
       created.push(structuredClone(request.body));
-      const observed = {
+      const observed = observeCreatedSecret({
         ...request.body,
         metadata: { ...request.body.metadata, uid: `${request.body.metadata.name}-uid` },
         data:
@@ -212,7 +213,7 @@ function credentialFixture({
               encode(value),
             ]),
           ),
-      };
+      });
       secrets[observed.metadata.name] = observed;
       return structuredClone(observed);
     },
@@ -650,6 +651,93 @@ test("mocked Kubernetes client preflights the transport Secret before initial cr
   assert.notEqual(transport["app-server-token"], password["gateway-password"]);
 });
 
+for (const group of ["transport", "gateway-password"]) {
+  for (const defect of ["extra data", "foreign owner", "missing group"]) {
+    test(`runtime credential creation refuses ${group} with ${defect} on readback`, async () => {
+      const secrets = {};
+      const name = `${group}-${digest(agent.id)}`;
+      const fixture = credentialFixture({
+        secrets,
+        observeCreatedSecret(secret) {
+          if (secret.metadata.name === name) {
+            if (defect === "extra data") {
+              secret.data.unexpected = encode("benign-admission-value");
+            } else if (defect === "foreign owner") {
+              secret.metadata.labels["openclaw.dev/agent"] = "another-agent";
+            }
+          }
+          return secret;
+        },
+      });
+      if (defect === "missing group") {
+        const { core } = await fixture.driver.apiClients;
+        const create = core.createNamespacedSecret.bind(core);
+        core.createNamespacedSecret = async (request) => {
+          const observed = await create(request);
+          // Another actor removes this group after the create has succeeded.
+          delete secrets[name];
+          return observed;
+        };
+      }
+
+      await assert.rejects(
+        fixture.driver.provisionAgentRuntimeCredentials(binding(), {}),
+        defect === "missing group" ? DependencyUnavailableError : ResourceConflictError,
+      );
+      const retained = structuredClone(secrets);
+      if (defect === "missing group") {
+        assert.deepEqual(await fixture.driver.getAgentRuntimeCredentialStatus(binding()), {
+          transportConfigured: false,
+        });
+      } else {
+        await assert.rejects(
+          fixture.driver.getAgentRuntimeCredentialStatus(binding()),
+          ResourceConflictError,
+        );
+      }
+      assert.deepEqual(secrets, retained, "failed confirmation must retain the stored objects");
+      assert.deepEqual(fixture.deleted, []);
+      assert.deepEqual(
+        fixture.calls.filter(({ kind }) => kind === "createSecret").map(({ name }) => name),
+        [`transport-${digest(agent.id)}`, `gateway-password-${digest(agent.id)}`],
+        "confirmation must not replay creates or compensate for the stored objects",
+      );
+    });
+  }
+}
+
+test("runtime credential creation reconciles a lost response without replaying the stored Secret", async () => {
+  const fixture = credentialFixture();
+  const { core } = await fixture.driver.apiClients;
+  const create = core.createNamespacedSecret.bind(core);
+  let responseLost = false;
+  core.createNamespacedSecret = async (request) => {
+    const observed = await create(request);
+    if (!responseLost) {
+      responseLost = true;
+      throw httpError(503);
+    }
+    return observed;
+  };
+
+  await assert.rejects(
+    fixture.driver.provisionAgentRuntimeCredentials(binding(), {}),
+    DependencyUnavailableError,
+  );
+  assert.equal(fixture.created.length, 1, "an uncertain create must not be replayed");
+  assert.deepEqual(await fixture.driver.getAgentRuntimeCredentialStatus(binding()), {
+    transportConfigured: false,
+  });
+  assert.deepEqual(await fixture.driver.provisionAgentRuntimeCredentials(binding(), {}), {
+    transportConfigured: true,
+  });
+  assert.deepEqual(
+    fixture.created.map((secret) => secret.metadata.name),
+    [`transport-${digest(agent.id)}`, `gateway-password-${digest(agent.id)}`],
+  );
+  assert.deepEqual(fixture.deleted, []);
+});
+
 test("mocked Kubernetes client can recover missing transport when model credentials already exist", async () => {
   const first = credentialFixture();
   const secrets = {
@@ -781,14 +869,23 @@ test("embedded Gateway uses the separate canonical password source", () => {
   };
 
   assert.equal(gatewayEnvironment({}).OPENCLAW_GATEWAY_PASSWORD, undefined);
-  assert.deepEqual(
-    gatewayEnvironment({
-      gateway: {
-        auth: { password: { source: "env", id: "OPENCLAW_GATEWAY_PASSWORD" } },
-      },
-    }).OPENCLAW_GATEWAY_PASSWORD.valueFrom.secretKeyRef,
-    { name: `gateway-password-${suffix}`, key: "gateway-password" },
-  );
+  // On the default env alias, and on an env provider the revision's secrets configure, which
+  // OpenClaw also reads from the Gateway's environment (finding 3057).
+  for (const [provider, secrets] of [
+    ["default", undefined],
+    ["vault", { providers: { vault: { source: "env" } } }],
+  ]) {
+    assert.deepEqual(
+      gatewayEnvironment({
+        gateway: {
+          auth: { password: { source: "env", provider, id: "OPENCLAW_GATEWAY_PASSWORD" } },
+        },
+        ...(secrets === undefined ? {} : { secrets }),
+      }).OPENCLAW_GATEWAY_PASSWORD.valueFrom.secretKeyRef,
+      { name: `gateway-password-${suffix}`, key: "gateway-password" },
+      provider,
+    );
+  }
   assert.throws(
     () =>
       driver.gatewayConfiguration({
@@ -989,8 +1086,7 @@ test("Codex startup logs in, probes and starts the app server in each login mode
     },
   };
   for (const [mode, { env, flag, input }] of Object.entries(login)) {
-    const directory = mkdtempSync(join(tmpdir(), "oce-codex-login-mode-"));
-    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const directory = temporaryDirectorySync(t, "oce-codex-login-mode-");
     const codexHome = join(directory, "codex");
     mkdirSync(join(directory, "bin"));
     mkdirSync(codexHome);
@@ -1027,7 +1123,18 @@ test("Codex startup logs in, probes and starts the app server in each login mode
     );
     if (flag !== undefined) {
       assert.deepEqual(calls[0], {
-        args: ["-c", "cli_auth_credentials_store=file", "login", flag],
+        args: [
+          "-c",
+          'otel.exporter="none"',
+          "-c",
+          'otel.metrics_exporter="none"',
+          "-c",
+          "otel.log_user_prompt=false",
+          "-c",
+          "cli_auth_credentials_store=file",
+          "login",
+          flag,
+        ],
         input,
       });
     }

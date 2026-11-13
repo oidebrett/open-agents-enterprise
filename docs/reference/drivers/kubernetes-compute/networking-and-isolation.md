@@ -33,8 +33,11 @@ the endpoint capability retain ordinary Service or private routing.
 For startup, plugin and deployment diagnostics, set
 `network.pluginStatusProxySourceCidrs` to the API server's Pod-proxy source
 addresses as `/32` or `/128`: wider ranges warn; all-address ranges fail.
-On overlays, the source can be the control-plane node's overlay address. Verify
-each node's actual source address with enforced policies. This allows only private TCP/18791, including Agents without plugins.
+On overlays, the source can be the control-plane node's overlay address. A
+managed control plane can use different sources for OCC and direct operator
+requests. [Verify deployment diagnostics through OCC](../../../guides/operate/network-isolation.md#check-the-status-port)
+with the policies enforced. This setting admits private TCP/18791 for the listed
+sources, including for Agents without plugins.
 API and worker ServiceAccounts need namespace-local `get` on `pods/proxy`.
 Omission adds no ingress rule, potentially blocking diagnostics, and restarts the
 Gateway once per dedicated Codex first deploy. It grants neither native Gateway
@@ -295,6 +298,10 @@ before binding the tenant identity; no pause or restart is required.
 Missing worker permissions keep provisioning pending; missing API permissions
 prevent Configuration access. Docker and external Compute Drivers reject
 existing-namespace selection with `409`.
+
+When the controller cannot create namespaces, bind one operator-created
+namespace with the Helm value
+[`preprovisionedNamespace`](preprovisioned-namespace.md).
 
 Workload Pods use the restricted
 [Pod and container hardening](../../security.md#pod-and-container-hardening),

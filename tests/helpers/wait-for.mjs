@@ -10,6 +10,13 @@ import { setTimeout as delay } from "node:timers/promises";
 // recent error from any read (even if later reads returned undefined) and keeps it as `cause`.
 // `description` may be a function, called once at the deadline, so the failure can report
 // the state that was still wrong.
+/**
+ * @template T
+ * @param {string | (() => string)} description
+ * @param {() => T | undefined | PromiseLike<T | undefined>} read
+ * @param {number | null | { timeoutMs?: number, intervalMs?: number, retryErrors?: boolean }} [options]
+ * @returns {Promise<T>}
+ */
 export async function waitFor(description, read, options = {}) {
   const {
     timeoutMs = 10_000,
@@ -66,4 +73,32 @@ export function waitForResult(description, read, options) {
     },
     options,
   );
+}
+
+/**
+ * Returns `promise`'s outcome, or rejects with `Timed out after <timeoutMs> ms: <message>` if
+ * it has not settled by then, so a stalled step fails with its own message instead of running
+ * into the test timeout. The timer is cleared as soon as `promise` settles. `message` may be a
+ * function, called at the deadline, to report state gathered while waiting.
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {string | (() => string)} message
+ * @param {number} [timeoutMs]
+ * @returns {Promise<T>}
+ */
+export async function within(promise, message, timeoutMs = 10_000) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const text = typeof message === "function" ? message() : message;
+          reject(new Error(`Timed out after ${timeoutMs} ms: ${text}`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

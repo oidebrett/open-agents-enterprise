@@ -6,10 +6,17 @@ checks, and recovery after a failed or rejected save.
 
 ## Discover and select repositories
 
+When the selected Credential Proxy serves only Git, **Create Agent** requires
+approved repository access for immediate provisioning. For model-only deployment,
+use an installation that supports Agents without repository access.
+
 Repository discovery is independent of model authentication. Small catalogs offer
 **Add**; larger ones support search and paging.
 Suggestions favor repositories you recently saved in this browser and Namespace,
 then sort alphabetically.
+
+If there are no approved repositories or a search has no matches, ask your
+Namespace operator about missing repositories.
 
 **Default repository access** starts at **Contributor** for code pushes, PRs,
 and issue management. Choose **Read-only**, or customize Contributor to turn off

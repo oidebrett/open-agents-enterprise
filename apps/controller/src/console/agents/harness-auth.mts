@@ -1,16 +1,31 @@
 import type {
   CredentialSourceReference,
   HarnessAuthBinding,
+  InstallationCapabilities,
   SecretMetadata,
   SecretReference,
   ServiceAccount,
 } from "@openclaw-enterprise/contracts";
-import { requestFailure, responseFields } from "../api-client.mjs";
+import { INSTALLATION_ADMINISTRATION, requestFailure, responseFields } from "../api-client.mjs";
 import { element, setUnavailable } from "../dom.mjs";
 import { message, namespaceListNeed, namespacePath } from "./list.mjs";
 import { createSecretReferenceField, renderSecretReference } from "./secret-picker.mjs";
 import type { AgentAccessContext } from "./credential-access.mjs";
-import { createDeviceLogin, type DeviceLogin } from "./device-login.mjs";
+import { createDeviceLogin, deviceLoginOffered, type DeviceLogin } from "./device-login.mjs";
+
+function primaryModel(defaults: Record<string, unknown>, entries: Record<string, unknown>[]) {
+  const selection = defaults.model ?? entries.find((entry) => entry.model)?.model;
+  const model = typeof selection === "string" ? selection : responseFields(selection).primary;
+  return typeof model === "string" ? model : undefined;
+}
+
+export function configuredModel(values: unknown) {
+  const agents = responseFields(responseFields(values).agents);
+  return primaryModel(
+    responseFields(agents.defaults),
+    Object.values(responseFields(agents.entries)).map(responseFields),
+  );
+}
 
 // Display native model policy; deployment admission owns full Configuration validation.
 export function configuredHarnessId(
@@ -20,8 +35,7 @@ export function configuredHarnessId(
   const agentPolicy = responseFields(agents);
   const defaults = responseFields(agentPolicy.defaults);
   const entries = Object.values(responseFields(agentPolicy.entries)).map(responseFields);
-  const selection = defaults.model ?? entries.find((entry) => entry.model)?.model;
-  const model = typeof selection === "string" ? selection : responseFields(selection).primary;
+  const model = primaryModel(defaults, entries);
   if (typeof model !== "string") {
     return undefined;
   }
@@ -64,7 +78,10 @@ export function configuredHarnessId(
 }
 
 type AuthBinding = HarnessAuthBinding | null | undefined;
-type HarnessAuthContext = AgentAccessContext & { agentId?: string | undefined };
+type HarnessAuthContext = AgentAccessContext & {
+  agentId?: string | undefined;
+  installationAdmin?: boolean | null;
+};
 
 export function harnessAuthDescription(binding: AuthBinding) {
   if (!binding) {
@@ -125,7 +142,12 @@ export function createHarnessAuthFields(
   context: HarnessAuthContext,
   binding: AuthBinding,
   harnessId: ReturnType<typeof configuredHarnessId>,
-  options: { draft?: HarnessAuthDraft | undefined; agentName?: string; onChange?(): void } = {},
+  options: {
+    draft?: HarnessAuthDraft | undefined;
+    agentName?: string;
+    onChange?(): void;
+    onStartSettled?(): void;
+  } = {},
 ) {
   const method = element(
     "select",
@@ -219,7 +241,31 @@ export function createHarnessAuthFields(
         options.onChange?.();
       }
     },
+    onStartSettled: () => options.onStartSettled?.(),
   });
+  // Only an Installation administrator reads the Installation, which says whether its Drivers
+  // offer a device login at all (finding 2991). Read once, when ChatGPT OAuth is first chosen; a
+  // failed read leaves Sign in offered.
+  let offerRead = false;
+  function readOffer() {
+    if (offerRead || context.installationAdmin !== true) {
+      return;
+    }
+    offerRead = true;
+    context.request("/installation", INSTALLATION_ADMINISTRATION).then(
+      (installation) => {
+        if (context.isCurrent()) {
+          const { capabilities } = responseFields(installation);
+          oauthLogin.setOffered(deviceLoginOffered(capabilities as InstallationCapabilities));
+        }
+      },
+      (error: unknown) => {
+        if (context.isCurrent() && requestFailure(error).status === 401) {
+          context.onExpired();
+        }
+      },
+    );
+  }
   const currentOAuth = element(
     "p",
     { className: "hint" },
@@ -267,6 +313,9 @@ export function createHarnessAuthFields(
     validationHint.hidden = usesOAuth;
     oauthLogin.setActive(usesOAuth);
     oauthLogin.setDisabled(disabled);
+    if (usesOAuth) {
+      readOffer();
+    }
     currentOAuth.hidden =
       method.value !== "credential_source" || binding?.method !== "credential_source";
     secretField.hidden = !directSecret;

@@ -1,5 +1,18 @@
 /// <reference lib="es2024.promise" />
 
+import {
+  openCreateSecretDialog,
+  createModelCredentialSecret,
+  enterManualModel,
+  openAdvancedSettings,
+  optionValues,
+  runProvisioningPolls,
+  waitForCreateFormReads,
+  submitCreateAgent,
+  createAgentThroughForm,
+  expectCreateAccess,
+  expectCreateRefused,
+} from "./console-agents-ui-test-support.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -38,6 +51,7 @@ import {
   accessBindingPostRequests,
   apiRequests,
   detailUrl,
+  expectReachableReason,
   holdRequests,
   login,
   setSlackSelection,
@@ -55,33 +69,22 @@ import {
   waitForInputValue,
   statusTone,
   isMaskedSecretValue,
-  trackSettledFetches,
-} from "./console-agents-browser-helpers.mjs";
+} from "./console-agents-browser-helpers.ts";
+import { trackSettledFetches } from "./console-fetch-accounting.ts";
 import {
   STARTER_CONTROL_UI,
-  openCreateSecretDialog,
-  createModelCredentialSecret,
-  enterManualModel,
-  openAdvancedSettings,
   configurationPostRequests,
   agentProvisionPostRequests,
   routeInstallationProvisioning,
   routeInstallationWithoutProvisioning,
   nativeSandboxDriver,
   agentPostRequests,
-  optionValues,
   createRepositoryLaunchFixture,
-  runProvisioningPolls,
-  waitForCreateFormReads,
-  submitCreateAgent,
-  createAgentThroughForm,
-  expectCreateAccess,
-  expectCreateRefused,
-} from "./console-agents-test-support.mjs";
+} from "./console-agents-test-support.ts";
 import {
   expectDeploymentOutcome,
   openFailureDetails,
-} from "./console-deployment-activity-helpers.mjs";
+} from "./console-deployment-activity-helpers.ts";
 import {
   ADMINISTRATOR_ACCESS_DENIED,
   AGENT_CREATE_DENIED,
@@ -211,6 +214,7 @@ test("Agent creation stores its API key separately, grants exact access, and sav
   assert.equal(await page.getByRole("link", { name: "OpenAI admin", exact: true }).count(), 0);
   await page.getByLabel("Agent name").fill("Console-created Agent");
   const secret = await enterManualModel(page, key, "gpt-5.1");
+  assert.ok(secret, "Expected the created model credential Secret");
   for (const [filename, content] of Object.entries(WORKSPACE_DEFAULTS)) {
     assert.equal(await page.getByLabel(filename, { exact: true }).inputValue(), content);
   }
@@ -614,7 +618,7 @@ test("Dedicated repository Agent keeps its bindings through a Slack save that bi
   assert.deepEqual(agent.repositoryBindings, [
     { repositoryRef: "application", profile: "git-full" },
   ]);
-  assert.equal(agent.harnessAuth.method, "api_key");
+  assert.equal(agent.harnessAuth?.method, "api_key");
   assert.equal(agent.harnessAuth.source.namespaceId, namespace.id);
   assert.notEqual(agent.harnessAuth.source.id, modelSecret.id);
   await page.getByRole("tab", { name: "Channels", exact: true }).click();
@@ -1737,7 +1741,9 @@ test("Dedicated Agent creation uses regular create when provisioning is unsuppor
   await page.getByRole("button", { name: "Start with default Preset" }).click();
   await page.getByText("This installation creates draft Agents for later deployment.").waitFor();
   await assert.rejects(
-    page.getByRole("heading", { name: "Secrets" }).waitFor({ state: "visible", timeout: 300 }),
+    page
+      .getByRole("heading", { name: "Credentials", exact: true })
+      .waitFor({ state: "visible", timeout: 300 }),
     /Timeout/,
   );
 
@@ -2237,6 +2243,35 @@ test("Agent creation explains a denied capability check instead of offering a re
   assert.equal(await harnessHint.textContent(), "Codex requires OpenAI and Dedicated execution.");
 });
 
+// Finding 2945. Codex uses Dedicated execution, so the Execution mode select is unavailable with
+// the Codex harness. It was natively disabled, so Tab skipped it and the hint that says why. It
+// stays in the Tab order now, described by that hint, and changes nothing; OpenClaw enables it.
+test("Execution mode locked by the Codex harness stays reachable with its hint", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Codex mode lock", { ready: true });
+  const { page } = await newPage(t, fixture);
+  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+  await page.getByRole("heading", { name: "Create Agent" }).waitFor();
+  await page.getByRole("button", { name: "Start without Preset" }).click();
+  await page.getByText("Checking installation capabilities…").waitFor({ state: "detached" });
+  const harness = page.getByLabel("Harness", { exact: true });
+  await harness.selectOption("codex");
+  await page.locator(".launch-runtime > summary").click();
+  const mode = page.getByLabel("Execution mode");
+  assert.equal(await mode.inputValue(), "dedicated");
+  assert.equal(await mode.isDisabled(), true);
+  const hint = (await page.locator("#execution-mode-hint").textContent())?.trim() ?? "";
+  assert.match(hint, /^Codex uses Dedicated execution\./);
+  await expectReachableReason(page, mode, hint);
+  assert.equal(await mode.inputValue(), "dedicated");
+
+  // OpenClaw lets the reader choose the mode again.
+  await harness.selectOption("openclaw");
+  await waitForEnabled(mode);
+  assert.equal(await mode.getAttribute("aria-disabled"), null);
+});
+
 test("Agent creation withholds Dedicated OpenClaw unless the Installation reports native worker support", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();
@@ -2293,7 +2328,14 @@ test("Agent creation withholds Dedicated OpenClaw unless the Installation report
   assert.equal(await embeddedChannelNote.getAttribute("class"), "hint");
   // Codex keeps Dedicated execution; only native OpenClaw depends on the runtime.
   await page.getByLabel("Harness", { exact: true }).selectOption("codex");
-  assert.equal(await mode.locator('option[value="dedicated"]').isDisabled(), false);
+  // The select itself is unavailable with Codex (aria-disabled, finding 2945), so the option's own
+  // state is read: Dedicated is not refused.
+  assert.equal(
+    await mode
+      .locator('option[value="dedicated"]')
+      .evaluate((node: HTMLOptionElement) => node.disabled),
+    false,
+  );
   const dedicatedHint = await modeHint.textContent();
   assert.ok(dedicatedHint);
   assert.match(
@@ -2686,6 +2728,7 @@ test("Agent creation saves native models for dedicated and embedded harnesses", 
       page,
       `test-${mode}-${selectedModel}-key`,
     );
+    assert.ok(selectedSecret, "Expected the created model credential Secret");
     const agent = await createAgentThroughForm(page, fixture, namespace.id);
     assert.equal(agent.executionMode, mode);
     assert.deepEqual(agent.harnessAuth, { method: "api_key", source: selectedSecret.ref });
@@ -2720,4 +2763,43 @@ test("Agent creation saves native models for dedicated and embedded harnesses", 
     assert.equal(savedModel.id, selectedModel);
     assert.equal(savedModel.name, selectedModel);
   }
+});
+
+test("Create Agent offers browser chat only on an enabled installation and submits an explicit opt-in", async (t) => {
+  const fixture = await createConsoleAppFixture(t, {
+    https: true,
+    development: { enabled: false },
+    originHost: "console.example.test",
+    publicOrigin: true,
+    nativeAdmin: {
+      enabled: true,
+      domain: "agents.example.test",
+    },
+    nativeAdminGatewayApiKey: async () => "synthetic-native-admin-gateway-key",
+    agentProvisioning: true,
+  });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Native admin create", { ready: true });
+  const { page } = await newPage(t, fixture, {
+    args: [...fixture.browserArgs, "--host-resolver-rules=MAP console.example.test 127.0.0.1"],
+  });
+  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+  await page.getByRole("button", { name: "Start without Preset", exact: true }).click();
+  await waitForCreateFormReads(page);
+  const toggle = page.getByRole("checkbox", { name: "Enable browser chat" });
+  assert.equal(await toggle.isChecked(), false);
+  assert.equal(await toggle.isEnabled(), true);
+  await page.getByLabel("Agent name", { exact: true }).fill("Native admin test");
+  await enterManualModel(page, "synthetic-model-key");
+  await toggle.check();
+  await toggle.uncheck();
+  await toggle.check();
+  // This browser fixture has no durable provisioning queue. Exercise the real API's
+  // refusal without claiming a deployment; PostgreSQL coverage proves the saved version.
+  const response = await submitCreateAgent(page, fixture, namespace.id, {
+    path: "agents/provision",
+  });
+  assert.equal(response.request().postDataJSON().nativeAdmin, true);
+  assert.equal(response.status(), 503);
+  assert.equal(await toggle.isChecked(), true, "a refused create retains the opt-in");
 });

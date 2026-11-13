@@ -14,7 +14,7 @@ import {
   createTestAuthPrincipal,
   signInToControllerApp,
 } from "../helpers/auth-session.mjs";
-import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
+import { createTestConfigurationDriver } from "../helpers/configuration-driver.ts";
 import { createReadyComputeDriver } from "../helpers/development.mjs";
 import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
@@ -98,7 +98,11 @@ async function createFixture(options = {}) {
       secretDriver,
       resolveHarness: resolveApprovedDevelopmentHarness,
       auditSink,
-      development: { enabled: true, installationId },
+      development: {
+        enabled: true,
+        installationId,
+        browserOrigin: "https://console.oce.localhost",
+      },
       auth: authFixture.auth,
     });
     app.defaultSession = sessionsByPrincipalId.get(identity.id);
@@ -145,7 +149,7 @@ async function request(app, method, pathname, options = {}) {
     headers["content-type"] ??= "application/json";
   }
   const response = await app.fetch(
-    new Request(`http://127.0.0.1${pathname}`, {
+    new Request(`https://console.oce.localhost${pathname}`, {
       method,
       headers,
       ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
@@ -337,6 +341,44 @@ test("OpenAI API-key model discovery excludes models whose shutdown date has arr
     { id: "null-shutdown", name: "null-shutdown" },
     { id: "unspecified-shutdown", name: "unspecified-shutdown" },
   ]);
+});
+
+test("Codex service-account discovery returns visible models when the catalog omits priority", async (t) => {
+  const fixture = await createModelDiscoveryFixture();
+  const namespace = await bootstrapNamespace(fixture);
+  // The operator catalog command lists visibility "list" and does not read priority.
+  // A hidden row is not part of that list. The shipped models API is the entry.
+  const pages = [
+    { chatgpt_account_id: "verified-account", chatgpt_account_is_fedramp: false },
+    {
+      models: [
+        { slug: "gpt-5.5", display_name: "GPT-5.5", visibility: "list" },
+        { slug: "codex-auto-review", display_name: "Codex Auto Review", visibility: "hide" },
+        { slug: "gpt-5.4", display_name: "GPT-5.4", visibility: "list" },
+      ],
+    },
+  ];
+  const transport = t.mock.method(globalThis, "fetch", async () => Response.json(pages.shift()));
+  const result = await request(fixture.app, "POST", `/namespaces/${namespace.id}/agents/models`, {
+    body: { provider: "openai", authMethod: "codex_pat", apiKey: "at-fixture-token" },
+  });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.headers.get("cache-control"), "no-store");
+  assert.deepEqual(result.data, [
+    { id: "gpt-5.5", name: "GPT-5.5" },
+    { id: "gpt-5.4", name: "GPT-5.4" },
+  ]);
+  assert.deepEqual(
+    transport.mock.calls.map(({ arguments: args }) => args[0]),
+    [
+      "https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami",
+      "https://chatgpt.com/backend-api/codex/models?client_version=0.156.0",
+    ],
+  );
+  assert.equal(
+    JSON.stringify([result.body, fixture.auditSink.events]).includes("at-fixture-token"),
+    false,
+  );
 });
 
 test("Service account token discovery rejects invalid identity without falling through to the API-key endpoint", async (t) => {
@@ -1214,20 +1256,42 @@ test("Harness source admission rejects foreign references and superseded model s
   await fixture
     .controller()
     .handleNamespaceLifecycle(fixture.principal.id, foreign.data.id, "ready");
+  const foreignValue = `synthetic-${randomUUID()}`;
   const key = await request(fixture.app, "POST", `/namespaces/${foreign.data.id}/secrets`, {
-    body: { name: "Foreign key", value: `synthetic-${randomUUID()}` },
+    body: { name: "Foreign key", value: foreignValue },
   });
   assert.equal(key.status, 201, JSON.stringify(key.body));
   const path = `/namespaces/${namespace.id}/agents/${agent.id}`;
-  const rejected = await request(fixture.app, "PATCH", path, {
-    body: {
-      configurationId: configuration.id,
-      harnessAuth: { method: "api_key", source: key.data.ref },
-    },
+  const localKey = await request(fixture.app, "POST", `/namespaces/${namespace.id}/secrets`, {
+    body: { name: "Local model key", value: `synthetic-${randomUUID()}` },
   });
-  // A foreign Secret reference is an invalid request (#1033), not a scope miss.
-  assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
-  assert.equal(rejected.body.error.message, "Secret references cannot cross Namespaces.");
+  assert.equal(localKey.status, 201);
+  const patch = (source) =>
+    request(fixture.app, "PATCH", path, {
+      body: { configurationId: configuration.id, harnessAuth: { method: "api_key", source } },
+    });
+  assert.equal((await patch(localKey.data.ref)).status, 200);
+  const before = await request(fixture.app, "GET", path);
+  assert.equal(before.status, 200);
+  assert.deepEqual(before.data.harnessAuth, { method: "api_key", source: localKey.data.ref });
+
+  // Foreign references fail validation before OCC looks up either Secret.
+  for (const source of [key.data.ref, { ...key.data.ref, id: `sec_${randomUUID()}` }]) {
+    const denied = await patch(source);
+    assert.equal(
+      JSON.stringify(denied.body).includes(foreignValue),
+      false,
+      "a denied binding must not disclose the Secret value",
+    );
+    assert.equal(denied.status, 400);
+    assert.deepEqual(denied.body, {
+      error: { code: "INVALID_REQUEST", message: "Secret references cannot cross Namespaces." },
+      meta: { requestId: denied.body.meta.requestId },
+    });
+    const after = await request(fixture.app, "GET", path);
+    assert.equal(after.status, 200);
+    assert.deepEqual(after.data, before.data);
+  }
   for (const method of ["POST", "PATCH"]) {
     const rejected = await request(
       fixture.app,
@@ -1243,10 +1307,6 @@ test("Harness source admission rejects foreign references and superseded model s
     );
     assert.equal(rejected.status, 400);
   }
-  const localKey = await request(fixture.app, "POST", `/namespaces/${namespace.id}/secrets`, {
-    body: { name: "Local model key", value: `synthetic-${randomUUID()}` },
-  });
-  assert.equal(localKey.status, 201);
   const malformed = await request(fixture.app, "PATCH", path, {
     body: {
       configurationId: configuration.id,

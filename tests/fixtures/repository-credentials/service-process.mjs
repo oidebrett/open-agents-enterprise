@@ -10,29 +10,21 @@ import { createResourceScope } from "./resources.mjs";
 import { createServiceConfiguration } from "./service.mjs";
 import { startGitHubFixture, fixtureRepository, fixtureRepositoryId } from "./github.mjs";
 import { createRegistryMaterial } from "./registry/material.mjs";
+import { within } from "../../helpers/wait-for.mjs";
 
-async function within(promise, message, timeoutMs = 5000) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
+/** @import { ServiceProcessRequest, ServiceProcessGeneration } from "./service-process-child.ts" */
 
+/** @param {ReturnType<typeof createResourceScope>} resources */
 function launchService(resources) {
-  const child = fork(new URL("./service-process-child.mjs", import.meta.url), [], {
+  const child = fork(new URL("./service-process-child.ts", import.meta.url), [], {
     env: cleanEnvironment({ REPOSITORY_CREDENTIALS_APP_ROOT: appRoot }),
     execArgv: [],
     serialization: "advanced",
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
+  /** @type {Map<number, { resolve: (result: unknown) => void, reject: (error: Error) => void }>} */
   const pending = new Map();
+  const maximumOutputBytes = 65_536;
   let sequence = 0;
   let outputBytes = 0;
   let stderr = "";
@@ -55,7 +47,7 @@ function launchService(resources) {
     if (!receipt) {
       assert.equal(child.kill("SIGKILL"), true, "owned service termination must be sent");
     }
-    const result = await within(closed, "service fixture death was not joined");
+    const result = await within(closed, "service fixture death was not joined", 5_000);
     if (failure) {
       throw failure;
     }
@@ -68,54 +60,86 @@ function launchService(resources) {
       await stop();
     }
   });
+  /** @param {Buffer} chunk */
   const collect = (chunk) => {
     outputBytes += chunk.length;
-    if (outputBytes > 65536) {
+    if (outputBytes > maximumOutputBytes) {
       failure = new Error("service fixture output overflow");
       child.kill("SIGKILL");
+      return false;
     }
+    return true;
   };
   child.stdout.on("data", collect);
   child.stderr.on("data", (chunk) => {
-    collect(chunk);
-    stderr += chunk;
+    if (collect(chunk)) {
+      stderr += chunk;
+    }
   });
-  child.on("message", ({ id, result, error }) => {
-    const request = pending.get(id);
+  child.on("message", (/** @type {unknown} */ reply) => {
+    if (!reply || typeof reply !== "object" || !("id" in reply) || typeof reply.id !== "number") {
+      return;
+    }
+    const request = pending.get(reply.id);
     if (request) {
-      pending.delete(id);
-      if (error) {
-        request.reject(new Error("service fixture command failed"));
+      pending.delete(reply.id);
+      if ("result" in reply && !("error" in reply)) {
+        request.resolve(reply.result);
       } else {
-        request.resolve(result);
+        request.reject(new Error("service fixture command failed"));
       }
     }
   });
+  /**
+   * @param {Extract<ServiceProcessRequest, { command: "start" }>["input"]} input
+   * @returns {Promise<ServiceProcessGeneration>}
+   */
+  async function start(input) {
+    const id = ++sequence;
+    /** @type {ServiceProcessRequest} */
+    const request = { id, command: "start", input };
+    /** @type {Promise<unknown>} */
+    const response = new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      child.send(request, (error) => {
+        if (error) {
+          pending.delete(id);
+          reject(new Error("service fixture IPC failed"));
+        }
+      });
+    });
+    let result;
+    try {
+      result = await within(response, "service fixture command got no answer", 5_000);
+    } finally {
+      pending.delete(id);
+    }
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !("pid" in result) ||
+      typeof result.pid !== "number" ||
+      result.pid !== child.pid ||
+      !("port" in result) ||
+      typeof result.port !== "number" ||
+      !Number.isInteger(result.port) ||
+      result.port < 1 ||
+      result.port > 65_535
+    ) {
+      throw new Error("service fixture returned an invalid generation");
+    }
+    return { pid: result.pid, port: result.port };
+  }
+
   return {
+    start,
     stop,
     stderr: () => stderr,
     async stopGracefully() {
       if (!receipt) {
         assert.equal(child.kill("SIGTERM"), true, "owned service termination must be sent");
       }
-      return within(closed, "service fixture graceful shutdown was not joined", 15000);
-    },
-    async call(command, input) {
-      const id = ++sequence;
-      const response = new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
-        child.send({ id, command, input }, (error) => {
-          if (error) {
-            pending.delete(id);
-            reject(new Error("service fixture IPC failed"));
-          }
-        });
-      });
-      try {
-        return await within(response, "service fixture command timed out");
-      } finally {
-        pending.delete(id);
-      }
+      return within(closed, "service fixture graceful shutdown was not joined", 15_000);
     },
   };
 }
@@ -156,9 +180,9 @@ export async function startServiceProcessFixture(
   });
   const [{ callControl }, { loadGitHubRepositoryRegistry }, { resolveGitHubRepositoryBinding }] =
     await Promise.all([
-      appModule("drivers/repo/github/credentials/client/operator"),
+      appModule("drivers/repo/github/access/client/operator"),
       appModule("composition/repository-credentials/registry"),
-      appModule("drivers/repo/github/credentials/registry"),
+      appModule("drivers/repo/github/access/registry"),
     ]);
   const registry = await loadGitHubRepositoryRegistry(
     registryMaterial.registryFile,
@@ -178,13 +202,14 @@ export async function startServiceProcessFixture(
     deadlineWallMs: clock.wallNow() + 86400000,
   };
   let processOwner;
+  /** @type {ServiceProcessGeneration} */
   let generation;
   let socketIdentity;
 
   async function start() {
     assert.equal(processOwner, undefined, "join the previous service before replacement");
     processOwner = launchService(resources);
-    generation = await processOwner.call("start", {
+    generation = await processOwner.start({
       config,
       tls,
       origin: github.origin,

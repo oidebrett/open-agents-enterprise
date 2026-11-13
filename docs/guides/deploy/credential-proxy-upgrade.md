@@ -8,14 +8,14 @@ replacement in this release.**
 
 ## Decide what can move
 
-| Existing use                                                       | Upgrade decision                                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Static `openai` source                                             | May remain Gateway-owned. An unbound source can explicitly adopt protected live reads, but retains its owner. Replacing that owner requires a supported Proxy-owned registration path; adoption alone cannot remove Gateway. With Credential Proxy selected, a source without live reads serves only as the Harness source beside repository Git; deploy refuses it elsewhere with `409 RESOURCE_CONFLICT`. |
-| Static `codex-pat` or `bearer-token`                               | Keep the Gateway path unless the selected Proxy explicitly supports that source and operation. Do not treat the static inference profile as a universal token injector.                                                                                                                                                                                                                                     |
-| `codex-oauth`, `oauth2-client-credentials`, `oauth2-refresh-token` | Keep existing Gateway/Refresh sources and their enrollment state; this does not promise arbitrary fresh refresh registration alongside a static Proxy profile. No general transfer of refresh grants to Token Service is implemented.                                                                                                                                                                       |
-| Proxy-owned metadata                                               | `github-app-metadata` (with its issuer configured) and `credential-free-repository-metadata` have narrow metadata profiles. Neither replaces static inference or Git delivery.                                                                                                                                                                                                                              |
-| Prepared GitHub App access                                         | Token Service owns preparation and retirement. Choose qualified protected delivery or explicit native prepared Git; do not copy tokens between owners.                                                                                                                                                                                                                                                      |
-| Earlier broker trial or legacy `drivers.repo`                      | New startup rejects these selections. Drain on the original release before switching; the new release cannot restart that owner.                                                                                                                                                                                                                                                                            |
+| Existing use                                                       | Upgrade decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Static `openai` source                                             | Ordinary Gateway-only use still works. The bundled OpenShell Credential Proxy refuses new protected sources, live adoption, and new protected revisions using such a source (`409 RESOURCE_CONFLICT`). Admitted revisions keep request-time checks and the recorded withdrawal and cleanup owner. With Credential Proxy selected, a Gateway source without live reads serves only as Harness authentication alongside repository Git; other deployments return `409 RESOURCE_CONFLICT`. |
+| Static `codex-pat` or `bearer-token`                               | Keep the Gateway path unless the selected Proxy explicitly supports that source and operation. Do not treat the static inference profile as a universal token injector.                                                                                                                                                                                                                                                                                                                 |
+| `codex-oauth`, `oauth2-client-credentials`, `oauth2-refresh-token` | Keep existing Gateway/Refresh sources and their enrollment state; this does not promise arbitrary fresh refresh registration alongside a static Proxy profile. No general transfer of refresh grants to Token Service is implemented.                                                                                                                                                                                                                                                   |
+| Proxy-owned metadata                                               | `github-app-metadata` (with its issuer configured) and `credential-free-repository-metadata` have narrow metadata profiles. Neither replaces static inference or Git delivery.                                                                                                                                                                                                                                                                                                          |
+| Prepared GitHub App access                                         | Token Service owns preparation and retirement. Choose qualified protected delivery or explicit native prepared Git; do not copy tokens between owners.                                                                                                                                                                                                                                                                                                                                  |
+| Earlier broker trial or legacy `drivers.repo`                      | New startup rejects these selections. Drain on the original release before switching; the new release cannot restart that owner.                                                                                                                                                                                                                                                                                                                                                        |
 
 Creating a replacement source produces a new identity. Reauthorize the exact
 source for the operator and Agent principal, replace bindings, and admit a new
@@ -43,8 +43,9 @@ before withdrawing access. Selecting Credential Proxy alone does not provide one
 ### Keep schema histories separate
 
 The migrator recognizes the 59-receipt history before Credential Proxy and the
-62-receipt history through `0062_credential_delivery_custody`. Both upgrade to
-63 receipts, ending at `0063_prepared_attempt_settlement`. The
+62-receipt history through `0062_credential_delivery_custody`. The 63-receipt
+history through `0063_prepared_attempt_settlement` is `preGatewayManagedMode`;
+it still needs `0064_gateway_managed_mode`. The
 [migration reference](../../reference/settings/operations.md) lists the supported
 histories. The migrator checks receipt hashes, timestamps, and the database
 catalog; a count alone does not establish compatibility.
@@ -57,7 +58,8 @@ an upgrade.
 For a compatibility-only upgrade, quiesce API, workers and other database writers,
 keep a recoverable database copy and matching release, and check the history
 using the existing migrator connection in `OCC_MIGRATION_DATABASE_URL`. From the
-root of a release checkout, install its dependencies and run:
+root of the release checkout that matches the intended upgrade, install its
+dependencies and run:
 
 ```bash
 pnpm install --frozen-lockfile
@@ -66,13 +68,14 @@ pnpm db:migrate:production --check
 
 An image-only install runs the release controller image with
 `node scripts/migrate-production.mjs --check` instead; on Kubernetes, the
-[maintenance Pod](auth-maintenance.md#run-the-command) provides the image, the
+[maintenance procedure](auth-maintenance.md#run-the-command) provides the image, the
 migrator credential and the database CA.
 
-If the check fails, stop. If it reports `completed`, no migration is pending.
-For `preCredentialProxy` (59 receipts), migration applies `0060` through `0063`.
-For `prePreparedAttemptSettlement` (62 receipts), it applies only `0063`.
-Confirm the target and authorization before running the migration and checking again:
+If the check fails, stop. Exit 0 and `migration.checked` with
+`history: "completed"` mean no migration is pending for that release.
+For a supported incomplete history, migration applies all remaining migrations
+bundled with the selected release. Confirm the target release, its pending
+migrations, and authorization before running the migration and checking again:
 
 ```bash
 pnpm db:migrate:production
@@ -81,8 +84,8 @@ pnpm db:migrate:production --check
 
 In the controller image, run `scripts/migrate-production.mjs` without and then with `--check`.
 
-Migration reports its **starting** history; the last check must report
-`completed`. Upgrade the control plane without mixed-version
+Migration reports its **starting** history; the last check must use the same
+release and report `completed`. Upgrade the control plane without mixed-version
 writers. Keep existing Driver selections and admissions, then verify retained
 workflows. **You can stop here without revoking a working source.** Migration
 preserves Gateway ownership and records older revisions as version 2 `unprotected`;
@@ -142,7 +145,7 @@ the source in that revision. Update the Agent with its `configurationId`,
 replacement `harnessAuth`, and complete replacement `credentialSources` list
 (or `[]` when no source is required), then deploy a new revision through the
 [normal setup steps](../credential-proxy.md#register-authorize-and-deploy-a-static-source).
-Do not remove a Harness source without supplying a supported authentication path.
+Do not remove a Harness source without supplying a supported authentication path. For new protected static inference, use a Driver that supports it; the bundled OpenShell Credential Proxy does not admit a replacement.
 
 Verify allowed use, denied use, applicable renewal, withdrawal, and recovery on
 the replacement. For Git access, also verify a continuing conversation with an

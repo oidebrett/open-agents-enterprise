@@ -25,19 +25,19 @@ import {
   encodeRepositoryCredentialSessionFiles,
   readClientConfiguration,
   requireGhMaterial,
-} from "../../apps/controller/src/drivers/repo/github/credentials/client/config.ts";
-import { launchClient } from "../../apps/controller/src/drivers/repo/github/credentials/client/launch.ts";
+} from "../../apps/controller/src/drivers/repo/github/access/client/config.ts";
+import { launchClient } from "../../apps/controller/src/drivers/repo/github/access/client/launch.ts";
 import {
   prepareNativeGitConfiguration,
   renderNativeGitConfiguration,
-} from "../../apps/controller/src/drivers/repo/github/credentials/client/native-git.ts";
-import { readRuntimeRepositoryManifest } from "../../apps/controller/src/drivers/repo/github/credentials/client/manifest.ts";
+} from "../../apps/controller/src/drivers/repo/github/access/client/native-git.ts";
+import { readRuntimeRepositoryManifest } from "../../apps/controller/src/drivers/repo/github/access/client/manifest.ts";
 import { createNativeClientMaterial } from "../fixtures/repository-credentials/clients.mjs";
 import { startCredentialServiceFixture } from "../fixtures/repository-credentials/service.mjs";
 import { selfSigned } from "../helpers/certificates.mjs";
 import { fileCompileCache } from "../helpers/compile-cache.mjs";
 import { socketDirectory } from "../helpers/socket-directory.mjs";
-import { relaySockets } from "../helpers/socket-relay.mjs";
+import { relaySockets } from "../helpers/socket-relay.ts";
 import {
   cleanEnvironment,
   listen,
@@ -70,8 +70,8 @@ async function pairwise(tasks) {
   }
 }
 
-const launcher = resolve("apps/controller/src/drivers/repo/github/credentials/client/launch.ts");
-const helper = resolve("apps/controller/src/drivers/repo/github/credentials/client/git-helper.ts");
+const launcher = resolve("apps/controller/src/drivers/repo/github/access/client/launch.ts");
+const helper = resolve("apps/controller/src/drivers/repo/github/access/client/git-helper.ts");
 const opened = {
   session: { sessionId: "session-test", deadlineWallMs: Date.now() + 86400000 },
   bearer: "controlled_gateway_bearer_0000000000000000000000",
@@ -102,6 +102,32 @@ const gitEnvironment = (root, extra = {}) => {
 };
 const git = (root, args, input, extra) =>
   run("/usr/bin/git", args, { env: gitEnvironment(root, extra), input, allowFailure: true });
+
+test("published client files stay owner-readable when umask masks owner read", async (t) => {
+  const parent = await realpath(await temporaryDirectory(t));
+  const session = join(parent, "session");
+  const script = `
+    import { lstat, readFile } from "node:fs/promises";
+    import { join } from "node:path";
+    import { writeClientConfiguration, readClientConfiguration } from ${JSON.stringify(
+      resolve("apps/controller/src/drivers/repo/github/access/client/config.ts"),
+    )};
+    process.umask(0o400);
+    await writeClientConfiguration(${JSON.stringify(opened)}, ${JSON.stringify(session)}, undefined);
+    const mode = (await lstat(join(${JSON.stringify(session)}, "client.json"))).mode & 0o777;
+    const directory = (await lstat(${JSON.stringify(session)})).mode & 0o777;
+    await readClientConfiguration(${JSON.stringify(session)});
+    await readFile(join(${JSON.stringify(session)}, "bearer"));
+    process.stdout.write(JSON.stringify({ mode, directory }));
+  `;
+  const result = childProcess.spawnSync(
+    process.execPath,
+    ["--experimental-strip-types", "--input-type=module", "--eval", script],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { mode: 0o600, directory: 0o700 });
+});
 
 isolatedTest("gh refuses mixed and unsafe session files before starting a child", async (t) => {
   const parent = await temporaryDirectory(t);
@@ -205,6 +231,103 @@ isolatedTest("gh rechecks expiry after reading private session files", async (t)
   assert.deepEqual(spawned, []);
 });
 
+const malformedSessionIds = [
+  undefined,
+  null,
+  123,
+  true,
+  ["session-test"],
+  "",
+  "a".repeat(129),
+  "a.b",
+  " a",
+  "a\n",
+];
+
+test("session ID encoder rejects nonstring and out-of-grammar material", () => {
+  for (const sessionId of malformedSessionIds) {
+    const session = { ...opened.session, sessionId };
+    if (sessionId === undefined) {
+      delete session.sessionId;
+    }
+    assert.throws(
+      () => encodeRepositoryCredentialSessionFiles({ ...opened, session }),
+      { message: "invalid-client-configuration" },
+      `sessionId=${JSON.stringify(sessionId)}`,
+    );
+  }
+});
+
+test("session ID reader rejects nonstring and out-of-grammar material", async (t) => {
+  const parent = await temporaryDirectory(t);
+  const fields = {
+    deadlineWallMs: opened.session.deadlineWallMs,
+    client: opened.client,
+    hasPublicCa: false,
+  };
+  for (const sessionId of malformedSessionIds) {
+    await writeFile(join(parent, "client.json"), JSON.stringify({ ...fields, sessionId }), {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      readClientConfiguration(parent),
+      { message: "invalid-client-configuration" },
+      `sessionId=${JSON.stringify(sessionId)}`,
+    );
+  }
+});
+
+test("session ID strings retain their value through encoding and private-file reading", async (t) => {
+  const parent = await temporaryDirectory(t);
+  for (const sessionId of [
+    "a",
+    "a".repeat(128),
+    "null",
+    "123",
+    "undefined",
+    "_session",
+    "-session",
+    "AZaz09_-",
+  ]) {
+    const files = encodeRepositoryCredentialSessionFiles({
+      ...opened,
+      session: { ...opened.session, sessionId },
+    });
+    const expected = {
+      sessionId,
+      deadlineWallMs: opened.session.deadlineWallMs,
+      client: opened.client,
+      hasPublicCa: false,
+    };
+    assert.equal(files["client.json"], JSON.stringify(expected) + "\n");
+    await writeFile(join(parent, "client.json"), files["client.json"], { mode: 0o600 });
+    assert.deepEqual(await readClientConfiguration(parent), expected);
+  }
+});
+
+test("session ID encoder serializes the validated value and refuses invalid bearer first", () => {
+  let reads = 0;
+  const input = {
+    ...opened,
+    session: {
+      ...opened.session,
+      get sessionId() {
+        reads += 1;
+        return reads === 1 ? "session-test" : null;
+      },
+    },
+  };
+  assert.throws(() => encodeRepositoryCredentialSessionFiles({ ...input, bearer: "invalid" }), {
+    message: "invalid-client-configuration",
+  });
+  assert.equal(reads, 0);
+  assert.equal(
+    JSON.parse(encodeRepositoryCredentialSessionFiles(input)["client.json"]).sessionId,
+    "session-test",
+  );
+  assert.equal(reads, 1);
+});
+
 test("push-ref policies use the existing complete client metadata size limit", () => {
   const encode = (rules) =>
     encodeRepositoryCredentialSessionFiles({
@@ -260,10 +383,23 @@ test("generated native configuration selects exact endpoint authority through st
     assert.equal(result.stdout.includes(opened.bearer), false);
     assert.equal(result.stderr.includes(opened.bearer), false);
   }
+  const accepted = await run(
+    process.execPath,
+    [helper, "manifest", material.root, material.manifest.generation, "get"],
+    { env: clean(), input: protocol(undefined, "wwwauth[]=realm=café\n") },
+  );
+  assert.equal(accepted.code, 0);
+  assert.equal(accepted.stdout.includes(`password=${opened.bearer}\n`), true);
+  assert.equal(accepted.stderr, "");
   for (const input of [
     protocol() + "path=example/project.git\n",
     protocol().replace("\n\n", "\npath=example/project.git\n\n"),
-    "x=" + "a".repeat(17000) + "\n\n",
+    protocol(undefined, "wwwauth[]=" + "a".repeat(17000) + "\n"),
+    protocol(undefined, "wwwauth[]=realm=ca\tfé\n"),
+    protocol(undefined, "wwwauth[]=realm=ca\0fé\n"),
+    protocol(undefined, "wwwauth[]=realm=ca\x7ffé\n"),
+    protocol(undefined, "wwwauth[]\n"),
+    protocol() + "\n",
     protocol().replace("example/project.git", "example/project.git\r"),
   ]) {
     const result = await run(
@@ -490,13 +626,13 @@ test("same-origin trust and canonical host conflicts prevent native configuratio
   const material = await createNativeClientMaterial(t, [{ opened, repositoryRef: "project" }]);
   // Shell quoting and Git config quoting are independent; run the emitted helper from a quoted path.
   const quotedRoot = join(material.root, "client 'quoted'");
-  const quotedDirectory = join(quotedRoot, "github/credentials/client");
-  await mkdir(join(quotedRoot, "credentials"), { recursive: true });
+  const quotedDirectory = join(quotedRoot, "github/access/client");
+  await mkdir(join(quotedRoot, "access"), { recursive: true });
   await cp(
-    resolve("apps/controller/src/drivers/repo/credentials/client-contracts.ts"),
-    join(quotedRoot, "credentials/client-contracts.ts"),
+    resolve("apps/controller/src/drivers/repo/access/client-contracts.ts"),
+    join(quotedRoot, "access/client-contracts.ts"),
   );
-  await cp(resolve("apps/controller/src/drivers/repo/github/credentials/client"), quotedDirectory, {
+  await cp(resolve("apps/controller/src/drivers/repo/github/access/client"), quotedDirectory, {
     recursive: true,
   });
   const quoted = join(quotedDirectory, "git-helper.ts");
@@ -626,7 +762,7 @@ test("operator rejects unsafe or conflicting bound request files before admissio
     run(
       process.execPath,
       [
-        resolve("apps/controller/src/drivers/repo/github/credentials/client/operator.ts"),
+        resolve("apps/controller/src/drivers/repo/github/access/client/operator.ts"),
         "open",
         "--socket",
         socket,
@@ -686,6 +822,101 @@ test("operator rejects unsafe or conflicting bound request files before admissio
   const alias = join(parent, "alias.json");
   await symlink(requestPath, alias);
   refused(await invoke(alias));
+});
+
+test("operator open refuses an unusable --output before admission and names the rule", async (t) => {
+  const parent = await temporaryDirectory(t);
+  const socket = join(await socketDirectory(t, "operator-output-"), "control.sock");
+  const requests = [];
+  // A path that appears while the session is admitted, as from a concurrent operator.
+  const racing = join(parent, "racing");
+  // This peer answers with an admitted session in the owner's reply shape. It proves how the
+  // actual operator handles a client directory it cannot publish, not admission itself.
+  const server = createHttpServer(async (incoming, response) => {
+    for await (const _chunk of incoming) {
+      // Drain the request body.
+    }
+    requests.push(`${incoming.method} ${incoming.url}`);
+    if (incoming.url === "/v1/sessions") {
+      await mkdir(racing, { mode: 0o700 });
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify(
+        incoming.url === "/v1/sessions"
+          ? opened
+          : { sessionId: opened.session.sessionId, state: "CLOSED" },
+      ),
+    );
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  server.listen(socket);
+  await once(server, "listening");
+  const open = (output) =>
+    run(
+      process.execPath,
+      [
+        resolve("apps/controller/src/drivers/repo/github/access/client/operator.ts"),
+        "open",
+        "--socket",
+        socket,
+        "--output",
+        output,
+        "--duration-seconds",
+        "60",
+        "--profile",
+        "git-read",
+      ],
+      { env: clean(), allowFailure: true },
+    );
+  const refusedBeforeAdmission = async (output, refusal) => {
+    requests.length = 0;
+    const result = await open(output);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, "");
+    // Only the fixed rule text: no admission, no session, no OS error or path.
+    assert.equal(result.stderr, `${refusal}\ncredential-operator-failed\n`);
+    assert.deepEqual(requests, []);
+  };
+
+  // A group-writable parent, such as a shared 0775 directory, is not private.
+  const shared = join(parent, "shared");
+  await mkdir(shared);
+  await chmod(shared, 0o775);
+  await refusedBeforeAdmission(
+    join(shared, "session"),
+    "unsafe-client-directory: the --output parent must be a real directory you own with no group or other access (0700); no ancestor may be a symbolic link, or group- or world-writable without the sticky bit",
+  );
+  await assert.rejects(lstat(join(shared, "session")), { code: "ENOENT" });
+
+  // An existing output directory is never replaced.
+  const existing = join(parent, "existing");
+  await mkdir(existing, { mode: 0o700 });
+  await refusedBeforeAdmission(
+    existing,
+    "client-directory-exists: the --output directory must not exist yet; choose a new path",
+  );
+
+  // A missing parent (here also a missing grandparent) gets its own reason, not the ENOENT text.
+  await refusedBeforeAdmission(
+    join(parent, "missing", "deeper", "session"),
+    "client-parent-missing: the --output parent directory must exist; create it first with mode 0700",
+  );
+  await assert.rejects(lstat(join(parent, "missing")), { code: "ENOENT" });
+
+  // The publish checks again: a path created after the early check refuses after admission,
+  // keeps the session ID for cleanup and closes the session. The bearer never reaches output.
+  requests.length = 0;
+  const raced = await open(racing);
+  assert.equal(raced.code, 1);
+  assert.equal(raced.stdout, "");
+  assert.match(raced.stderr, /client-configuration-failed session=session-test;/);
+  assert.match(
+    raced.stderr,
+    /\nclient-directory-exists: the --output directory must not exist yet/,
+  );
+  assert.equal(raced.stderr.includes(opened.bearer), false);
+  assert.deepEqual(requests, ["POST /v1/sessions", "POST /v1/sessions/session-test/close"]);
 });
 
 async function loopbackBrokerTunnel(t, fixture) {
@@ -831,6 +1062,42 @@ test(
     );
   },
 );
+
+test("a public CA with a leading UTF-8 BOM stays usable by Git", async (t) => {
+  const parent = await realpath(await temporaryDirectory(t));
+  const { key, cert, certPath } = await selfSigned(parent, {
+    commonName: "localhost",
+    subjectAltName: "IP:127.0.0.1",
+  });
+  const pem = await readFile(certPath);
+  const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), pem]);
+  // The sender's UTF-8 check uses the default decoder, which accepts this file.
+  new TextDecoder("utf-8", { fatal: true }).decode(withBom);
+  const files = encodeRepositoryCredentialSessionFiles(opened, withBom);
+  const caPath = join(parent, "ca.pem");
+  await writeFile(caPath, files["ca.pem"], { mode: 0o600 });
+  const requests = [];
+  const server = createServer({ key, cert }, (_request, response) => {
+    requests.push(1);
+    response.writeHead(200);
+    response.end();
+  });
+  const origin = await listen(t, server);
+  const result = await run("/usr/bin/git", ["ls-remote", `${origin}/example/project.git`], {
+    env: clean({
+      HOME: parent,
+      GIT_SSL_CAINFO: caPath,
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "maintenance.auto",
+      GIT_CONFIG_VALUE_0: "false",
+      GIT_CONFIG_KEY_1: "http.sslCAInfo",
+      GIT_CONFIG_VALUE_1: caPath,
+    }),
+    allowFailure: true,
+  });
+  assert.equal(result.stderr.includes("certificate verify locations"), false, result.stderr);
+  assert.ok(requests.length > 0, result.stderr);
+});
 
 describe("repository credential client configuration", { concurrency: 2 }, () => {
   for (const registration of cases) {

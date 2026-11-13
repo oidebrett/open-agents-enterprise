@@ -65,7 +65,39 @@ follows `:focus-visible`. No part of any ring may be cut off.
    Embedded Agent, the Share Agent form after a failed change (**Pages / Agent
    detail / Sharing outcome uncertain**) and the Logs controls of a version
    with no running Pod (**Pages / Agent detail / Logs of a version with no
-   running Pod**).
+   running Pod**). A dialog that cannot submit after a refusal or an unknown
+   outcome keeps its fields and confirmation in the Tab order, described by
+   its alert, while focus moves to Cancel or Close (finding 2935): **Pages /
+   Namespaces / Create permission denied** and **Create outcome unknown**,
+   **Pages / Secrets / Create denied** and **Concurrent reference conflict**,
+   and the Stop and Delete confirmations when a refusal arrives while they are
+   open (**Pages / Agents / Stop from the list, permission arrives while
+   confirmation is open**, **Components / Stop Agent / Permission arrives while
+   confirmation is open**, **Components / Deletion / Permission arrives while
+   confirmation is open**). Delete Agent after an unknown outcome
+   (**Components / Deletion / Outcome unknown**) or a refusal (**Components /
+   Deletion / Permission denied**, finding 2951) is described by its alert, as
+   is a refused Stop Agent (**Components / Stop Agent / Permission denied**)
+   and a refused list row icon, whose row note names the grant (**Pages /
+   Agents / Stop from the list denied**, finding 2955). So are the header's
+   Namespace selector with no readable Namespace (**Pages / Agents / No
+   readable Namespaces**, finding 2936) and **Start with default
+   Preset** without a default Preset (**Pages / Create Agent / No Presets**,
+   finding 2937), whose hint says why. With other Presets (**Pages / Create
+   Agent / Other Presets, no default**), the chooser's status says only
+   "Choose a Preset." and describes Use Preset; the hint is not repeated
+   (finding 2946). A list row refused for a reason other than grants shows the
+   API's text in its alert, its note names no grant but reads "Not deleted:
+   see above", and its icons stay reachable, described by the alert, until
+   Refresh (**Pages / Agents / Delete from the list refused for another
+   reason**, findings 2958, D812). On **Pages / Agents / Refocus after
+   another person's stop**, focus Stop, switch windows and return: the
+   rebuilt row has no Stop, and focus is on the Agent's name (finding 2967).
+   So do Previous instance before a restart (**Pages / Agent
+   detail / Runtime status after a healthy first deploy**), described by its
+   note (finding 2944), and Execution mode with the Codex harness (**Pages /
+   Create Agent / OpenAI with Codex harness**, Runtime details open), described
+   by its hint (finding 2945).
 10. Open **Components / Stop Agent / Stop pending**. Stopping… sets
     `aria-busy="true"` and shows the `progress` pointer, as Deleting… and a
     saving Save Configuration do (finding 1927).
@@ -122,3 +154,15 @@ Previous row feedback disappears. No empty-list message appears beside the
 unavailable warning. Submitted requests report generic acceptance, refusal or
 unknown outcomes without Agent details or replay. Browser tests also cover session
 expiry. Use the late Stop response story to inspect its generic result.
+
+## Configuration save conflict
+
+Open **Pages / Agent detail / Configuration conflict preserves moved focus**
+(`pages-agent-detail--configuration-conflict-focus`). The first save delays its
+simulated preflight read by 10 seconds so you can move focus. Reset between the
+three save paths: keep focus on **Checking Configuration…**, select all
+text in the pending read-only JSON editor, then focus the **Agents** link.
+Only the first path moves focus to **Reload draft**. The other paths keep focus,
+selection, and scroll position while the conflict alert appears. Reload still
+merges the local draft. This story simulates a preflight conflict; the discovered
+Agent Detail browser test covers a real Controller PATCH returning `409`.

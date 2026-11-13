@@ -2,23 +2,37 @@ import fs from "node:fs";
 import GithubSlugger from "github-slugger";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { createMarkdownRenderer, renderMdxish } from "./vendor/mdx-ish.mjs";
-import { renderComputeMatrixBlocks } from "./compute-matrix.mjs";
+import { renderComputeMatrixBlocks } from "./compute-matrix.ts";
 import {
   parseDocsDocument,
   parseFrontmatter,
   resolveDocsFragment,
 } from "./vendor/docs-markdown.mjs";
-import { createGithubAnchorReader, githubHeadingVisibleText } from "./github-anchors.mjs";
+import { createGithubAnchorReader, githubHeadingVisibleText } from "./github-anchors.ts";
 import { publicMarkdown } from "./public-markdown.mjs";
 
-if (process.argv.slice(2).some((arg) => arg !== "--check")) {
-  throw new Error("Usage: build.mjs [--check]");
-}
-const checkOnly = process.argv.includes("--check");
+const { values } = parseArgs({
+  options: { check: { type: "boolean" }, output: { type: "string" } },
+});
+const checkOnly = values.check;
 const root = process.cwd();
 const docs = path.join(root, "docs");
-const output = path.join(root, "dist/docs");
+const output = path.resolve(root, values.output ?? "dist/docs");
+if (values.output !== undefined) {
+  const previewPath = path.relative(path.join(root, "dist"), output).split(path.sep).join("/");
+  if (!/^\.docs-preview-[a-zA-Z0-9]{6}\/[1-9]\d*$/.test(previewPath)) {
+    throw new Error("Preview output must be a new build directory under dist/.docs-preview-*/");
+  }
+  const parent = path.dirname(output);
+  if (
+    fs.realpathSync(parent) !==
+    path.join(fs.realpathSync(path.join(root, "dist")), path.basename(parent))
+  ) {
+    throw new Error("Preview output cannot use a linked directory");
+  }
+}
 const assets = path.dirname(fileURLToPath(import.meta.url));
 const repository = "https://github.com/openclaw/openclaw-enterprise";
 const themeBootstrap =
@@ -36,6 +50,52 @@ const route = (source) =>
     .replace(/\.md$/, "")
     .replace(/\/$/, "") +
   (source === "README.md" ? "" : "/");
+
+// GitHub's heading slug is the canonical heading ID, so permalinks, the table of
+// contents, and source links agree. The renderer's own ID stays as an alias.
+function githubHeadingIds(parsed, ids) {
+  const github = new GithubSlugger();
+  const headingIds = new Map();
+  for (let i = 0; i < parsed.tokens.length; i++) {
+    const token = parsed.tokens[i];
+    if (token.type !== "heading_open") {
+      continue;
+    }
+    const id = token.attrGet("id");
+    const mint = token.meta?.anchorAlias;
+    const slug = github.slug(githubHeadingVisibleText(parsed.tokens[i + 1]));
+    // Existing IDs keep their owner: a heading takes its slug only if nobody else has it,
+    // and an empty slug keeps the renderer's ID.
+    const canonical = slug && (slug === id || slug === mint || !ids.has(slug)) ? slug : id;
+    ids.add(canonical);
+    headingIds.set(id, {
+      id: canonical,
+      alias: canonical === id ? undefined : id,
+      // The renderer's alias span would repeat an ID that now names the heading.
+      droppedMint: canonical === mint ? mint : undefined,
+    });
+  }
+  return headingIds;
+}
+
+function useGithubHeadingIds(html, headingIds) {
+  const span = (id, attributes = "") =>
+    '<span id="' + escape(id) + '" class="anchor-alias"' + attributes + "></span>";
+  return html.replace(/<h[1-6]\b[^>]*\bid="[^"]*"[^>]*>[\s\S]*?<\/h[1-6]>/g, (heading) => {
+    const previous = md.utils.unescapeAll(heading.match(/\bid="([^"]*)"/)[1]);
+    const target = headingIds.get(previous);
+    if (!target) {
+      return heading;
+    }
+    let result = heading;
+    if (target.droppedMint) {
+      result = result.replace(span(target.droppedMint, ' aria-hidden="true"'), "");
+    }
+    return result
+      .replace(/^(<h[1-6]\b[^>]*\bid=")[^"]*"/, (_, open) => open + escape(target.id) + '"')
+      .replace(/^<h[1-6]\b[^>]*>/, (open) => open + (target.alias ? span(target.alias) : ""));
+  });
+}
 
 function walk(directory, acceptsFile = (entry) => entry.name.endsWith(".md")) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -79,22 +139,25 @@ for (const file of walk(docs)) {
     unpublished.add(source);
     continue;
   }
-  const text = publicMarkdown(authored, md);
-  const parsed = parseDocsDocument(text, md, { sourceFile: file, root: docs });
-  const githubAliases = new Map();
-  const github = new GithubSlugger();
-  const ids = new Set(parsed.ids);
-  for (let i = 0; i < parsed.tokens.length; i++) {
-    const token = parsed.tokens[i];
-    if (token.type !== "heading_open") {
-      continue;
-    }
-    const alias = github.slug(githubHeadingVisibleText(parsed.tokens[i + 1]));
-    if (!ids.has(alias)) {
-      githubAliases.set(token.attrGet("id"), alias);
-      ids.add(alias);
+  const humanVerified =
+    Array.isArray(frontmatter?.tags) && frontmatter.tags.includes("human_verified");
+  const lastVerified = frontmatter?.last_verified;
+  if (humanVerified || lastVerified !== undefined) {
+    if (
+      typeof lastVerified !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(lastVerified) ||
+      !Number.isFinite(Date.parse(lastVerified)) ||
+      new Date(lastVerified).toISOString().slice(0, 10) !== lastVerified
+    ) {
+      throw new Error(
+        source + ": last_verified must be a valid YYYY-MM-DD date for human verification",
+      );
     }
   }
+  const text = publicMarkdown(authored, md);
+  const parsed = parseDocsDocument(text, md, { sourceFile: file, root: docs });
+  const ids = new Set(parsed.ids);
+  const headingIds = githubHeadingIds(parsed, ids);
   const firstHeading = parsed.tokens.findIndex(
     (token) => token.type === "heading_open" && token.tag === "h1",
   );
@@ -105,10 +168,56 @@ for (const file of walk(docs)) {
     text,
     title,
     route: route(source),
+    searchable: frontmatter?.searchable !== false,
+    humanVerified,
+    lastVerified,
     ids,
-    githubAliases,
+    headingIds,
     parsed,
   });
+}
+// Former published routes remain usable without retaining duplicate source pages.
+const redirects = config.redirects ?? [];
+if (!Array.isArray(redirects)) {
+  throw new Error("docs/docs.json redirects must be an array");
+}
+const redirectSources = new Set();
+function checkRedirectTarget(target) {
+  if (typeof target !== "string" || !target.startsWith("/") || target.startsWith("//")) {
+    throw new Error("Invalid redirect target: " + target);
+  }
+  const url = new URL(target, "https://local.invalid");
+  const page = [...pages.values()].find((candidate) => candidate.route === url.pathname);
+  if (
+    url.origin !== "https://local.invalid" ||
+    !page ||
+    url.search ||
+    (url.hash && !resolveDocsFragment(url.hash, page.ids))
+  ) {
+    throw new Error("Missing redirect page or heading: " + target);
+  }
+}
+for (const redirect of redirects) {
+  if (
+    !redirect ||
+    typeof redirect.from !== "string" ||
+    !/^\/(?:[a-z0-9-]+\/)+$/.test(redirect.from) ||
+    redirectSources.has(redirect.from) ||
+    [...pages.values()].some((page) => page.route === redirect.from)
+  ) {
+    throw new Error("Invalid or duplicate redirect route: " + redirect?.from);
+  }
+  redirectSources.add(redirect.from);
+  checkRedirectTarget(redirect.to);
+  if (
+    redirect.anchors !== undefined &&
+    (!redirect.anchors || typeof redirect.anchors !== "object" || Array.isArray(redirect.anchors))
+  ) {
+    throw new Error("Redirect anchors must be an object: " + redirect.from);
+  }
+  for (const target of Object.values(redirect.anchors ?? {})) {
+    checkRedirectTarget(target);
+  }
 }
 const configuredTabs = config.navigation.languages.find(
   (language) => language.language === "en",
@@ -245,7 +354,7 @@ function resolveLink(page, href) {
     }
     return linked.route + url.search + url.hash;
   }
-  if (target.startsWith(docs + path.sep)) {
+  if (/^(?:assets|snippets)\//.test(docSource)) {
     return "/" + docSource.split("/").map(encodeURIComponent).join("/") + url.search + url.hash;
   }
   if (url.hash && target.endsWith(".md") && !resolveDocsFragment(url.hash, githubAnchors(target))) {
@@ -255,6 +364,7 @@ function resolveLink(page, href) {
     repository +
     "/blob/main/" +
     path.relative(root, target).split(path.sep).map(encodeURIComponent).join("/") +
+    (target.startsWith(docs + path.sep) ? url.search : "") +
     url.hash
   );
 }
@@ -268,14 +378,19 @@ for (const page of pages.values()) {
     linkCount++;
   }
   const text = renderComputeMatrixBlocks(page.text, { sourceFile: page.file, root: docs });
-  page.html = renderMdxish(text, md, { sourceFile: page.file, root: docs }).replace(
-    /<(?:a|img|source|span)\b[^>]*>/g,
-    (tag) =>
-      tag.replace(/\b(href|src|data-href)=(['"])(.*?)\2/g, (_, name, quote, href) => {
-        const sourceHref = md.utils.unescapeAll(href);
-        const resolved = resolvedLinks.get(sourceHref) ?? resolveLink(page, sourceHref);
-        return name + "=" + quote + escape(resolved) + quote;
-      }),
+  page.html = useGithubHeadingIds(
+    renderMdxish(text, md, {
+      sourceFile: page.file,
+      root: docs,
+      headingIds: page.headingIds,
+    }),
+    page.headingIds,
+  ).replace(/<(?:a|img|source|span)\b[^>]*>/g, (tag) =>
+    tag.replace(/\b(href|src|data-href)=(['"])(.*?)\2/g, (_, name, quote, href) => {
+      const sourceHref = md.utils.unescapeAll(href);
+      const resolved = resolvedLinks.get(sourceHref) ?? resolveLink(page, sourceHref);
+      return name + "=" + quote + escape(resolved) + quote;
+    }),
   );
 }
 const deploymentExamples = path.join(root, "deploy/examples");
@@ -295,11 +410,23 @@ if (fs.existsSync(deploymentExamples)) {
   }
 }
 for (const page of pages.values()) {
-  page.html = page.html.replace(/<h[1-6]\b[^>]*>/g, (tag) => {
-    const id = tag.match(/\bid="([^"]*)"/)?.[1];
-    const alias = page.githubAliases.get(md.utils.unescapeAll(id ?? ""));
-    return tag + (alias ? '<span class="anchor-alias" id="' + escape(alias) + '"></span>' : "");
-  });
+  if (page.humanVerified) {
+    page.html = page.html.replace(
+      /<\/h1>/,
+      '$&<details class="human-verification" data-pagefind-ignore>' +
+        '<summary><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>' +
+        '<span>Human verified</span><span aria-hidden="true">·</span>' +
+        '<time datetime="' +
+        escape(page.lastVerified) +
+        '" aria-label="Last verified: ' +
+        escape(page.lastVerified) +
+        '">' +
+        escape(page.lastVerified) +
+        "</time>" +
+        '<span class="verification-info" aria-hidden="true">ⓘ</span></summary>' +
+        "<p>A human reviewed this page, but it may be out of date. Later edits may not have been reviewed.</p></details>",
+    );
+  }
 }
 for (const page of pages.values()) {
   if (page.source === "reference/api-explorer.md") {
@@ -312,10 +439,18 @@ if (checkOnly) {
   process.exit(0);
 }
 
-fs.rmSync(output, { recursive: true, force: true });
+if (values.output === undefined) {
+  fs.rmSync(output, { recursive: true, force: true });
+} else {
+  // Preview builds only create a fresh directory; never delete a caller's path.
+  fs.mkdirSync(output);
+}
 fs.mkdirSync(path.join(output, "assets"), { recursive: true });
 if (fs.existsSync(path.join(docs, "assets"))) {
   fs.cpSync(path.join(docs, "assets"), path.join(output, "assets"), { recursive: true });
+}
+if (fs.existsSync(path.join(docs, "snippets"))) {
+  fs.cpSync(path.join(docs, "snippets"), path.join(output, "snippets"), { recursive: true });
 }
 fs.cpSync(path.join(assets, "fonts"), path.join(output, "assets/fonts"), { recursive: true });
 const carapaceCss = [
@@ -448,7 +583,7 @@ for (const page of pages.values()) {
       token.type === "heading_open" && token.tag === "h2"
         ? [
             '<a href="#' +
-              escape(token.attrGet("id")) +
+              escape(page.headingIds.get(token.attrGet("id"))?.id ?? token.attrGet("id")) +
               '">' +
               escape(tokens[index + 1].content) +
               "</a>",
@@ -458,6 +593,7 @@ for (const page of pages.values()) {
     .join("");
   const html =
     '<!doctype html><html lang="en" data-theme="dark" data-oc-theme="product"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    (page.searchable ? "" : '<meta name="robots" content="noindex">') +
     themeBootstrap +
     (page.source === "reference/api-explorer.md"
       ? '<script src="/assets/scalar.js" defer></script><script type="module" src="/assets/api-explorer.mjs"></script>'
@@ -479,7 +615,9 @@ for (const page of pages.values()) {
     ' pages">' +
     sidebar +
     "</nav>" +
-    '<main id="content" class="doc" data-pagefind-body>' +
+    (page.searchable
+      ? '<main id="content" class="doc" data-pagefind-body>'
+      : '<main id="content" class="doc">') +
     renderBreadcrumb(page) +
     page.html +
     '<footer data-pagefind-ignore><a href="' +
@@ -503,4 +641,31 @@ fs.writeFileSync(
     2,
   ) + "\n",
 );
-console.log("Built " + pages.size + " pages; validated " + linkCount + " links → dist/docs");
+for (const redirect of redirects) {
+  const directory = path.join(output, redirect.from.slice(1));
+  fs.mkdirSync(directory, { recursive: true });
+  const settings = JSON.stringify(redirect).replaceAll("<", "\\u003c");
+  fs.writeFileSync(
+    path.join(directory, "index.html"),
+    `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex">
+<title>Page moved</title><link rel="canonical" href="${escape(redirect.to)}">
+<script>
+const redirect = ${settings};
+const anchor = decodeURIComponent(location.hash.slice(1));
+const mapped = Object.hasOwn(redirect.anchors ?? {}, anchor) ? redirect.anchors[anchor] : undefined;
+const target = new URL(mapped ?? redirect.to, location.origin);
+if (!mapped && !target.hash) target.hash = location.hash;
+target.search = location.search;
+location.replace(target.href);
+</script></head><body><p>This page moved. <a href="${escape(redirect.to)}">Continue to the current guide</a>.</p></body></html>`,
+  );
+}
+console.log(
+  "Built " +
+    pages.size +
+    " pages; validated " +
+    linkCount +
+    " links → " +
+    path.relative(root, output),
+);

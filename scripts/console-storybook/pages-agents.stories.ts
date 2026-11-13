@@ -4,6 +4,10 @@ export default { title: "Pages/Agents" };
 
 export const Agents = { ...story("agents"), name: "Populated" };
 export const RowNavigation = story("agentsRowNavigation");
+export const NamespaceFocusDuringRefresh = {
+  ...story("agentsNamespaceFocusDuringRefresh"),
+  name: "Namespace focus during list refresh",
+};
 export const UnreadableConfiguration = story("agentsUnreadableConfiguration");
 export const LongName = story("agentsLongName");
 export const LongNameDigits = story("agentsLongNameDigits");
@@ -59,7 +63,13 @@ export const RowStopped = story("agentsRowStopped");
 export const RowDeleteConfirmation = story("agentsRowDeleteConfirm");
 export const RowStopDenied = story("agentsRowStopDenied");
 export const RowDeleteDenied = story("agentsRowDeleteDenied");
+export const RowDeleteRefusedOther = story("agentsRowDeleteRefusedOther");
+export const RowRefocusDeleting = story("agentsRowRefocusDeleting");
+export const RowRefocusStopped = story("agentsRowRefocusStopped");
 export const RowStopUnknown = story("agentsRowStopUnknown");
+export const RowStopPermissionDuringConfirmation = story(
+  "agentsRowStopPermissionDuringConfirmation",
+);
 export const RowRestricted = story("agentsRowRestricted");
 
 export const LatestDeploymentFailed = story("agentsDeploymentFailed");

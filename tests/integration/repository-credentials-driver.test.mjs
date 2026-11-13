@@ -17,15 +17,15 @@ import { GitHubNativeRepositorySender } from "../../apps/controller/src/drivers/
 import { UnixRepositoryCredentialControlClient } from "../../apps/controller/src/backends/repository-credentials/control-client.ts";
 import { startRegistryCredentialServiceFixture } from "../fixtures/repository-credentials/registry.mjs";
 
-function driverFor(registry, socket, sessionDurationSeconds = 3600, publicCa) {
+function driverFor(backendId, registry, socket, sessionDurationSeconds = 3600, publicCa) {
   const backend = {
-    id: registry.backendId,
+    id: backendId,
     client: new UnixRepositoryCredentialControlClient({ controlSocket: socket }),
     drivers: { repo: "repository-credentials" },
   };
   return {
     policy: new GitHubRepositoryPolicy(
-      { id: backend.id, drivers: { repo: backend.drivers.repo } },
+      { driverId: backend.drivers.repo, backendId: backend.id },
       registry,
       { sessionDurationSeconds },
     ),
@@ -86,7 +86,11 @@ test(
       gateway: { listen: "127.0.0.1:0" },
     });
     const signal = new AbortController().signal;
-    const local = driverFor(fixture.registry, "/nonexistent/repository-control.sock");
+    const local = driverFor(
+      fixture.backendId,
+      fixture.registry,
+      "/nonexistent/repository-control.sock",
+    );
     const selection = {
       namespaceId: fixture.namespaceId,
       bindings: [
@@ -104,24 +108,25 @@ test(
         }),
       ScopeViolationError,
     );
-    const composed = await composeRepositoryAccess({
-      backend: {
-        id: fixture.backendId,
-        type: "github",
-        drivers: { repo: "repository-credentials" },
-        configuration: { registryPath: fixture.registryFile },
-      },
-      selection: {
-        id: "repository-credentials",
-        implementation: "github",
-        configuration: {
-          sessionDurationSeconds: 3600,
-          controlSocket: fixture.config.gateway.controlSocket,
-          publicCaPath: fixture.tls.certFile,
+    const composed = await composeRepositoryAccess(
+      {
+        backend: {
+          id: fixture.backendId,
+          type: "github",
+          drivers: { repo: "repository-credentials" },
+          configuration: { registryPath: fixture.registryFile },
+        },
+        selection: {
+          id: "repository-credentials",
+          implementation: "github",
+          configuration: { sessionDurationSeconds: 3600 },
         },
       },
-      protectedGit: false,
-    });
+      {
+        controlSocket: fixture.config.gateway.controlSocket,
+        publicCaPath: fixture.tls.certFile,
+      },
+    );
     const driver = { policy: composed.repositoryPolicy, sender: composed.nativeRepositorySender };
     assert.deepEqual(driver.policy.resolve(selection), resolution);
     assert.throws(
@@ -251,6 +256,7 @@ test(
 
     // A changed local Backend registry must not obstruct restrictive cleanup of the old admission.
     const changedProvider = driverFor(
+      "replacement-provider",
       { ...fixture.registry, backendId: "replacement-provider" },
       fixture.config.gateway.controlSocket,
     );
@@ -295,6 +301,7 @@ test("Unix control rejects malformed status and preserves authoritative absence 
   const socket = join(directory, "control.sock");
   const id = randomUUID();
   const driver = driverFor(
+    "github-test",
     {
       version: 1,
       backendId: "github-test",
@@ -334,8 +341,10 @@ test("Unix control rejects malformed status and preserves authoritative absence 
     },
   };
   let reply = { status: 200, body: valid };
+  let requests = 0;
   // This independent wire peer supplies invalid protocol packets; it implements no session policy.
   const server = createServer((incoming, response) => {
+    requests++;
     incoming.resume();
     response.writeHead(reply.status, { "content-type": "application/json" });
     response.end(JSON.stringify(reply.body));
@@ -375,6 +384,25 @@ test("Unix control rejects malformed status and preserves authoritative absence 
     apiHost: "credentials.example.test",
     repository: "example/project",
   };
+
+  await t.test("native installation refusal never contacts the broker", async () => {
+    const before = requests;
+    // Installation access belongs to protected delivery, including recovery attempts.
+    for (const recoverOnly of [false, true]) {
+      await assert.rejects(
+        driver.sender.open(
+          {
+            ...openInput,
+            binding: { ...admitted, profile: "github-installation" },
+            recoverOnly,
+          },
+          signal,
+        ),
+        ScopeViolationError,
+      );
+      assert.equal(requests, before);
+    }
+  });
 
   await t.test(
     "every public exit validates the complete private observation before projection",
@@ -665,7 +693,7 @@ test(
       await new Promise((resolve) => receiptServer.close(resolve));
     });
     const probe = new URL(
-      "../../apps/controller/src/drivers/repo/github/credentials/admission-probe.mjs",
+      "../../apps/controller/src/drivers/repo/github/access/admission-probe.mjs",
       import.meta.url,
     ).pathname;
     for (const [mode, outcome] of [
