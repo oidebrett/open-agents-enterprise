@@ -19,7 +19,7 @@
 #
 # Usage:
 #   deploy/oae/images/build-images.sh [options]
-#     --registry REF   image name prefix (default: ghcr.io/oidebrett/open-agents-enterprise)
+#     --registry REF   image name prefix (default: docker.io/oideibrett/open-agents-enterprise)
 #     --platform LIST  buildx platforms (default: host arch; CI passes linux/amd64,linux/arm64)
 #     --push           push the final images (and the runtime-base) to the registry by digest
 #     --dry-run        build to validate only; keep nothing (no load, no push). The Claude layer
@@ -35,7 +35,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 cd "$repo"
 
-registry="ghcr.io/oidebrett/open-agents-enterprise"
+registry="docker.io/oideibrett/open-agents-enterprise"
 platform=""
 push=0
 dry_run=0

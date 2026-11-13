@@ -140,14 +140,15 @@ via CI (`oae-images.yml`) still open.
   layered via `runtime-claude`'s existing `ARG OCE_RUNTIME_IMAGE` — pointed at our from-source base
   instead of a published image. One shared build path (`deploy/oae/images/build-images.sh`) used by
   `.github/workflows/oae-images.yml` (OAE-owned, `workflow_dispatch`, publishes multi-arch to
-  `ghcr.io/oidebrett/open-agents-enterprise-*`, tag `sha-<commit>`).
+  `docker.io/oideibrett/open-agents-enterprise-*`, tag `sha-<commit>` — Docker Hub, to match the
+  manidae-cloud pins and the edge image).
   - ✅ All three images built from source and verified on the Oracle testbed (2026-11-13, native
     arm64), with a capped `docker-container` builder (`max-parallelism=1`, 3 CPU, 14 GiB) and no
     impact on the co-resident AgentGateway: controller (Node 24.22.1, 64 migrations); `runtime-base`
     (OpenClaw 2026.10.8 from source, codex 0.163.0-alpha.2, provenance matches the pin); `runtime`
     (Claude Code 2.1.312 + OpenClaw + Teams). The trial fixed two bugs in `build-images.sh` (serialize
     heavy stages to avoid OOM; layer builds use their own dir as context).
-  - ⬜ First real **publish**: run `oae-images.yml` with `push` (multi-arch to GHCR). Belongs in CI /
+  - ⬜ First real **publish**: run `oae-images.yml` with `push` (multi-arch to Docker Hub). Belongs in CI /
     a dedicated build box, not the live testbed.
   - ⬜ manidae package switches to the OAE images; verify on Oracle via `oae-upgrade`, then pin the
     digests in manidae (release gate).

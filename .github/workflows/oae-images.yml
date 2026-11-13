@@ -13,7 +13,7 @@ on:
         default: oae
         type: string
       push:
-        description: Push the built images to GHCR (off = build-only dry run)
+        description: Push the built images to Docker Hub (off = build-only dry run)
         required: false
         default: false
         type: boolean
@@ -40,8 +40,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
-      contents: read
-      packages: write # push to ghcr.io/oidebrett/open-agents-enterprise-*
+      contents: read # images push to docker.io/oideibrett/* with Docker Hub creds, not GITHUB_TOKEN
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -66,13 +65,14 @@ jobs:
             [worker.oci]
               max-parallelism = 1
 
-      - name: Log in to GHCR
+      # Docker Hub (docker.io/oideibrett/*), to match the manidae-cloud OAE pins and the edge image.
+      # Needs repo secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (a Docker Hub access token).
+      - name: Log in to Docker Hub
         if: ${{ inputs.push }}
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Publish: multi-arch (amd64 + emulated arm64), pushed by digest — the runtime layer pulls the
       # just-pushed base. Dry run: build controller + runtime-base (the heavy from-source image) on
