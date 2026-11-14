@@ -1724,12 +1724,14 @@ export async function renderAgentDetail(
       configurationEditable: () => !configurationReadOnly(),
     },
   );
-  headerActions.append(
-    nativeAdmin.launch,
-    nativeAdmin.unavailable,
-    // OAE: SSO installations open Agents through the edge.
-    renderOaeOpenAgent(context, namespaceId, agentId),
+  // OAE: SSO installations open Agents through the edge; hidden for a no-UI runtime (Claude Gateway).
+  const oaeOpenAgent = renderOaeOpenAgent(
+    context,
+    namespaceId,
+    agentId,
+    () => visibleRevisions.find((revision) => revision.id === currentRevisionId)?.harness?.id,
   );
+  headerActions.append(nativeAdmin.launch, nativeAdmin.unavailable, oaeOpenAgent.link);
   const recovery = createDeploymentRecovery(context, {
     path,
     selected,
@@ -2940,6 +2942,8 @@ export async function renderAgentDetail(
     );
     renderCurrentVersion();
     nativeAdmin.updateTarget();
+    // OAE: the edge button hides for a no-UI runtime (Claude Gateway) once the harness is known.
+    oaeOpenAgent.update();
     renderVersions(revisions, snapshot, revisionResult);
     const mostRecent = revisions[0];
     if (activityRevisionId !== (mostRecent?.id ?? null)) {

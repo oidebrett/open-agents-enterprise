@@ -215,6 +215,13 @@ is gated rather than removed:
 This is client-side button visibility only; native-admin remains enabled on the server, so the recovery
 administrator still has the native UI.
 
+**No-UI runtimes (Claude Gateway).** A Claude Gateway Agent (people's own Claude Code / Claude Desktop
+over the VPN) has no browser UI at all, so neither button should appear. The native card already hides
+itself (the compute driver returns no gateway endpoint for a `claude-gateway` revision); the edge button
+now does the same — `renderOaeOpenAgent` takes the current revision's harness id and stays hidden when it
+is a no-UI runtime (`claude-gateway`), re-checked once the revision is known. Hermes and OpenClaw Agents,
+which do have a web UI through the edge, are unaffected.
+
 ## Exercising the native chat path
 
 `deploy/oae/edge/oae-native-chat-check` is a read-only diagnostic for an OAE/SSO install. For a given
