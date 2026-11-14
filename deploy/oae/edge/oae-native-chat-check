@@ -1,0 +1,71 @@
+#!/bin/bash
+# oae-native-chat-check — is upstream's RFC-0031 native browser-chat path live for an Agent?
+# Read-only diagnostic for an OAE/SSO install (docs/oae/native-chat-rfc0031.md, strike 8). Run on
+# the OAE server. It never writes.
+#
+#   oae-native-chat-check              report every OpenClaw Agent
+#   oae-native-chat-check <agent-id>   report one Agent (agt_...)
+#
+# For each Agent it checks, against the live gateway Configuration and the Envoy HTTPRoute, the two
+# gates that decide ComputeDriver.getGatewayChatEndpoint (apps/controller/.../kubernetes/index.ts):
+#   gate a  usesWritableNativeAdminConfig — trusted-proxy with occ-workspace-files/operator.admin,
+#           controlUi.enabled + a non-empty allowedOrigins, and trustedProxy.deviceAutoApprove.enabled
+#   gate b  trustedProxy.requiredHeaders contains x-openclaw-scopes
+# and whether the generated HTTPRoute carries the /native-chat (operator.sessions.write) rule.
+#
+# Reminder (strike 8): even when the native chat route is generated, on an OAE install the public
+# Agent host is served by the edge's Traefik Ingress, so the native route stays in-cluster only.
+set -euo pipefail
+. /opt/oce/env.sh 2>/dev/null || true
+export PATH=/opt/oce/tools/bin:$PATH KUBECONFIG=${KUBECONFIG:-/opt/oce/prod/kubeconfig}
+
+report_one() {
+  local ns=$1 agent=$2
+  local cm route cfg
+  cm=$(kubectl -n "$ns" get cm -l "openclaw.dev/agent=$agent" \
+        -o jsonpath='{.items[?(@.metadata.name)].metadata.name}' 2>/dev/null \
+        | tr ' ' '\n' | grep -E '^gateway-.*-rev-' | head -1 || true)
+  echo "Agent $agent  (namespace $ns)"
+  if [ -z "$cm" ]; then
+    echo "  gateway config: none found (Agent not running a gateway revision)"; echo; return
+  fi
+  cfg=$(kubectl -n "$ns" get cm "$cm" -o jsonpath='{.data}' 2>/dev/null)
+  echo "$cfg" | jq -r --arg agent "$agent" '
+    (to_entries[0].value | fromjson) as $c
+    | ($c.gateway // {}) as $g | ($g.auth // {}) as $a | ($a.trustedProxy // {}) as $tp
+    | ($g.controlUi // {}) as $ui
+    | (($a.identityScopes // {})["occ-workspace-files"] // []) as $ws
+    | (($a.mode=="trusted-proxy")
+        and ($tp.userHeader=="x-occ-identity")
+        and (($tp.allowUsers // []) | index("occ-workspace-files") != null)
+        and ($ws | index("operator.admin") != null)
+        and (($tp.deviceAutoApprove // {}).enabled == true)
+        and ($ui.enabled == true)
+        and (($ui.allowedOrigins // []) | length > 0)
+        and (($ui.dangerouslyDisableDeviceAuth // false) != true)) as $gateA
+    | (($tp.requiredHeaders // []) | index("x-openclaw-scopes") != null) as $gateB
+    | "  gate a  usesWritableNativeAdminConfig : \($gateA)",
+      "          deviceAutoApprove.enabled       : \(($tp.deviceAutoApprove // {}).enabled // false)",
+      "          controlUi.allowedOrigins        : \(($ui.allowedOrigins // []) | length) origin(s)",
+      "  gate b  requiredHeaders has scopes hdr  : \($gateB)",
+      "  => getGatewayChatEndpoint would be      : \(if ($gateA and $gateB) then "DEFINED (native chat route emitted)" else "undefined (admin route only)" end)"
+  ' 2>/dev/null || echo "  (could not parse gateway configuration JSON)"
+  # Confirm against the actual Envoy HTTPRoute.
+  route=$(kubectl -n "$ns" get httproute -l "openclaw.dev/agent=$agent" -o json 2>/dev/null \
+            | jq -r '[.items[].spec.rules[].matches[].path.value // empty] | map(select(startswith("/native-chat"))) | length' 2>/dev/null || echo 0)
+  echo "  HTTPRoute /native-chat rules present    : $([ "${route:-0}" -gt 0 ] && echo yes || echo no)"
+  echo
+}
+
+if [ "${1:-}" ]; then
+  ns=$(kubectl get cm -A -l "openclaw.dev/agent=$1" \
+        -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
+  [ -n "$ns" ] || { echo "oae-native-chat-check: no gateway objects for $1" >&2; exit 1; }
+  report_one "$ns" "$1"
+else
+  kubectl get cm -A -l app.kubernetes.io/managed-by=openclaw-enterprise \
+      -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.labels.openclaw\.dev/agent}{"\n"}{end}' 2>/dev/null \
+    | awk 'NF==2 && $2 ~ /^agt_/' | sort -u | while read -r ns agent; do
+      report_one "$ns" "$agent"
+    done
+fi

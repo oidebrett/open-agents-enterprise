@@ -284,3 +284,47 @@ Same capabilities as before, in OCE's security pattern (details:
 
 - manidae package out of preview; upgrade and sync runbook; divergence audit
   listing every upstream file OAE touches.
+
+## ✅ Strike 8 — RFC-0031 native browser chat: proof and coexistence (investigation)
+
+Prompted by the first upstream sync (`a71a4289`), which enabled upstream's
+[RFC-0031](../../specs/rfcs/0031-oidc-agent-chat.md) native agent-chat under OIDC. Question: adopt the
+native cookie path for the **browser** Agent-UI slice (retiring our edge's browser forward-auth there),
+keeping the rest of the edge (device/mobile pairing, Claude Gateway VPN, People panel, `/apps`)? Proof of
+concept only (works + gaps + plan). Full finding: [`native-chat-rfc0031.md`](native-chat-rfc0031.md).
+
+Finding (branch `strike/8-native-chat`, add-only: `docs/oae/native-chat-rfc0031.md` +
+`deploy/oae/edge/oae-native-chat-check`; no upstream file edited). Verified on Oracle
+(controller `sha256:03ae9843…`, runtime `sha256:8440e412…`):
+
+- **Q1 — native cookie chat end to end? No at the public host.** The native-admin domain
+  (`OCC_AGENT_NATIVE_ADMIN_DOMAIN=agents.oae.ag-…`) is **identical** to the edge's agents domain, so the
+  public Agent host collides. The native Envoy `HTTPRoute` binds the **internal** `occ-gateway-…svc`
+  host; the **public** host is served only by the edge's k3s Traefik Ingress (curl → 401 from
+  `oae-edge-authz`). So a browser following the native "Open chat" URL still hits the edge. On the live
+  (ungranted) Agent the native-chat route isn't even generated — `deviceAutoApprove` is absent, so
+  `usesWritableNativeAdminConfig=false` and `getGatewayChatEndpoint=undefined` (admin route only). A
+  **granted** OAE Agent *does* qualify (`oae-edge` sets `deviceAutoApprove.enabled=true`), so the
+  native-chat route co-generates in-cluster — just shadowed by the edge Ingress.
+- **Q2 — runtime has qualified chat enforcement? Yes.** Pinned OpenClaw `2026.10.10`; `operator-scopes.md`
+  ships in-image; `operator.sessions.write` is a distinct enforced level vs `operator.admin`;
+  `trustedProxy.requiredHeaders` includes `x-openclaw-scopes`, enforced at the listener. (A direct
+  per-method WS intersection probe was left to upstream's RFC-0031 qualification of the same runtime.)
+- **Q3 — edge grant vs the chat ceiling.** Edge maps `user→operator.read,write` and
+  `operator→+operator.approvals,pairing`. The native chat ceiling `operator.sessions.write` **excludes
+  approvals and pairing** and is narrower than `operator.write`; the only native rung above it is
+  `operator.admin` (full admin). No native equivalent to OAE's "operator" grant.
+- **Q4 — coexistence.** Device/VPN/People/apps are disjoint from the native path and unaffected; the one
+  interaction is overlapping writes to `gateway.controlUi`/`trustedProxy`/`identityScopes` by the
+  controller (native) and `oae-edge sync` — agree today, watch on future syncs.
+
+**Recommendation: keep the browser slice on the edge.** Native adoption would require re-architecting the
+Agent-host ingress to Envoy, drop per-person gateway identity for the shared `occ-workspace-files`, and
+lose operator approvals/pairing. Net downgrade. Revisit if upstream adds per-person native identity on the
+chat route and a native scope between `operator.sessions.write` and `operator.admin`. Native-admin is left
+**on** so the recovery administrator keeps the native break-glass UI.
+
+- `oae-native-chat-check [agent-id]` reports the two gates and whether the `/native-chat` route is live,
+  read-only, for any Agent on an OAE/SSO install.
+- Not done (out of PoC scope): live browser SSO chat as `oae-demo` (needs the user's credentials; no user
+  is currently granted on the testbed), and the direct per-method WS scope-intersection probe.
