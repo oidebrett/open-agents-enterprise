@@ -1557,42 +1557,46 @@ export async function loadInstallationConfiguration(options: {
   } else {
     // OAE: `hermes` and `claude-gateway` revisions go to their own workloads; every other
     // revision is unchanged.
-    computeDriver = withClaudeGatewayRuntime(withHermesRuntime(new KubernetesComputeDriver(
-      compute.configuration as unknown as KubernetesComputeDriverOptions,
-      {
-        id: compute.id,
-        implementation: compute.implementation,
-        lifecycleDrivers: [configurationDriver],
-        ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
-        ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
-        // Both built-ins above received this exact Backend; injected and package Sandboxes opt out.
-        ...(openShell !== undefined &&
-        sandboxDriver !== undefined &&
-        sandboxPackage === undefined &&
-        options.createSandboxDriver === undefined &&
-        credentialGatewayDriver !== undefined
-          ? {
-              openShellAttachments: {
-                sandboxDriver,
-                credentialGatewayDriver,
-                attachments: credentialGatewayDriver.attachments,
-              },
-            }
-          : {}),
-        ...(protectedDriver === undefined ? {} : { protectedDriver }),
-        preparedTokens: tokenService,
-        ...(preparedRepositoryGit === undefined || repositoryTransport || repositoryGitDriver
-          ? {}
-          : { preparedRepositoryIngress: true }),
-        preprovisionedNamespace,
-        nodeEnrollment: createGatewayNodeEnrollment(() =>
-          readWorkspaceFilesApiKey(
-            nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
-          ),
+    computeDriver = withClaudeGatewayRuntime(
+      withHermesRuntime(
+        new KubernetesComputeDriver(
+          compute.configuration as unknown as KubernetesComputeDriverOptions,
+          {
+            id: compute.id,
+            implementation: compute.implementation,
+            lifecycleDrivers: [configurationDriver],
+            ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
+            ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
+            // Both built-ins above received this exact Backend; injected and package Sandboxes opt out.
+            ...(openShell !== undefined &&
+            sandboxDriver !== undefined &&
+            sandboxPackage === undefined &&
+            options.createSandboxDriver === undefined &&
+            credentialGatewayDriver !== undefined
+              ? {
+                  openShellAttachments: {
+                    sandboxDriver,
+                    credentialGatewayDriver,
+                    attachments: credentialGatewayDriver.attachments,
+                  },
+                }
+              : {}),
+            ...(protectedDriver === undefined ? {} : { protectedDriver }),
+            preparedTokens: tokenService,
+            ...(preparedRepositoryGit === undefined || repositoryTransport || repositoryGitDriver
+              ? {}
+              : { preparedRepositoryIngress: true }),
+            preprovisionedNamespace,
+            nodeEnrollment: createGatewayNodeEnrollment(() =>
+              readWorkspaceFilesApiKey(
+                nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
+              ),
+            ),
+            readNodeCa: () => readHarnessNodeCa(environment),
+          },
         ),
-        readNodeCa: () => readHarnessNodeCa(environment),
-      },
-    )));
+      ),
+    );
   }
   const namespaceLifecycleBindings =
     sandboxDriver === undefined ||

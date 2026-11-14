@@ -58,6 +58,7 @@ import {
 import { renderAgentAccess } from "./access.mjs";
 import { renderNativeAdminAccess } from "./native-admin.mjs";
 import { renderOaeOpenAgent } from "./oae-open-agent.mjs";
+import { oaeNativeAdminBrowserAccess } from "./oae-native-admin-gate.mjs";
 import { renderOaePeople } from "./oae-people.mjs";
 import { createAgentDeletion } from "./deletion.mjs";
 import { createAgentStop } from "./stop.mjs";
@@ -1681,16 +1682,12 @@ export async function renderAgentDetail(
   const nativeAdmin = renderNativeAdminAccess(
     context,
     path,
+    // OAE: on an SSO install the native Agent-UI button is hidden for everyone; people (and admins)
+    // use the edge's "Open Agent" instead. Upstream behaviour is unchanged on non-OIDC installs.
     () =>
-      latestPermissionsRead.then((permissions) => {
-        if (permissions?.administer === true || permissions?.operate === true) {
-          return true;
-        }
-        if (permissions?.administer === false && permissions?.operate === false) {
-          return false;
-        }
-        return undefined;
-      }),
+      latestPermissionsRead.then((permissions) =>
+        oaeNativeAdminBrowserAccess(context, permissions),
+      ),
     {
       // One the caller cannot read is not named by its ID (finding D791).
       versionLabel: () =>
@@ -1727,12 +1724,14 @@ export async function renderAgentDetail(
       configurationEditable: () => !configurationReadOnly(),
     },
   );
-  headerActions.append(
-    nativeAdmin.launch,
-    nativeAdmin.unavailable,
-    // OAE: SSO installations open Agents through the edge.
-    renderOaeOpenAgent(context, namespaceId, agentId),
+  // OAE: SSO installations open Agents through the edge; hidden for a no-UI runtime (Claude Gateway).
+  const oaeOpenAgent = renderOaeOpenAgent(
+    context,
+    namespaceId,
+    agentId,
+    () => visibleRevisions.find((revision) => revision.id === currentRevisionId)?.harness?.id,
   );
+  headerActions.append(nativeAdmin.launch, nativeAdmin.unavailable, oaeOpenAgent.link);
   const recovery = createDeploymentRecovery(context, {
     path,
     selected,
@@ -2943,6 +2942,8 @@ export async function renderAgentDetail(
     );
     renderCurrentVersion();
     nativeAdmin.updateTarget();
+    // OAE: the edge button hides for a no-UI runtime (Claude Gateway) once the harness is known.
+    oaeOpenAgent.update();
     renderVersions(revisions, snapshot, revisionResult);
     const mostRecent = revisions[0];
     if (activityRevisionId !== (mostRecent?.id ?? null)) {

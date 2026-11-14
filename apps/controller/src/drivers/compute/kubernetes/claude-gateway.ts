@@ -71,7 +71,10 @@ type Clients = {
   readonly objects: KubernetesObjectApi;
   readonly core: {
     readNamespacedSecret(args: { name: string; namespace: string }): Promise<SecretObject>;
-    createNamespacedSecret(args: { namespace: string; body: Record<string, unknown> }): Promise<unknown>;
+    createNamespacedSecret(args: {
+      namespace: string;
+      body: Record<string, unknown>;
+    }): Promise<unknown>;
     replaceNamespacedSecret(args: {
       name: string;
       namespace: string;
@@ -124,7 +127,9 @@ export function claudeGatewayHost(
  * The models people may use, from the Agent's OCE Configuration: the Anthropic entries of
  * `agents.defaults.models` (OpenClaw's allowlist), else the primary model.
  */
-export function claudeGatewayModels(configuration: Readonly<OpenClawConfigurationDocument>): string[] {
+export function claudeGatewayModels(
+  configuration: Readonly<OpenClawConfigurationDocument>,
+): string[] {
   const defaults = (configuration.agents as { defaults?: { model?: unknown; models?: unknown } })
     ?.defaults;
   const refs = new Set<string>();
@@ -264,8 +269,7 @@ class ClaudeGatewayWorkloads {
   /** The Anthropic key, copied from the source Secret the revision's binding resolved (uid-checked). */
   private async anthropicKey(revision: AgentRevision, context: ComputeRevisionContext | undefined) {
     const auth = context?.harnessAuth as
-      | { method?: string; backendRef?: { name: string; key: string; uid: string } }
-      | undefined;
+      { method?: string; backendRef?: { name: string; key: string; uid: string } } | undefined;
     if (!auth || auth.method !== "api_key" || !auth.backendRef) {
       throw new ClaudeGatewayConfigurationError(
         "A Claude Gateway needs an Anthropic API key from a Secret.",
@@ -289,8 +293,15 @@ class ClaudeGatewayWorkloads {
     return value; // base64, as Secret data
   }
 
-  async prepare(revision: AgentRevision, context?: ComputeRevisionContext): Promise<ComputeReadiness> {
-    const result = { namespaceId: revision.namespaceId, agentId: revision.agentId, revisionId: revision.id };
+  async prepare(
+    revision: AgentRevision,
+    context?: ComputeRevisionContext,
+  ): Promise<ComputeReadiness> {
+    const result = {
+      namespaceId: revision.namespaceId,
+      agentId: revision.agentId,
+      revisionId: revision.id,
+    };
     const models = claudeGatewayModels(revision.configuration);
     const host = claudeGatewayHost(process.env.OAE_INSTALLATION_ID, revision);
     const { namespace, clients } = await this.target(revision);
@@ -308,7 +319,10 @@ class ClaudeGatewayWorkloads {
     // the worker may not patch Secrets (OCE's tenant Role).
     let existing: SecretObject | undefined;
     try {
-      existing = await clients.core.readNamespacedSecret({ name: n.env, namespace: namespace.name });
+      existing = await clients.core.readNamespacedSecret({
+        name: n.env,
+        namespace: namespace.name,
+      });
     } catch (error) {
       if (numericErrorStatus(error) !== 404) throw error;
     }
@@ -331,7 +345,11 @@ class ClaudeGatewayWorkloads {
       },
     };
     await (existing
-      ? clients.core.replaceNamespacedSecret({ name: n.env, namespace: namespace.name, body: secret })
+      ? clients.core.replaceNamespacedSecret({
+          name: n.env,
+          namespace: namespace.name,
+          body: secret,
+        })
       : clients.core.createNamespacedSecret({ namespace: namespace.name, body: secret }));
     await this.apply(clients, {
       apiVersion: "v1",
@@ -348,7 +366,10 @@ class ClaudeGatewayWorkloads {
       metadata: meta(n.data),
       spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "5Gi" } } },
     });
-    const selector = { "openclaw.dev/agent": revision.agentId, "oae.dev/runtime": "claude-gateway" };
+    const selector = {
+      "openclaw.dev/agent": revision.agentId,
+      "oae.dev/runtime": "claude-gateway",
+    };
     const fromEnv = (name: string, key = name) => ({
       name,
       valueFrom: { secretKeyRef: { name: n.env, key } },
@@ -402,14 +423,22 @@ class ClaudeGatewayWorkloads {
               {
                 name: "gateway",
                 image: IMAGES.gateway,
-                command: ["/volume/claude/current", "gateway", "--config", "/etc/claude/gateway.yaml"],
+                command: [
+                  "/volume/claude/current",
+                  "gateway",
+                  "--config",
+                  "/etc/claude/gateway.yaml",
+                ],
                 env: [
                   { name: "CLAUDE_CONFIG_DIR", value: "/tmp/.claude" },
                   // Its SSRF guard refuses loopback upstreams; the masker sidecar is one. Only OAE
                   // writes upstreams (people cannot), so allowing loopback opens nothing else.
                   { name: "CLAUDE_GATEWAY_ALLOW_LOOPBACK", value: "1" },
                   { name: "HOME", value: "/tmp" },
-                  { name: "OIDC_CLIENT_SECRET", valueFrom: { secretKeyRef: { name: n.oidc, key: "CLIENT_SECRET" } } },
+                  {
+                    name: "OIDC_CLIENT_SECRET",
+                    valueFrom: { secretKeyRef: { name: n.oidc, key: "CLIENT_SECRET" } },
+                  },
                   fromEnv("GATEWAY_JWT_SECRET"),
                   fromEnv("GATEWAY_POSTGRES_URL"),
                   fromEnv("MASKER_KEY"),
@@ -436,14 +465,28 @@ class ClaudeGatewayWorkloads {
                   { name: "MASKER_DUMP_DIR", value: "" },
                 ],
                 command: [
-                  "uvicorn", "--factory", "anthropic_masker.app:app_factory",
-                  "--host", "127.0.0.1", "--port", "8080", "--no-access-log",
+                  "uvicorn",
+                  "--factory",
+                  "anthropic_masker.app:app_factory",
+                  "--host",
+                  "127.0.0.1",
+                  "--port",
+                  "8080",
+                  "--no-access-log",
                 ],
                 securityContext: { ...CONTAINER_SECURITY, runAsUser: 10002, runAsGroup: 10002 },
                 volumeMounts: [
-                  { name: "template", mountPath: "/etc/pii-masker/pii-rules.json", subPath: "pii-rules.json", readOnly: true },
+                  {
+                    name: "template",
+                    mountPath: "/etc/pii-masker/pii-rules.json",
+                    subPath: "pii-rules.json",
+                    readOnly: true,
+                  },
                 ],
-                resources: { requests: { cpu: "50m", memory: "128Mi" }, limits: { memory: "512Mi" } },
+                resources: {
+                  requests: { cpu: "50m", memory: "128Mi" },
+                  limits: { memory: "512Mi" },
+                },
               },
               {
                 name: "postgres",
@@ -455,14 +498,20 @@ class ClaudeGatewayWorkloads {
                   { name: "PGDATA", value: "/volume/postgres/data" },
                 ],
                 args: ["-c", "listen_addresses=127.0.0.1"],
-                readinessProbe: { exec: { command: ["pg_isready", "-h", "127.0.0.1", "-U", "gateway"] }, periodSeconds: 10 },
+                readinessProbe: {
+                  exec: { command: ["pg_isready", "-h", "127.0.0.1", "-U", "gateway"] },
+                  periodSeconds: 10,
+                },
                 // Same user as the rest of the Pod: the official image runs as any user that owns PGDATA.
                 securityContext: CONTAINER_SECURITY,
                 volumeMounts: [
                   { name: "data", mountPath: "/volume" },
                   { name: "pgrun", mountPath: "/var/run/postgresql" },
                 ],
-                resources: { requests: { cpu: "50m", memory: "128Mi" }, limits: { memory: "512Mi" } },
+                resources: {
+                  requests: { cpu: "50m", memory: "128Mi" },
+                  limits: { memory: "512Mi" },
+                },
               },
             ],
             volumes: [
@@ -512,7 +561,9 @@ class ClaudeGatewayWorkloads {
         // release bucket). Private and link-local ranges, the cloud metadata address included, are out.
         egress: [
           {
-            to: [{ namespaceSelector: {}, podSelector: { matchLabels: { "k8s-app": "kube-dns" } } }],
+            to: [
+              { namespaceSelector: {}, podSelector: { matchLabels: { "k8s-app": "kube-dns" } } },
+            ],
             ports: [
               { protocol: "UDP", port: 53 },
               { protocol: "TCP", port: 53 },
@@ -523,7 +574,13 @@ class ClaudeGatewayWorkloads {
               {
                 ipBlock: {
                   cidr: "0.0.0.0/0",
-                  except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10"],
+                  except: [
+                    "10.0.0.0/8",
+                    "172.16.0.0/12",
+                    "192.168.0.0/16",
+                    "169.254.0.0/16",
+                    "100.64.0.0/10",
+                  ],
                 },
               },
             ],
@@ -564,7 +621,12 @@ class ClaudeGatewayWorkloads {
     if (!(await this.serving(clients, namespace.name, n.base, revision.id))) return;
     await this.apply(
       clients,
-      { apiVersion: "apps/v1", kind: "Deployment", metadata: { name: n.base, namespace: namespace.name }, spec: { replicas: 0 } },
+      {
+        apiVersion: "apps/v1",
+        kind: "Deployment",
+        metadata: { name: n.base, namespace: namespace.name },
+        spec: { replicas: 0 },
+      },
       `${MANAGER}-scale`,
     );
   }
@@ -583,7 +645,11 @@ class ClaudeGatewayWorkloads {
       ["v1", "Secret", n.env],
     ] as const) {
       try {
-        await clients.objects.delete({ apiVersion, kind, metadata: { name, namespace: namespace.name } } as never);
+        await clients.objects.delete({
+          apiVersion,
+          kind,
+          metadata: { name, namespace: namespace.name },
+        } as never);
       } catch {
         // already gone
       }
@@ -600,7 +666,9 @@ export function withClaudeGatewayRuntime<T extends ComputeDriver>(driver: T): T 
   const mine = isClaudeGatewayRevision;
   const overrides: Partial<Record<keyof ComputeDriver, unknown>> = {
     prepareRevision: (revision: AgentRevision, context?: ComputeRevisionContext) =>
-      mine(revision) ? workloads.prepare(revision, context) : driver.prepareRevision(revision, context),
+      mine(revision)
+        ? workloads.prepare(revision, context)
+        : driver.prepareRevision(revision, context),
     activateRevision: (revision: AgentRevision, context?: ComputeRevisionContext) =>
       mine(revision) ? Promise.resolve() : driver.activateRevision?.(revision, context),
     deactivateRevision: (revision: AgentRevision) =>
@@ -614,17 +682,26 @@ export function withClaudeGatewayRuntime<T extends ComputeDriver>(driver: T): T 
     requiresStoppedPredecessors: (revision: AgentRevision) =>
       mine(revision) ? false : (driver.requiresStoppedPredecessors?.(revision) ?? false),
     getRuntimeImages: (revision: AgentRevision) =>
-      mine(revision) ? Promise.resolve([]) : (driver.getRuntimeImages?.(revision) ?? Promise.resolve([])),
+      mine(revision)
+        ? Promise.resolve([])
+        : (driver.getRuntimeImages?.(revision) ?? Promise.resolve([])),
     getGatewayEndpoint: (revision: AgentRevision) =>
       mine(revision) ? undefined : driver.getGatewayEndpoint?.(revision),
     validateHarnessAuth: (harness: { id: string }, ...rest: unknown[]) =>
       harness.id === CLAUDE_GATEWAY_HARNESS_ID
         ? undefined
-        : (driver.validateHarnessAuth as (...args: unknown[]) => unknown)?.call(driver, harness, ...rest),
+        : (driver.validateHarnessAuth as (...args: unknown[]) => unknown)?.call(
+            driver,
+            harness,
+            ...rest,
+          ),
   };
   return new Proxy(driver, {
     get(target, property, receiver) {
-      if (Object.hasOwn(overrides, property) && typeof Reflect.get(target, property) === "function") {
+      if (
+        Object.hasOwn(overrides, property) &&
+        typeof Reflect.get(target, property) === "function"
+      ) {
         return overrides[property as keyof ComputeDriver];
       }
       const value = Reflect.get(target, property, receiver);

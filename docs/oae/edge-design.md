@@ -14,17 +14,17 @@ ingress keeps per-person identity, works with OIDC, and grants less than adminis
 
 ## Requirements (from OCE) and how OAE meets them
 
-| OCE requirement | OAE |
-|---|---|
-| The ingress authenticates people | `oae-edge-authz` (OIDC client of the installation's Keycloak realm, client `oae-edge`), signed cookie on `.agents.<host>` |
-| Authorizes access to the exact Gateway | `oae-edge-authz` checks the person against the Agent's grants (OCE AccessBindings → principal → SSO subject via `oae-user`'s registry) |
-| Stable, namespaced identity; never `occ-workspace-files` | `x-occ-identity: <realm>:<subject>` (issuer-qualified Keycloak subject) |
-| `x-openclaw-scopes` on every request and WS upgrade, replacing client values | Set by the edge from the grant: `user` → `operator.read operator.write`; `operator` → also `operator.approvals`; no grant → never forwarded (403) |
-| Overwrite client-supplied identity and authority headers | Traefik strips `x-occ-identity`, `x-openclaw-scopes`, `x-auth-request-*` before auth; forwardAuth `authResponseHeaders` sets them |
-| Separate identity-preserving route (the OCC route forces the machine identity) | In-cluster Traefik Ingress per Agent host → the Agent's gateway Service (not via Envoy) |
-| Exact-peer NetworkPolicy to the gateway port | `oae-edge` NetworkPolicy in the tenant namespace: only k3s Traefik's Pods → gateway Pods' port |
-| Proxy source in `network.gatewayTrustedProxyCidrs` | Traefik Pods are in the Pod CIDR `10.42.0.0/16`, already trusted |
-| Human UI origin in `gateway.controlUi.allowedOrigins`; humans in `trustedProxy.allowUsers` (+ `identityScopes`) | `oae-edge-sync` merges both into the Agent's Configuration and redeploys when a new person is first granted |
+| OCE requirement                                                                                                 | OAE                                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The ingress authenticates people                                                                                | `oae-edge-authz` (OIDC client of the installation's Keycloak realm, client `oae-edge`), signed cookie on `.agents.<host>`                         |
+| Authorizes access to the exact Gateway                                                                          | `oae-edge-authz` checks the person against the Agent's grants (OCE AccessBindings → principal → SSO subject via `oae-user`'s registry)            |
+| Stable, namespaced identity; never `occ-workspace-files`                                                        | `x-occ-identity: <realm>:<subject>` (issuer-qualified Keycloak subject)                                                                           |
+| `x-openclaw-scopes` on every request and WS upgrade, replacing client values                                    | Set by the edge from the grant: `user` → `operator.read operator.write`; `operator` → also `operator.approvals`; no grant → never forwarded (403) |
+| Overwrite client-supplied identity and authority headers                                                        | Traefik strips `x-occ-identity`, `x-openclaw-scopes`, `x-auth-request-*` before auth; forwardAuth `authResponseHeaders` sets them                 |
+| Separate identity-preserving route (the OCC route forces the machine identity)                                  | In-cluster Traefik Ingress per Agent host → the Agent's gateway Service (not via Envoy)                                                           |
+| Exact-peer NetworkPolicy to the gateway port                                                                    | `oae-edge` NetworkPolicy in the tenant namespace: only k3s Traefik's Pods → gateway Pods' port                                                    |
+| Proxy source in `network.gatewayTrustedProxyCidrs`                                                              | Traefik Pods are in the Pod CIDR `10.42.0.0/16`, already trusted                                                                                  |
+| Human UI origin in `gateway.controlUi.allowedOrigins`; humans in `trustedProxy.allowUsers` (+ `identityScopes`) | `oae-edge-sync` merges both into the Agent's Configuration and redeploys when a new person is first granted                                       |
 
 ## Flow
 
@@ -45,11 +45,11 @@ Agent's next deploy. OCE's own caveat stands: withdrawal does not cancel work al
 
 ## Pieces
 
-| Piece | Kind | Where |
-|---|---|---|
-| `oae-edge-authz` | small HTTP service (forwardAuth target), reads an ACL ConfigMap | `deploy/oae/edge/` |
-| `oae-edge-sync` | timer on the host: ACL ConfigMap, per-Agent Ingress + NetworkPolicy, Configuration merge, host Traefik routes | `deploy/oae/edge/` |
-| Keycloak client `oae-edge` | per realm, redirect `https://auth.agents.<host>/oauth2/callback` | `central-sso/oae-realm.sh` |
+| Piece                      | Kind                                                                                                          | Where                      |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `oae-edge-authz`           | small HTTP service (forwardAuth target), reads an ACL ConfigMap                                               | `deploy/oae/edge/`         |
+| `oae-edge-sync`            | timer on the host: ACL ConfigMap, per-Agent Ingress + NetworkPolicy, Configuration merge, host Traefik routes | `deploy/oae/edge/`         |
+| Keycloak client `oae-edge` | per realm, redirect `https://auth.agents.<host>/oauth2/callback`                                              | `central-sso/oae-realm.sh` |
 
 ## Access without a shell (hardening, branch `feat/oae-hardening`)
 
@@ -57,12 +57,12 @@ OCE's model is that people change things through its API with their own identity
 nobody needs a shell in an Agent or on the server for day-to-day work. OAE's first edge needed
 root on the server for three things; each now follows that model.
 
-| Was | Now | Identity OCE sees |
-|---|---|---|
+| Was                                                                                         | Now                                                                                                                                                            | Identity OCE sees             |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
 | `oae-user add/grant/revoke` as root, writing under the **recovery administrator's** session | Console: Agent → Access → **People**. The browser makes every OCE call (account, SSO identity, Roles, AccessBindings) with the administrator's **own** session | The administrator who clicked |
-| `oae-user device add` (root) and `kubectl exec … openclaw qr` | `https://auth.agents.<host>/apps`: the signed-in **person** connects their own OpenClaw mobile app or Hermes Desktop | The person (edge log) |
-| `oae-user device approve-node` via `kubectl exec` into the gateway Pod | Operators approve in the Agent's own **Devices** page (`operator.pairing` in the operator grant; never `operator.admin`) | The operator (gateway) |
-| Root-owned `oae-users.json` / `oae-devices.json` | The edge's own Secrets `oae-edge-people` / `oae-edge-devices`; its ServiceAccount may `get`/`update` only those two | — |
+| `oae-user device add` (root) and `kubectl exec … openclaw qr`                               | `https://auth.agents.<host>/apps`: the signed-in **person** connects their own OpenClaw mobile app or Hermes Desktop                                           | The person (edge log)         |
+| `oae-user device approve-node` via `kubectl exec` into the gateway Pod                      | Operators approve in the Agent's own **Devices** page (`operator.pairing` in the operator grant; never `operator.admin`)                                       | The operator (gateway)        |
+| Root-owned `oae-users.json` / `oae-devices.json`                                            | The edge's own Secrets `oae-edge-people` / `oae-edge-devices`; its ServiceAccount may `get`/`update` only those two                                            | —                             |
 
 The edge's console API (`/oae/api/`, routed on the console host so the administrator's session
 cookie comes with it):

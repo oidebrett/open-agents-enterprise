@@ -5,14 +5,14 @@ every 6 hours) writes one encrypted snapshot of all of them into the setup stack
 which manidae-cloud's backup-job pushes to the deployment's private GitHub repository once a day
 (support Level 2: 7 copies, Level 3: 28; Level 1 has no backups).
 
-| File | Contents | How it is taken |
-|---|---|---|
-| `db.sql.gz.age` | The platform database (Agents, versions, Configurations, people, permissions, audit) | `pg_dump`, online |
-| `db-roles.sql.age` | Database roles, without passwords | `pg_dumpall --globals-only` |
-| `k8s-secrets.json.age` | Secret values: Agents' credentials (tenant namespaces), the platform's, the edge's (apps, people, Claude laptops) | `kubectl get secret` |
-| `volume-<namespace>-<claim>.tar.gz.age` | Each Agent's memory and files | SQLite files through SQLite's online backup (consistent while the Agent runs), other files as they are |
-| `prod.tar.gz.age` | `/opt/oce/prod`: installation ID, keys, sign-in secrets, Claude Gateway CA and VPN keys, Helm values | `tar` |
-| `manifest.json` | What is inside (plain, no secrets) | |
+| File                                    | Contents                                                                                                          | How it is taken                                                                                        |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `db.sql.gz.age`                         | The platform database (Agents, versions, Configurations, people, permissions, audit)                              | `pg_dump`, online                                                                                      |
+| `db-roles.sql.age`                      | Database roles, without passwords                                                                                 | `pg_dumpall --globals-only`                                                                            |
+| `k8s-secrets.json.age`                  | Secret values: Agents' credentials (tenant namespaces), the platform's, the edge's (apps, people, Claude laptops) | `kubectl get secret`                                                                                   |
+| `volume-<namespace>-<claim>.tar.gz.age` | Each Agent's memory and files                                                                                     | SQLite files through SQLite's online backup (consistent while the Agent runs), other files as they are |
+| `prod.tar.gz.age`                       | `/opt/oce/prod`: installation ID, keys, sign-in secrets, Claude Gateway CA and VPN keys, Helm values              | `tar`                                                                                                  |
+| `manifest.json`                         | What is inside (plain, no secrets)                                                                                |                                                                                                        |
 
 Claude Gateway session stores are left out: people sign in again after a restore.
 

@@ -1801,9 +1801,9 @@ function renderAgentForm(
     // Operator-managed Presets retain the embedded harness required by their fixed binding.
     const targetHarness = keepsHarness()
       ? harness.value
-      : (embeddedOnlyProvider(nativeProvider.value) || binding?.method === "runtime"
-          ? "openclaw"
-          : "codex");
+      : embeddedOnlyProvider(nativeProvider.value) || binding?.method === "runtime"
+        ? "openclaw"
+        : "codex";
     const values = readModelConfiguration(targetHarness);
     if (values === "invalid-allow") {
       // The native select changed before preflight; retain the last applied provider.
