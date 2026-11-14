@@ -508,10 +508,19 @@ ${a.runtime === "claude-gateway" && claudeGateways()[a.claudeHost]?.ikeServer ? 
     : `<tr><td colspan="2" class="muted">You have not been given access to any Agent yet. Ask an administrator.</td></tr>`;
   const tokenRows = tokens.length
     ? tokens
-        .map(
-          (t) => `<tr><td>${esc(t.label)}<div class="muted">${esc(t.host ? (names[t.host] ?? "an Agent you no longer have") : "all your Agents")} · created ${esc(String(t.created).slice(0, 10))}</div></td>
-<td><form method="post" action="/apps/revoke"><input type="hidden" name="id" value="${esc(t.id)}"><button type="submit">Disconnect</button></form></td></tr>`,
-        )
+        .map((t) => {
+          // "Set up again": re-issue this app's credential and show the setup instructions again (the
+          // secret is never kept, so it cannot be re-displayed — a fresh one replaces it). Only when
+          // the Agent is still accessible; `appsConnect` refuses it otherwise anyway.
+          const accessible = Boolean(t.host && names[t.host]);
+          const isClaude = String(t.id).startsWith("cgw-");
+          const vpn = t.kind === "ikev2" ? "ikev2" : "wireguard";
+          const again = accessible
+            ? `<form method="post" action="/apps/connect" style="display:inline"><input type="hidden" name="host" value="${esc(t.host)}"><input type="hidden" name="label" value="${esc(t.label)}"><input type="hidden" name="replace" value="${esc(t.id)}">${isClaude ? `<input type="hidden" name="vpn" value="${esc(vpn)}">` : ""}<button type="submit" title="Show the setup instructions again with a fresh code; the old one stops working">Set up again</button></form> `
+            : "";
+          return `<tr><td>${esc(t.label)}<div class="muted">${esc(t.host ? (names[t.host] ?? "an Agent you no longer have") : "all your Agents")} · created ${esc(String(t.created).slice(0, 10))}</div></td>
+<td>${again}<form method="post" action="/apps/revoke" style="display:inline"><input type="hidden" name="id" value="${esc(t.id)}"><button type="submit">Disconnect</button></form></td></tr>`;
+        })
         .join("")
     : `<tr><td colspan="2" class="muted">No apps connected.</td></tr>`;
   return send(
@@ -523,7 +532,7 @@ ${a.runtime === "claude-gateway" && claudeGateways()[a.claudeHost]?.ikeServer ? 
       `${notice}<p class="muted">Signed in as ${esc(session.email ?? session.sub)} · <a href="/logout">Sign out</a></p>
 <table><tr><th>Agent</th><th>Connect an app</th></tr>${agentRows}</table>
 <h2>Connected apps</h2><table>${tokenRows}</table>
-<p class="muted">An app keeps working only while you have access to its Agent. Disconnect any app you no longer use.</p>`,
+<p class="muted">An app keeps working only while you have access to its Agent. Lost the setup code? Use <b>Set up again</b> for a fresh one — the old code then stops working. Disconnect any app you no longer use.</p>`,
     ),
   );
 }
@@ -547,6 +556,10 @@ async function appsConnect(req, res) {
   const agent = myAgents(session.sub).find((a) => a.host === host);
   if (!agent) return send(res, 403, PAGE_HEADERS, textPage("No access", "You do not have access to that Agent."));
   if (!/^[A-Za-z0-9 ._-]{1,40}$/.test(label)) return appsPage(req, res, `<p class="error">Name the app with up to 40 letters, digits, spaces or . _ -</p>`);
+  // "Set up again" re-issues an app's credential: drop the old record first so the person does not
+  // accumulate dead entries and the per-person token cap is unchanged. Scoped to the caller's own id.
+  const replace = String(form.get("replace") ?? "");
+  if (replace) await revokeTokenId(session.sub, replace);
   if (agent.runtime === "claude-gateway") return claudeConnect(req, res, session, agent, label, String(form.get("vpn") ?? "wireguard"));
   // OpenClaw: take this Agent's bootstrap token first, so the phone pairs on its own.
   let bootstrap = null;
@@ -912,15 +925,13 @@ ${os === "linux" ? "" : `<li><b>Claude Desktop</b>: Help → Troubleshooting →
   return send(res, 200, PAGE_HEADERS, page(`Connect ${agent.name}`, `${body}<p><a href="/apps">Done</a></p>`));
 }
 
-async function appsRevoke(req, res) {
-  const session = unseal(cookies(req)[SESSION_COOKIE]);
-  if (!session) return signInFirst(res);
-  if (!sameOriginPost(req, `https://${AUTH_HOST}`)) return send(res, 403, {}, "cross-origin request refused");
-  const id = String(new URLSearchParams(await readBody(req)).get("id") ?? "");
+// Remove a person's app token or Claude Gateway peer by its id (scoped to that person). Shared by
+// Disconnect and by "Set up again" (which re-issues in place). Returns how many records it removed.
+async function revokeTokenId(sub, id) {
   let removed = 0;
   await devices.update((all) => {
     for (const [hash, d] of Object.entries(all)) {
-      if (d.sub === session.sub && d.id === id) {
+      if (d.sub === sub && d.id === id) {
         delete all[hash];
         removed += 1;
       }
@@ -930,7 +941,7 @@ async function appsRevoke(req, res) {
   if (id.startsWith("cgw-")) {
     await claudePeers.update((all) => {
       for (const [key, p] of Object.entries(all)) {
-        if (p.sub === session.sub && p.id === id) {
+        if (p.sub === sub && p.id === id) {
           delete all[key];
           removed += 1;
         }
@@ -938,6 +949,15 @@ async function appsRevoke(req, res) {
       return all;
     });
   }
+  return removed;
+}
+
+async function appsRevoke(req, res) {
+  const session = unseal(cookies(req)[SESSION_COOKIE]);
+  if (!session) return signInFirst(res);
+  if (!sameOriginPost(req, `https://${AUTH_HOST}`)) return send(res, 403, {}, "cross-origin request refused");
+  const id = String(new URLSearchParams(await readBody(req)).get("id") ?? "");
+  const removed = await revokeTokenId(session.sub, id);
   log("app.disconnected", { sub: session.sub, id, removed });
   return send(res, 303, { location: "/apps" });
 }
