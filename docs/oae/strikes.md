@@ -324,6 +324,11 @@ lose operator approvals/pairing. Net downgrade. Revisit if upstream adds per-per
 chat route and a native scope between `operator.sessions.write` and `operator.admin`. Native-admin is left
 **on** so the recovery administrator keeps the native break-glass UI.
 
+- ✅ **Confusing second button addressed** (`apps/controller/src/console/agents/oae-native-admin-gate.mts`
+  plus a one-line hook in `detail.mts`): on an OIDC install the native **Open Agent UI** / **Open chat**
+  button shows only to `administer` holders (recovery-admin break-glass); `operate` users see just OAE's
+  edge **Open Agent**. Non-OIDC installs keep upstream's behaviour. Client-side visibility only;
+  native-admin stays enabled on the server. Typecheck + eslint clean.
 - `oae-native-chat-check [agent-id]` reports the two gates and whether the `/native-chat` route is live,
   read-only, for any Agent on an OAE/SSO install.
 - Not done (out of PoC scope): live browser SSO chat as `oae-demo` (needs the user's credentials; no user

@@ -198,6 +198,23 @@ For the record, the smallest viable adoption (not done here):
   that keeps per-person identity — which is most of the edge we were trying to retire, so it defeats the
   purpose.
 
+## The confusing second button (implemented)
+
+With native-admin ON, the Agent detail page showed **two** launch buttons to an SSO user: upstream's
+native **Open Agent UI** / **Open chat** and OAE's edge **Open Agent**. Since the browser slice stays on
+the edge, the native button is redundant for ordinary people and (for `operate` holders) points at the
+shadowed native path. We keep native-admin on for the recovery administrator's break-glass, so the button
+is gated rather than removed:
+
+- `apps/controller/src/console/agents/oae-native-admin-gate.mts` (new) — on an OIDC install, the native
+  card is shown only to `administer` holders; `operate`-only users (everyone who reaches Agents by a grant)
+  no longer see it, and no audited access probe runs for them. Non-OIDC installs keep upstream's behaviour.
+- `detail.mts` hook — the `browserAccessAllowed` answer routes through `oaeNativeAdminBrowserAccess`
+  instead of the inline operate-or-administer check (smallest add-only dispatch, per the fork rules).
+
+This is client-side button visibility only; native-admin remains enabled on the server, so the recovery
+administrator still has the native UI.
+
 ## Exercising the native chat path
 
 `deploy/oae/edge/oae-native-chat-check` is a read-only diagnostic for an OAE/SSO install. For a given

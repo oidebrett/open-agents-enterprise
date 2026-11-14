@@ -58,6 +58,7 @@ import {
 import { renderAgentAccess } from "./access.mjs";
 import { renderNativeAdminAccess } from "./native-admin.mjs";
 import { renderOaeOpenAgent } from "./oae-open-agent.mjs";
+import { oaeNativeAdminBrowserAccess } from "./oae-native-admin-gate.mjs";
 import { renderOaePeople } from "./oae-people.mjs";
 import { createAgentDeletion } from "./deletion.mjs";
 import { createAgentStop } from "./stop.mjs";
@@ -1681,16 +1682,12 @@ export async function renderAgentDetail(
   const nativeAdmin = renderNativeAdminAccess(
     context,
     path,
+    // OAE: on an SSO install the native Agent-UI button is break-glass (administer) only; people use
+    // the edge's "Open Agent" instead. Upstream behaviour is unchanged on non-OIDC installs.
     () =>
-      latestPermissionsRead.then((permissions) => {
-        if (permissions?.administer === true || permissions?.operate === true) {
-          return true;
-        }
-        if (permissions?.administer === false && permissions?.operate === false) {
-          return false;
-        }
-        return undefined;
-      }),
+      latestPermissionsRead.then((permissions) =>
+        oaeNativeAdminBrowserAccess(context, permissions),
+      ),
     {
       // One the caller cannot read is not named by its ID (finding D791).
       versionLabel: () =>
