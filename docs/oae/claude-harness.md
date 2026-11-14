@@ -73,6 +73,7 @@ Ask: "List the exact names of every tool you can call, comma-separated, nothing 
 Code answers `ToolSearch, mcp__openclaw__…`; OpenClaw's own loop answers plain names (`exec`,
 `edit`, …). The names come from the tool definitions the model receives. Definitive: the gateway
 log's `cli turn: provider=claude-cli` for each turn.
+
 - The API key stays per Agent (its own OCE Secret, operate-bound to the Agent's service
   principal). Use a workspace key with a spend limit.
 

@@ -43,17 +43,17 @@ port and Keycloak client; the built-in VPN limits each laptop to its own gateway
 
 ## Pieces
 
-| Piece | Where | Does |
-|---|---|---|
-| Harness `claude-gateway` (Embedded, Anthropic only) | controller: `production-harness.ts`, `configured-harness.ts`, `harness-auth.mts`, console `create.mts` | the console's Create Agent choice; the Anthropic key is the Agent's API-key Secret binding |
-| `withClaudeGatewayRuntime()` | `drivers/compute/kubernetes/claude-gateway.ts`, wraps the Compute Driver beside `withHermesRuntime()` | prepares one workload per gateway Agent in its tenant namespace |
-| Gateway Pod | tenant namespace | init: download the pinned `claude` from Anthropic, check the manifest checksum (OAE never ships it); `gateway` (`claude gateway`); `pii-masker` sidecar on 127.0.0.1:8080, the only holder of the Anthropic key; `postgres` (sessions) on the Agent's volume |
-| NetworkPolicy | tenant namespace | in: only the gateway's WireGuard; out: DNS, public HTTPS (Anthropic, the installation's Keycloak), metadata address excluded |
-| Service (NodePort, `externalTrafficPolicy: Local`) | tenant namespace | the gateway's port for its WireGuard container on the `oce` Docker network |
-| `oae-claude-sync` (timer, root) | host, `deploy/oae/claude-gateway/` | per gateway Agent: Keycloak client, TLS certificate from the host CA, WireGuard + Traefik containers, peers from `/apps`; removes all of it with the Agent |
-| `/apps` "Connect Claude Code / Claude Desktop" | edge `authz/server.mjs` | built-in VPN: makes a username and password (macOS profile, Windows PowerShell); WireGuard: makes the key pair and keeps the public key; shows the hand-off once |
-| Built-in VPN server | host, `oae-claude-ike` + `oae-claude-ike-traefik` (image `deploy/oae/claude-gateway/ike`) | IKEv2/EAP-MSCHAPv2; one connection per laptop, limited to its gateway; removed laptops are cut off at once |
-| Host CA (name-constrained to the private domain) | host, `/opt/oae-claude/ca` (root-only) | signs each gateway's certificate; never in the cluster |
+| Piece                                               | Where                                                                                                  | Does                                                                                                                                                                                                                                                         |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Harness `claude-gateway` (Embedded, Anthropic only) | controller: `production-harness.ts`, `configured-harness.ts`, `harness-auth.mts`, console `create.mts` | the console's Create Agent choice; the Anthropic key is the Agent's API-key Secret binding                                                                                                                                                                   |
+| `withClaudeGatewayRuntime()`                        | `drivers/compute/kubernetes/claude-gateway.ts`, wraps the Compute Driver beside `withHermesRuntime()`  | prepares one workload per gateway Agent in its tenant namespace                                                                                                                                                                                              |
+| Gateway Pod                                         | tenant namespace                                                                                       | init: download the pinned `claude` from Anthropic, check the manifest checksum (OAE never ships it); `gateway` (`claude gateway`); `pii-masker` sidecar on 127.0.0.1:8080, the only holder of the Anthropic key; `postgres` (sessions) on the Agent's volume |
+| NetworkPolicy                                       | tenant namespace                                                                                       | in: only the gateway's WireGuard; out: DNS, public HTTPS (Anthropic, the installation's Keycloak), metadata address excluded                                                                                                                                 |
+| Service (NodePort, `externalTrafficPolicy: Local`)  | tenant namespace                                                                                       | the gateway's port for its WireGuard container on the `oce` Docker network                                                                                                                                                                                   |
+| `oae-claude-sync` (timer, root)                     | host, `deploy/oae/claude-gateway/`                                                                     | per gateway Agent: Keycloak client, TLS certificate from the host CA, WireGuard + Traefik containers, peers from `/apps`; removes all of it with the Agent                                                                                                   |
+| `/apps` "Connect Claude Code / Claude Desktop"      | edge `authz/server.mjs`                                                                                | built-in VPN: makes a username and password (macOS profile, Windows PowerShell); WireGuard: makes the key pair and keeps the public key; shows the hand-off once                                                                                             |
+| Built-in VPN server                                 | host, `oae-claude-ike` + `oae-claude-ike-traefik` (image `deploy/oae/claude-gateway/ike`)              | IKEv2/EAP-MSCHAPv2; one connection per laptop, limited to its gateway; removed laptops are cut off at once                                                                                                                                                   |
+| Host CA (name-constrained to the private domain)    | host, `/opt/oae-claude/ca` (root-only)                                                                 | signs each gateway's certificate; never in the cluster                                                                                                                                                                                                       |
 
 ## Per gateway Agent
 
@@ -70,12 +70,12 @@ port and Keycloak client; the built-in VPN limits each laptop to its own gateway
 
 ## People
 
-| Action | Effect |
-|---|---|
-| People card: grant User | the gateway appears on the person's `/apps` |
-| `/apps` → Connect | X25519 key pair made in the edge; the private key is shown once in the tunnel file; the public key goes to the sync's store; active within a minute |
-| Disconnect, or grant removed | the sync removes the peer: the network path closes at once (gateway sessions also end at their lifetime, default 1 hour) |
-| Keycloak group | picks the model policy |
+| Action                       | Effect                                                                                                                                              |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| People card: grant User      | the gateway appears on the person's `/apps`                                                                                                         |
+| `/apps` → Connect            | X25519 key pair made in the edge; the private key is shown once in the tunnel file; the public key goes to the sync's store; active within a minute |
+| Disconnect, or grant removed | the sync removes the peer: the network path closes at once (gateway sessions also end at their lifetime, default 1 hour)                            |
+| Keycloak group               | picks the model policy                                                                                                                              |
 
 The hand-off on `/apps`: tunnel file, CA certificate, `setup-mac.sh` (hosts line, CA trust,
 Claude Code settings), the Desktop bootstrap URL and the certificate fingerprint.
@@ -87,7 +87,7 @@ Claude Code settings), the Desktop bootstrap URL and the certificate fingerprint
   view-users, query-users); `central-sso/README.md` has the by-hand steps.
 - **Server**: with the manager's ID and secret, as root:
   `CLAUDE_KC_ISSUER=… CLAUDE_KC_CLIENT_ID=oae-claude-clients CLAUDE_PUBLIC_HOST=<public IPv4>
-  deploy/oae/claude-gateway/oae-claude-sync install` (the secret first in
+deploy/oae/claude-gateway/oae-claude-sync install` (the secret first in
   `/opt/oce/prod/secure/claude-kc-client-secret`). manidae-cloud does this when the OAE form has
   the Claude Gateway client, and opens UDP 51830–51849.
 - **Firewall**: inbound UDP 51830–51849 (one port per gateway, up to 20), and UDP 500 and 4500

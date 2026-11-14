@@ -70,7 +70,7 @@ Progress (2026-11-06):
   per VPS: same code path as a customer's own IdP, lighter VPSs, one place for demo users.
 - ✅ **Oracle OAE on OIDC**: realm `oae-oracle`; profile re-rendered with `controlPlane.oidc` +
   `recoveryUserId` (native admin turned off, as OCE requires); `occ-oidc-login` Secret; `helm
-  upgrade`. Browser test: console → Keycloak → callback → signed in as `oae-demo@…`, who sees no
+upgrade`. Browser test: console → Keycloak → callback → signed in as `oae-demo@…`, who sees no
   Namespaces (no grants yet). Password sign-in for the recovery admin still works.
 - ✅ Grants: OCE Namespace Roles + AccessBindings (`docs/guides/topics/iam.md`), not native-admin
   sharing. Browser check as the SSO user: lists only the granted Agent; the other Agent, IAM
@@ -135,7 +135,7 @@ via CI (`oae-images.yml`) still open.
 
 - **OAE images — in progress** (branch `strike/4-oae-images`): [`docs/oae/images.md`](images.md).
   Controller and runtime are built **from source** at the `oae` commit, so `oae` no longer needs an
-  upstream *published*-image commit (removes the gate in `OAE.md` "Syncing from upstream"). The
+  upstream _published_-image commit (removes the gate in `OAE.md` "Syncing from upstream"). The
   runtime is `deploy/runtime/Dockerfile` (OpenClaw from the pinned source) with Claude Code + Teams
   layered via `runtime-claude`'s existing `ARG OCE_RUNTIME_IMAGE` — pointed at our from-source base
   instead of a published image. One shared build path (`deploy/oae/images/build-images.sh`) used by
@@ -274,6 +274,18 @@ Same capabilities as before, in OCE's security pattern (details:
   session cookie; Keycloak lookups through a read-only directory client.
 - `oae-user` is break-glass only.
 
+### ⬜ Follow-up — remove device tokens when access is revoked
+
+When a person's grant to an Agent is removed, the edge refuses their app/device tokens immediately
+(`authz/server.mjs` re-checks the live ACL on every request) and `/apps` relabels them "an Agent you no
+longer have", but the token **records are never pruned** from `oae-edge-devices`. Two consequences: the
+dead entries linger until the person disconnects them, and — the real gotcha — **re-granting the person
+silently revives their old tokens** (no re-pairing). Make `oae-edge sync` delete a person's device tokens
+for an Agent once their grant to it is gone, **fail-safe** (only on an authoritative IAM read that
+confirms the grant is absent, never on a transient ACL blip or a failed read; the per-request 403 stays as
+defense in depth). Edge change (`oae-edge` + the `oae-edge-devices` Secret), deployed via the host scripts
+at `--ref`. Logged 2026-11-14; do after the strike-8 button testing.
+
 ## ⬜ Strike 6 — Hermes on the Codex and Claude harness Pods
 
 - Upstream PR to Hermes: WebSocket transport for its Codex app-server client, so
@@ -304,7 +316,7 @@ Finding (branch `strike/8-native-chat`, add-only: `docs/oae/native-chat-rfc0031.
   `oae-edge-authz`). So a browser following the native "Open chat" URL still hits the edge. On the live
   (ungranted) Agent the native-chat route isn't even generated — `deviceAutoApprove` is absent, so
   `usesWritableNativeAdminConfig=false` and `getGatewayChatEndpoint=undefined` (admin route only). A
-  **granted** OAE Agent *does* qualify (`oae-edge` sets `deviceAutoApprove.enabled=true`), so the
+  **granted** OAE Agent _does_ qualify (`oae-edge` sets `deviceAutoApprove.enabled=true`), so the
   native-chat route co-generates in-cluster — just shadowed by the edge Ingress.
 - **Q2 — runtime has qualified chat enforcement? Yes.** Pinned OpenClaw `2026.10.10`; `operator-scopes.md`
   ships in-image; `operator.sessions.write` is a distinct enforced level vs `operator.admin`;
@@ -325,13 +337,13 @@ chat route and a native scope between `operator.sessions.write` and `operator.ad
 **on** so the recovery administrator keeps the native break-glass UI.
 
 - ✅ **Confusing second button removed** (`apps/controller/src/console/agents/oae-native-admin-gate.mts`
-  + a one-line hook in `detail.mts`, registered in `console-assets.ts`): on an OIDC install the native
-  **Open Agent UI** / **Open chat** button is hidden for **everyone** (admins included) — it is
-  non-functional on OAE Agents (no native browser-chat config) and gives admins no real break-glass (that
-  is the recovery-admin console login and the server CLI). Everyone uses OAE's edge **Open Agent**.
-  Non-OIDC installs keep upstream's behaviour. Client-side visibility only; native-admin stays enabled
-  server-side (can be turned off at the installer later). The edge button also hides for no-UI runtimes
-  (Claude Gateway). Built from source and verified live on the Oracle testbed.
+  - a one-line hook in `detail.mts`, registered in `console-assets.ts`): on an OIDC install the native
+    **Open Agent UI** / **Open chat** button is hidden for **everyone** (admins included) — it is
+    non-functional on OAE Agents (no native browser-chat config) and gives admins no real break-glass (that
+    is the recovery-admin console login and the server CLI). Everyone uses OAE's edge **Open Agent**.
+    Non-OIDC installs keep upstream's behaviour. Client-side visibility only; native-admin stays enabled
+    server-side (can be turned off at the installer later). The edge button also hides for no-UI runtimes
+    (Claude Gateway). Built from source and verified live on the Oracle testbed.
 - `oae-native-chat-check [agent-id]` reports the two gates and whether the `/native-chat` route is live,
   read-only, for any Agent on an OAE/SSO install.
 - Not done (out of PoC scope): live browser SSO chat as `oae-demo` (needs the user's credentials; no user

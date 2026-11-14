@@ -3,19 +3,19 @@
 OAE builds its **own** controller and runtime images from the `oae` branch, so `oae` can sit on
 any commit — not only on the commits upstream has published images for. This removes the constraint
 in [`OAE.md`](../../OAE.md) "Syncing from upstream" ("`oae` can only sit on such a commit"): the
-chart/profile renderer/`occ` CLI (controller) and the Agent runtime now come from *our* build of
+chart/profile renderer/`occ` CLI (controller) and the Agent runtime now come from _our_ build of
 the same `oae` commit, so an upstream sync can move to `upstream/main` directly.
 
 ## What is built, and from where
 
-Everything is built from this checkout — nothing extends a *published* OCE image:
+Everything is built from this checkout — nothing extends a _published_ OCE image:
 
-| Image | Dockerfile | Contents |
-| --- | --- | --- |
-| `…-controller` | [`Dockerfile`](../../Dockerfile) (target `runtime`) | OCE controller, console, `occ` CLI |
-| `…-runtime-base` | [`deploy/runtime/Dockerfile`](../../deploy/runtime/Dockerfile) | OCE Agent runtime; OpenClaw built from the pinned source ([`openclaw-source.json`](../../deploy/runtime/openclaw-source.json)) |
-| `…-runtime` | [`deploy/oae/runtime-claude/Dockerfile`](../oae/../../deploy/oae/runtime-claude/Dockerfile) | `runtime-base` + pinned Claude Code + MS Teams |
-| `…-runtime-hermes` (opt.) | [`deploy/oae/runtime-hermes/Dockerfile`](../../deploy/oae/runtime-hermes/Dockerfile) | Nous Hermes image + MS Teams (not gated — extends the Nous image, not the OCE runtime) |
+| Image                     | Dockerfile                                                                                  | Contents                                                                                                                       |
+| ------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `…-controller`            | [`Dockerfile`](../../Dockerfile) (target `runtime`)                                         | OCE controller, console, `occ` CLI                                                                                             |
+| `…-runtime-base`          | [`deploy/runtime/Dockerfile`](../../deploy/runtime/Dockerfile)                              | OCE Agent runtime; OpenClaw built from the pinned source ([`openclaw-source.json`](../../deploy/runtime/openclaw-source.json)) |
+| `…-runtime`               | [`deploy/oae/runtime-claude/Dockerfile`](../oae/../../deploy/oae/runtime-claude/Dockerfile) | `runtime-base` + pinned Claude Code + MS Teams                                                                                 |
+| `…-runtime-hermes` (opt.) | [`deploy/oae/runtime-hermes/Dockerfile`](../../deploy/oae/runtime-hermes/Dockerfile)        | Nous Hermes image + MS Teams (not gated — extends the Nous image, not the OCE runtime)                                         |
 
 The key move: `runtime-claude/Dockerfile` already takes `ARG OCE_RUNTIME_IMAGE`. The build points it
 at **our from-source `runtime-base`** instead of upstream's published runtime — no Dockerfile change,

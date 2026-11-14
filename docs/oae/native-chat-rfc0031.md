@@ -20,11 +20,11 @@ Oracle BYOVPS, base `a71a4289` after the first upstream sync (controller
 `sha256:03ae9843…`, runtime `sha256:8440e412…`, both from source). The sync enabled upstream's
 RFC-0031 native admin under OIDC:
 
-| Controller env | Value |
-|---|---|
-| `OCC_AGENT_NATIVE_ADMIN_ENABLED` | `true` |
-| `OCC_AGENT_NATIVE_ADMIN_DOMAIN` | `agents.oae.ag-6a4baf8a.nemoclaw.dpdns.org` |
-| `OCC_AUTH_BASE_URL` | `https://oae.ag-6a4baf8a.nemoclaw.dpdns.org` |
+| Controller env                   | Value                                        |
+| -------------------------------- | -------------------------------------------- |
+| `OCC_AGENT_NATIVE_ADMIN_ENABLED` | `true`                                       |
+| `OCC_AGENT_NATIVE_ADMIN_DOMAIN`  | `agents.oae.ag-6a4baf8a.nemoclaw.dpdns.org`  |
+| `OCC_AUTH_BASE_URL`              | `https://oae.ag-6a4baf8a.nemoclaw.dpdns.org` |
 
 One Agent, `agt_8d7c4c8c` ("MyClaw", OpenClaw runtime), revision `rev_9e88010c`. No person is currently
 granted on it (edge ACL is `{}`).
@@ -51,9 +51,9 @@ The native mechanism is entirely in the base; nothing in OAE is needed to turn i
    - admin route → `x-occ-identity: occ-workspace-files`, `x-openclaw-scopes: operator.admin`;
    - `/native-chat/…` route → the same identity but `x-openclaw-scopes: operator.sessions.write`
      (`index.ts:14027`, `:14251`).
-   The chat route is emitted only when `getGatewayChatEndpoint` is defined (`index.ts:4939`), which needs
-   **both** (a) `usesWritableNativeAdminConfig(configuration)` (`index.ts:13878`) and (b)
-   `trustedProxy.requiredHeaders` containing `x-openclaw-scopes`.
+     The chat route is emitted only when `getGatewayChatEndpoint` is defined (`index.ts:4939`), which needs
+     **both** (a) `usesWritableNativeAdminConfig(configuration)` (`index.ts:13878`) and (b)
+     `trustedProxy.requiredHeaders` containing `x-openclaw-scopes`.
 
 So the native path always presents the **shared machine identity** `occ-workspace-files` and caps the
 browser at `operator.sessions.write` for `operate` holders — never per-person identity.
@@ -66,10 +66,10 @@ The public Agent host `agent-<hash>.agents.oae.ag-…` is a **collision**: upstr
 (`OCC_AGENT_NATIVE_ADMIN_DOMAIN`) is identical to the edge's agents domain. On the testbed the two
 mechanisms route that host differently:
 
-| Mechanism | Object | Host it binds | Reachable from a browser? |
-|---|---|---|---|
-| Native (RFC-0031) | Envoy `HTTPRoute gateway-<h>` | `occ-gateway-<h>.envoy-gateway-system.svc` (in-cluster) | **No** |
-| OAE edge (strike 2) | k3s `Ingress oae-edge-<h>` | `agent-<hash>.agents.oae.ag-…` (public) | **Yes** |
+| Mechanism           | Object                        | Host it binds                                           | Reachable from a browser? |
+| ------------------- | ----------------------------- | ------------------------------------------------------- | ------------------------- |
+| Native (RFC-0031)   | Envoy `HTTPRoute gateway-<h>` | `occ-gateway-<h>.envoy-gateway-system.svc` (in-cluster) | **No**                    |
+| OAE edge (strike 2) | k3s `Ingress oae-edge-<h>`    | `agent-<hash>.agents.oae.ag-…` (public)                 | **Yes**                   |
 
 The native `HTTPRoute` is bound to the **internal** Envoy service name, not the public Agent host, because
 OAE never stood up an external native ingress for Agent hosts — the edge is that ingress. A `curl` of the
@@ -84,7 +84,7 @@ Worse, on the live (ungranted) Agent the native chat route is **not generated at
 returns `undefined`. (`requiredHeaders` already contains `x-openclaw-scopes`, so gate (b) is met — only
 gate (a) fails.)
 
-**However, a *granted* OAE Agent does qualify.** When a person is granted, `oae-edge` rewrites the Agent
+**However, a _granted_ OAE Agent does qualify.** When a person is granted, `oae-edge` rewrites the Agent
 config with `deviceAutoApprove = {enabled:true, scopes:[operator.read, operator.write]}` and merges the
 human-UI origin into `controlUi.allowedOrigins` (`deploy/oae/edge/oae-edge:297`). That flips
 `usesWritableNativeAdminConfig` to `true`, so the native `/native-chat` route (`operator.sessions.write`)
@@ -118,9 +118,9 @@ image. The `oae-native-chat-check` diagnostic (below) verifies the two header/ro
 
 The edge maps grants to scopes (`deploy/oae/edge/authz/server.mjs:63`):
 
-| OAE grant | Scopes the edge injects |
-|---|---|
-| `user` | `operator.read, operator.write` |
+| OAE grant  | Scopes the edge injects                                               |
+| ---------- | --------------------------------------------------------------------- |
+| `user`     | `operator.read, operator.write`                                       |
 | `operator` | `operator.read, operator.write, operator.approvals, operator.pairing` |
 
 Compared with the native chat ceiling `operator.sessions.write`:
@@ -150,7 +150,7 @@ Cleanly, because those features never touched the native path to begin with:
 - **Claude Gateway VPN** and **Hermes** runtimes are separate Agent kinds the native OpenClaw admin UI does
   not cover at all.
 
-What *does* interact is the Agent **gateway config** and the Agent **hostname**. Native-admin being ON
+What _does_ interact is the Agent **gateway config** and the Agent **hostname**. Native-admin being ON
 means the controller now also writes the native machine identity + admin route into every Agent, and the
 edge's grant merge now additionally trips the native-chat route into existence. Both are harmless while the
 edge owns the public hostname — but it means two authorities (the controller's native config and
@@ -174,11 +174,12 @@ That is a net downgrade in identity, audit and operator capability for the brows
 delivers everything RFC-0031 does for browsers, plus per-person identity, plus the approvals/pairing rung,
 over the same trusted-proxy gateway contract.
 
-**What we gain by *not* adopting, and still align with upstream:** the native mechanism is enabled and
+**What we gain by _not_ adopting, and still align with upstream:** the native mechanism is enabled and
 correct in-cluster, so the recovery administrator (who holds `administer`) can still use upstream's **Open
 Agent UI** natively for break-glass, unchanged. We lose nothing by leaving it on.
 
 **Revisit the decision if upstream RFC-0031 evolves to**:
+
 - carry a **per-person** native identity on the chat route (not the shared `occ-workspace-files`), and
 - add a native scope **between** `operator.sessions.write` and `operator.admin` that includes approvals.
 
@@ -189,6 +190,7 @@ the better boundary.
 ### If we did adopt it later — the shape
 
 For the record, the smallest viable adoption (not done here):
+
 - Give the native-admin domain its **own** hostname distinct from the edge's agents domain (e.g. keep
   `OCC_AGENT_NATIVE_ADMIN_DOMAIN` but stop the edge Ingress from claiming those hosts), so the native Envoy
   external listener serves the native host and the edge serves the edge host.

@@ -25,11 +25,16 @@ test("the gateway offers the Anthropic models of the Agent's model list", () => 
     ),
     ["claude-haiku-5-5", "claude-sonnet-5-5"],
   );
-  assert.deepEqual(claudeGatewayModels(configuration("anthropic/claude-haiku-5-5")), ["claude-haiku-5-5"]);
+  assert.deepEqual(claudeGatewayModels(configuration("anthropic/claude-haiku-5-5")), [
+    "claude-haiku-5-5",
+  ]);
 });
 
 test("a gateway without an Anthropic model is refused", () => {
-  assert.throws(() => claudeGatewayModels(configuration("openai/gpt-5.1")), ClaudeGatewayConfigurationError);
+  assert.throws(
+    () => claudeGatewayModels(configuration("openai/gpt-5.1")),
+    ClaudeGatewayConfigurationError,
+  );
   assert.throws(
     () => claudeGatewayModels(configuration("anthropic/claude-x; rm -rf /")),
     ClaudeGatewayConfigurationError,

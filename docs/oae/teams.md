@@ -7,11 +7,11 @@ The Teams client itself needs a Microsoft 365 licence with Teams (not tested yet
 
 ## What OAE adds to OCE
 
-| | Stock OCE | OAE |
-|---|---|---|
-| Teams plugin | Configuration shape accepted; the runtime image ships only Slack | `@openclaw/msteams@2026.10.8` bundled beside Slack (`deploy/oae/runtime-claude`, npm integrity checked) |
+|                 | Stock OCE                                                             | OAE                                                                                                              |
+| --------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Teams plugin    | Configuration shape accepted; the runtime image ships only Slack      | `@openclaw/msteams@2026.10.8` bundled beside Slack (`deploy/oae/runtime-claude`, npm integrity checked)          |
 | Embedded Agents | Every channel refused ("channels require a dedicated Agent workload") | `msteams` allowed (`EMBEDDED_DIRECT_CHANNELS`): no channel proxy, no proxy NetworkPolicy; Slack keeps OCE's rule |
-| Ingress | "Teams requires operator-provided ingress" | `oae-edge sync` routes exactly `https://<agent host>/api/messages` to the gateway, without the edge's sign-in |
+| Ingress         | "Teams requires operator-provided ingress"                            | `oae-edge sync` routes exactly `https://<agent host>/api/messages` to the gateway, without the edge's sign-in    |
 
 Why Embedded needs no proxy: OCE sends channel traffic through `runtime.channels` (an allowlisting
 CONNECT proxy, Slack hosts only) by setting `HTTPS_PROXY` on a Dedicated gateway. An Embedded
