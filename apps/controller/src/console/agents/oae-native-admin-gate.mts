@@ -1,15 +1,17 @@
 import type { AgentAccessContext } from "./credential-access.mjs";
 
-// OAE: on an SSO (OIDC) installation ordinary people reach their Agents through the edge — OAE's
-// "Open Agent" button (oae-open-agent.mts) — so upstream's native Agent-UI button ("Open Agent UI" /
-// "Open chat") is redundant next to it and confusing for operate-only users, whose native chat route
-// is shadowed by the edge anyway (docs/oae/native-chat-rfc0031.md, strike 8). Keep the native UI only
-// as the recovery administrator's break-glass: show it to `administer` holders, hide it for everyone
-// reaching Agents by an `operate` grant. On a non-OIDC install the native card is upstream's, unchanged.
+// OAE: on an SSO (OIDC) installation everyone reaches their Agents through the edge — OAE's
+// "Open Agent" button (oae-open-agent.mts). Upstream's native Agent-UI button ("Open Agent UI" /
+// "Open chat") is non-functional here: OAE Agents carry no native browser-chat config, so the native
+// card always reports "unsupported" and the button shows greyed-out at best. It also offers admins no
+// real break-glass — that is the recovery-admin console password login and the server CLI, not this
+// button — so we hide it for everyone, administrators included, and leave only "Open Agent"
+// (docs/oae/native-chat-rfc0031.md, strike 8). On a non-OIDC install the native card is upstream's,
+// unchanged.
 //
 // This gates only the client button's visibility (the probe `renderNativeAdminAccess` runs before it
-// shows the card); native-admin stays enabled on the server for break-glass. It is wired as the
-// `browserAccessAllowed` answer in detail.mts.
+// shows the card); native-admin stays enabled on the server. It is wired as the `browserAccessAllowed`
+// answer in detail.mts.
 
 // Matches the caller's resolved `Permissions | null`; `null` or absent fields read as "unknown".
 type AgentPermissions =
@@ -33,13 +35,8 @@ export async function oaeNativeAdminBrowserAccess(
   permissions: AgentPermissions,
 ): Promise<boolean | undefined> {
   if (await oaeOidcEnabled(context)) {
-    if (permissions?.administer === true) {
-      return true;
-    }
-    if (permissions?.administer === false) {
-      return false;
-    }
-    return undefined;
+    // SSO install: hide the native button for everyone (admins included); the edge is the browser path.
+    return false;
   }
   // Upstream behaviour on a non-OIDC install: operate or administer may open the native UI.
   if (permissions?.administer === true || permissions?.operate === true) {

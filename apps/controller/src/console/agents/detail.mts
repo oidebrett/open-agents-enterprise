@@ -1682,8 +1682,8 @@ export async function renderAgentDetail(
   const nativeAdmin = renderNativeAdminAccess(
     context,
     path,
-    // OAE: on an SSO install the native Agent-UI button is break-glass (administer) only; people use
-    // the edge's "Open Agent" instead. Upstream behaviour is unchanged on non-OIDC installs.
+    // OAE: on an SSO install the native Agent-UI button is hidden for everyone; people (and admins)
+    // use the edge's "Open Agent" instead. Upstream behaviour is unchanged on non-OIDC installs.
     () =>
       latestPermissionsRead.then((permissions) =>
         oaeNativeAdminBrowserAccess(context, permissions),

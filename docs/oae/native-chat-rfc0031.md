@@ -200,20 +200,24 @@ For the record, the smallest viable adoption (not done here):
 
 ## The confusing second button (implemented)
 
-With native-admin ON, the Agent detail page showed **two** launch buttons to an SSO user: upstream's
-native **Open Agent UI** / **Open chat** and OAE's edge **Open Agent**. Since the browser slice stays on
-the edge, the native button is redundant for ordinary people and (for `operate` holders) points at the
-shadowed native path. We keep native-admin on for the recovery administrator's break-glass, so the button
-is gated rather than removed:
+With native-admin ON, the Agent detail page showed **two** launch buttons: upstream's native
+**Open Agent UI** / **Open chat** and OAE's edge **Open Agent**. On an OAE/SSO install the native button
+is **non-functional**: OAE Agents carry no native browser-chat config, so the native card always reports
+"unsupported" and the button renders greyed-out at best. It also gives administrators no real break-glass
+— that is the recovery-admin console password login and the server CLI (`oae-user`, `kubectl`), not this
+button. So we hide it for **everyone** on an OIDC install, administrators included, leaving only
+**Open Agent**:
 
-- `apps/controller/src/console/agents/oae-native-admin-gate.mts` (new) — on an OIDC install, the native
-  card is shown only to `administer` holders; `operate`-only users (everyone who reaches Agents by a grant)
-  no longer see it, and no audited access probe runs for them. Non-OIDC installs keep upstream's behaviour.
+- `apps/controller/src/console/agents/oae-native-admin-gate.mts` (new) — on an OIDC install
+  `oaeNativeAdminBrowserAccess` returns `false` for all callers, so the native card never probes or shows.
+  Non-OIDC installs keep upstream's operate-or-administer behaviour unchanged.
 - `detail.mts` hook — the `browserAccessAllowed` answer routes through `oaeNativeAdminBrowserAccess`
-  instead of the inline operate-or-administer check (smallest add-only dispatch, per the fork rules).
+  instead of the inline check (smallest add-only dispatch, per the fork rules). The new module is
+  registered in `console-assets.ts` so the build compiles and serves it.
 
-This is client-side button visibility only; native-admin remains enabled on the server, so the recovery
-administrator still has the native UI.
+This is client-side button visibility only; native-admin remains enabled on the server (it can be turned
+off entirely at the installer — `OCC_AGENT_NATIVE_ADMIN_ENABLED=false`, as it was before the sync — as a
+later, cleaner step).
 
 **No-UI runtimes (Claude Gateway).** A Claude Gateway Agent (people's own Claude Code / Claude Desktop
 over the VPN) has no browser UI at all, so neither button should appear. The native card already hides
