@@ -38,6 +38,76 @@ Models: OpenAI, Anthropic, or any OpenAI-compatible HTTPS endpoint (NVIDIA, for 
 
 Administrators start with the [administrator guide](docs/oae/admin-guide.md).
 
+## How the edge fits in
+
+OCE deploys and runs Agents; it does **not** decide which _person_ may open an Agent's own UI.
+Upstream leaves that to an operator-managed **human ingress** ([OCE's
+spec](docs/reference/drivers/kubernetes-compute/gateway-authentication.md#human-ingress)). OAE
+supplies that ingress — a small service, **`oae-edge-authz`** — and leaves OCE's code unchanged
+apart from the one upstream change (#3049) that defines the contract. The edge is what turns
+"an Agent is running" into "_Alice_, signed in with the company login and granted this Agent,
+is in its control UI as herself." Full design: [`edge-design.md`](docs/oae/edge-design.md).
+
+### Request path (and where Traefik comes in)
+
+Every Agent gets its own host, `agent-<hash>.agents.<host>`. A browser request to it crosses
+**two** Traefik layers before it reaches the Agent, and the edge is consulted in between:
+
+```
+                        ┌──────────────────────── Keycloak (company SSO) ◀─── sign-in redirect
+                        │                                                       (no session)
+ browser                ▼
+   │  https://agent-<hash>.agents.<host>
+   ▼
+ host Traefik ............... TLS termination (Let's Encrypt), routes the Agent host into k3d
+   │
+   ▼
+ k3s Traefik (in-cluster) ... per-Agent Ingress, with two middlewares on the route:
+   │   1. strip client-supplied  x-occ-identity / x-openclaw-scopes / x-auth-request-*
+   │   2. forwardAuth ──▶ GET /check on  oae-edge-authz  ──┐
+   │                                                       │  no session → 302 to Keycloak
+   │        ┌──────────────────────────────────────────────┘  granted   → 200 + identity+scopes
+   │        │                                                  else      → 403
+   │        ▼   (authResponseHeaders copied back onto the request)
+   │     x-occ-identity: <realm>:<subject>      ← stable, per-person, never occ-workspace-files
+   │     x-openclaw-scopes: operator.read,…     ← derived from the grant, replacing client values
+   ▼
+ Agent gateway Service (tenant namespace) ... trusts those two headers (trusted-proxy auth);
+                                              reachable ONLY from k3s Traefik (NetworkPolicy)
+```
+
+So Traefik does the plumbing (TLS, routing, header hygiene) and **calls the edge for the
+decision** on every request — ordinary page loads and WebSocket upgrades alike. The edge answers
+in one of three ways: send an unauthenticated person to sign in, return `200` with the identity
+and scope headers the gateway trusts, or `403` for someone without a grant.
+
+### How the edge stays in step with OCE
+
+The edge never _changes_ OCE state for access decisions — it reads it. A host-side timer,
+**`oae-edge-sync`**, reconciles OCE into what the edge and the cluster need:
+
+- reads OCE **AccessBindings** (who is granted each Agent) and resolves each principal to its SSO
+  subject, writing the ACL the `oae-edge-authz` service checks `/check` against;
+- creates each Agent's **Ingress**, the **NetworkPolicy** that lets _only_ k3s Traefik reach the
+  gateway port, and the host-Traefik route + certificate;
+- merges the granted people into the Agent's **Configuration** (`allowUsers` / `identityScopes` /
+  `allowedOrigins`) and lets OCE redeploy, so the gateway admits them.
+
+Because the gateway port is reachable only through the edge, **revocation is immediate**: remove
+the OCE grant and the next request (and WebSocket reconnect) is refused at `/check`, even before
+the sync removes the now-unreachable `allowUsers` entry.
+
+### Three surfaces, one service
+
+`oae-edge-authz` also serves the two places people connect from outside a browser tab, so access
+there runs through the same grant check (details in the [administrator guide](docs/oae/admin-guide.md)):
+
+| Surface          | Host                         | What it is                                                                                                                       |
+| ---------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Agent control UI | `agent-<hash>.agents.<host>` | the forwardAuth-gated path above                                                                                                 |
+| **`/apps`**      | `auth.agents.<host>`         | a signed-in person mints a revocable, per-Agent app token for their phone, Hermes Desktop, or Claude                             |
+| **People panel** | `<console host>/oae/api/`    | served on the console host so the administrator's _own_ OCE session comes with it; records which SSO subject an OCE principal is |
+
 ## Install
 
 - **Packaged:** manidae-cloud installs OAE on a Hetzner server or your own, with single sign-on and the Claude Gateway as form options.
