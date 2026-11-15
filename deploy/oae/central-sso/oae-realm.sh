@@ -9,6 +9,12 @@
 #
 #   oae-realm.sh <realm> <oae-base-url>      e.g. oae-realm.sh oae-oracle https://oae.example.com
 #
+# The intended model is one realm per deployment (README.md), but a realm is often reused across
+# throwaway test deployments whose hostnames differ each time. Re-running therefore *merges* the new
+# host's callback into oae-console and oae-edge, keeping every host already registered, so a fresh
+# deployment's `/apps` and SSO work without unregistering the others. Set OAE_SSO_REPLACE_REDIRECTS=1
+# to replace instead (prune stale hosts back to just this one).
+#
 # Reads the Keycloak admin login from ~/.config/oae-sso/keycloak.env (see README.md) and writes
 # the client's issuer, ID and secret to ~/.config/oae-sso/<realm>-client.json (mode 600).
 set -euo pipefail
@@ -33,10 +39,30 @@ if ! kc get "realms/$REALM" >/dev/null 2>&1; then
   echo "realm $REALM created"
 fi
 
+# merged_redirect_uris CID WANT: a JSON array of the client's current redirect URIs plus WANT
+# (deduplicated, order preserved), so re-running for a new host never drops another host's callback.
+# With OAE_SSO_REPLACE_REDIRECTS=1 it returns just [WANT]. Redirect URIs are plain https URLs with no
+# quotes or spaces, so they extract cleanly from the single requested field.
+merged_redirect_uris() {
+  local cid=$1 want=$2 uri json="" seen=" "
+  _collect() {
+    case "$seen" in *" $1 "*) return ;; esac
+    seen="$seen$1 "
+    json="$json${json:+,}\"$1\""
+  }
+  if [ "${OAE_SSO_REPLACE_REDIRECTS:-0}" != 1 ]; then
+    while IFS= read -r uri; do
+      [ -n "$uri" ] && _collect "$uri"
+    done < <(kc get "clients/$cid" -r "$REALM" --fields redirectUris 2>/dev/null | grep -oE 'https://[^"]+')
+  fi
+  _collect "$want"
+  printf '[%s]' "$json"
+}
+
 # ensure_client CLIENT_ID REDIRECT_URI OUT_FILE: one confidential client, configured as
 # oidc-keycloak.md requires, its credentials written to OUT_FILE (mode 600).
 ensure_client() {
-  local client=$1 redirect=$2 out=$3 cid secret
+  local client=$1 redirect=$2 out=$3 cid secret uris
   cid=$(kc get clients -r "$REALM" -q "clientId=$client" --fields id --format csv --noquotes | head -1)
   if [ -z "$cid" ]; then
     kc create clients -r "$REALM" -s "clientId=$client" -s protocol=openid-connect -s enabled=true \
@@ -44,9 +70,11 @@ ensure_client() {
     cid=$(kc get clients -r "$REALM" -q "clientId=$client" --fields id --format csv --noquotes | head -1)
     echo "client $client created"
   fi
+  # Keep every host already registered and add this one (see merged_redirect_uris).
+  uris=$(merged_redirect_uris "$cid" "$redirect")
   # Applied on every run: Keycloak 26.7 ignores some of these on create (backchannel logout stays on).
   kc update "clients/$cid" -r "$REALM" \
-    -s "redirectUris=[\"$redirect\"]" -s 'webOrigins=[]' \
+    -s "redirectUris=$uris" -s 'webOrigins=[]' \
     -s frontchannelLogout=false -s directAccessGrantsEnabled=false -s implicitFlowEnabled=false \
     -s serviceAccountsEnabled=false \
     -s 'attributes."pkce.code.challenge.method"=S256' \
