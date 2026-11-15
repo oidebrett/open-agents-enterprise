@@ -248,4 +248,9 @@ want_base && built="$built ${registry}-runtime-base:sha-${short}"
 want runtime && built="$built ${registry}-runtime:sha-${short}"
 want hermes && built="$built ${registry}-runtime-hermes:sha-${short}"
 echo "done:$built"
-[ "$push" = 0 ] && echo "(local only; re-run with --push to publish)"
+# Note: an `[ "$push" = 0 ] && echo` here would make the script exit 1 on a --push run (the test is
+# false, so the && list yields 1 as the last command's status under `set -e`), turning a successful
+# publish red in CI. Use an if-block so the script ends on a zero status.
+if [ "$push" = 0 ]; then
+  echo "(local only; re-run with --push to publish)"
+fi
