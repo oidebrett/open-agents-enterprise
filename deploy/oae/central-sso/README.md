@@ -78,6 +78,13 @@ each one's issuer, client ID and secret to `~/.config/oae-sso/acme-client.json`,
 `acme-edge-client.json`, `acme-directory-client.json` and `acme-claude-client.json` (mode 600). Read them with
 `jq . ~/.config/oae-sso/acme-*.json`. It is safe to run again.
 
+Re-running for a **different OAE host** on the same realm (a throwaway test box whose name changed,
+say) keeps the client IDs and secrets and **adds** the new host's `oae-console` and `oae-edge`
+callbacks to the existing ones, so the earlier hosts keep working and the new one's `/apps` and SSO
+start working. The redirect error _"Invalid parameter: redirect_uri"_ at sign-in means the host
+hitting Keycloak is not yet registered — run the script for that host. To prune stale hosts back to
+just the one you pass, run with `OAE_SSO_REPLACE_REDIRECTS=1`.
+
 ### Option B: by hand in the Keycloak admin console
 
 1. **Realm**: top-left realm menu → _Create realm_ → name `acme` → _Create_.
@@ -112,13 +119,13 @@ each one's issuer, client ID and secret to `~/.config/oae-sso/acme-client.json`,
 
 In manidae-cloud's _Open Agents Enterprise_ form, set **Single Sign-On** to **Keycloak**:
 
-| Form field                   | Value                                                                                   |
-| ---------------------------- | --------------------------------------------------------------------------------------- |
-| Keycloak Realm URL           | `https://keycloak.example.com/realms/acme` (the `issuer` in the script's files)         |
-| Sign-In Button Name          | What people see: "Continue with …" (for example your company name)                      |
-| Console Client ID / Secret   | `oae-console` and its secret (`acme-client.json`)                                       |
-| Edge Client ID / Secret      | `oae-edge` and its secret (`acme-edge-client.json`)                                     |
-| Directory Client ID / Secret | `oae-edge-directory` and its secret (`acme-directory-client.json`), or leave both empty |
+| Form field                        | Value                                                                                                           |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Keycloak Realm URL                | `https://keycloak.example.com/realms/acme` (the `issuer` in the script's files)                                 |
+| Sign-In Button Name               | What people see: "Continue with …" (for example your company name)                                              |
+| Console Client ID / Secret        | `oae-console` and its secret (`acme-client.json`)                                                               |
+| Edge Client ID / Secret           | `oae-edge` and its secret (`acme-edge-client.json`)                                                             |
+| Directory Client ID / Secret      | `oae-edge-directory` and its secret (`acme-directory-client.json`), or leave both empty                         |
 | Claude Gateway Client ID / Secret | `oae-claude-clients` and its secret (`acme-claude-client.json`), or leave both empty (no Claude Gateway Agents) |
 
 The form checks these before it creates the server, and stores the secrets write-only. The
