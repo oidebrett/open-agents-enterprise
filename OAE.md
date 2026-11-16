@@ -88,6 +88,68 @@ pnpm install && pnpm lint && pnpm typecheck && pnpm test   # full list: docs/tes
 
 Merge each new published commit soon after it appears; small merges are cheaper.
 
+## Version pinning
+
+OAE pins several third-party versions (OpenClaw, Hermes, Claude Code, the Teams
+plugin, the node base image). They fall into **two classes**, split by who owns
+the file the pin lives in, and the two classes have opposite rules. The guiding
+principle is the same as everywhere else in the fork: **inherit from upstream
+what upstream owns; pin the rest ourselves, the way upstream pins its own inputs.**
+
+### Class A — upstream-owned pins: inherit verbatim, never author
+
+These live in **upstream files**, so their value is upstream's decision:
+
+| Pin                    | File                                                 |
+| ---------------------- | ---------------------------------------------------- |
+| OpenClaw source commit | `deploy/runtime/openclaw-source.json`                |
+| Node base images       | `deploy/runtime/Dockerfile` (`NODE_*_IMAGE` digests) |
+
+Upstream advances OpenClaw with `build(runtime): bump openclaw to <sha>` commits
+and records it in `openclaw-source.json` (commit + archive SHA-256 + timestamp).
+
+- **Take upstream's value verbatim every sync.** In a conflict these files are
+  always _theirs_ (`git checkout --theirs`). Never hand-edit them.
+- **Never bump OpenClaw independently.** The only way to move OpenClaw forward is
+  to sync upstream — editing the JSON forks the runtime off the exact
+  OpenClaw+OCE combination upstream built and tested together.
+- Failure modes are _falling behind_ (sync more often) or _keeping ours on a
+  conflict_. Rule of thumb: on these files, "ours" is always wrong.
+
+### Class B — OAE-owned pins: mirror the convention, bump in the sync PR
+
+Upstream has no equivalent (no Hermes, no Claude Code pin), so there is no value
+to copy — we align the _mechanism_, not the number:
+
+| Pin                   | File                                                                             |
+| --------------------- | -------------------------------------------------------------------------------- |
+| Hermes image          | `apps/controller/.../kubernetes/hermes.ts` (`HERMES_IMAGE`)                      |
+| Claude Code version   | `deploy/oae/runtime-claude/Dockerfile` (`CLAUDE_CODE_VERSION`)                   |
+| MS Teams plugin       | `deploy/oae/runtime-claude/Dockerfile` (`MSTEAMS_VERSION` + `MSTEAMS_INTEGRITY`) |
+| Hermes Teams SDK base | `deploy/oae/runtime-hermes/Dockerfile` (`HERMES_IMAGE` ARG)                      |
+
+- **Immutable pins only** — by `@sha256:` digest (Hermes) or exact version **plus
+  integrity hash** (Claude Code, msteams), exactly as upstream pins node by digest
+  and OpenClaw by commit+archive-sha. Never floating tags (`:latest`, `@2`).
+- **One declared source of truth per pin**, with a provenance comment (where it
+  came from, when) — upstream's model is the single `openclaw-source.json`.
+- **Bump deliberately, inside the sync PR**, not ad hoc, so all pins advance on one
+  reviewed heartbeat instead of drifting apart between syncs.
+- **Pin to what the inherited stack expects, not "newest."** Pick the Claude Code /
+  Hermes / plugin version compatible with the OpenClaw commit you just inherited;
+  "latest available" is the anti-pattern, because it can race ahead of the base it
+  was tested against.
+
+### The one coupling
+
+`@openclaw/msteams` is **OpenClaw's own plugin**, hosted by the OpenClaw commit
+Class A pins. So a Class A bump (new OpenClaw) can, in principle, break the
+Class-B-pinned plugin if the plugin API changed. Normally the plugin tracks
+OpenClaw releases and nothing breaks; when it does, bump the Class B Teams pin to
+a matching plugin version (allowed — it is not an upstream-owned file). This is
+why **every sync must re-verify the Teams layer** against the new OpenClaw base
+(see the `oae-upstream-sync` skill's verify step).
+
 ## GitHub Actions
 
 Upstream's workflows are dormant on the fork (GitHub does not run a fork's
