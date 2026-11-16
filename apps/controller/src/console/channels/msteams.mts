@@ -15,7 +15,6 @@ import {
   withProvider,
   field,
   input,
-  checkbox,
   uniqueList,
   arrayOfStrings,
 } from "./shared-ui.mjs";
@@ -213,7 +212,6 @@ function appendFields(body: HTMLFormElement, config: TeamsConfig, context: Chann
     selectClassName: "channel-select",
   });
   body.append(
-    checkbox("msteams-enabled", "Enable Microsoft Teams", config.enabled !== false),
     field(
       "Microsoft App ID",
       input("msteams-app-id", config.appId ?? "", {
