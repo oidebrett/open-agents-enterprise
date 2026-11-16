@@ -918,6 +918,7 @@ function openDrawer(
     }
     if (
       state.executionMode === "embedded" &&
+      provider.embedded !== true &&
       body.querySelector<HTMLInputElement>(`#${provider.id}-enabled`)?.checked
     ) {
       feedback.replaceChildren(
