@@ -1627,6 +1627,27 @@ export async function renderAgentDetail(
     tabControls.set(id, control);
     tabs.append(control);
   }
+  // OAE: a Claude Gateway Agent runs Anthropic's `claude gateway` — a per-person egress proxy that
+  // people's own Claude Code / Claude Desktop sign in to over the VPN — not an OpenClaw/Hermes
+  // message loop, so it has no channels and no native plugins to configure. Hide those tabs once the
+  // harness is known, the way the Open Agent button hides itself for the same runtime
+  // (oae-open-agent.mjs). docs/oae/claude-gateway.md.
+  const CHANNELLESS_HARNESS_IDS = new Set(["claude-gateway"]);
+  const applyRuntimeTabVisibility = () => {
+    const harnessId = visibleRevisions.find((revision) => revision.id === currentRevisionId)
+      ?.harness?.id;
+    const hide = harnessId != null && CHANNELLESS_HARNESS_IDS.has(harnessId);
+    for (const id of ["channels", "plugins"] as const) {
+      const control = tabControls.get(id);
+      if (control) {
+        control.hidden = hide;
+      }
+    }
+    // A deep link to a now-hidden tab falls back to Configuration, after this reread settles.
+    if (hide && (selectedTab === "channels" || selectedTab === "plugins")) {
+      queueMicrotask(() => change(selected, "configuration"));
+    }
+  };
   tabs.addEventListener("keydown", (event) => {
     const enabled = [...tabControls.values()].filter(
       (control) => !control.disabled && !control.hidden,
@@ -2944,6 +2965,8 @@ export async function renderAgentDetail(
     nativeAdmin.updateTarget();
     // OAE: the edge button hides for a no-UI runtime (Claude Gateway) once the harness is known.
     oaeOpenAgent.update();
+    // OAE: Claude Gateway has no channels or native plugins; hide those tabs for the same runtime.
+    applyRuntimeTabVisibility();
     renderVersions(revisions, snapshot, revisionResult);
     const mostRecent = revisions[0];
     if (activityRevisionId !== (mostRecent?.id ?? null)) {
