@@ -72,13 +72,15 @@ git merge --no-ff <target>
 
 Resolve each conflict by its kind:
 
-| Kind                                                                                                      | Resolution                                                                                                                                                                |
-| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| File touched only by fork commits upstream now has (identical patch)                                      | `git checkout --theirs <file>`                                                                                                                                            |
-| Upstream file with an OAE dispatch hook (`create.mts`, `configured-harness.ts`, `kubernetes/index.ts`, …) | Take upstream's file, then re-apply the hook from the fork commit (`git show <fork commit> -- <file>`). Keep the hook minimal; move logic into OAE-owned files if it grew |
-| OAE-owned file (`docs/oae/`, `deploy/oae/`, `*-hermes.ts`, `claude-gateway.ts`, …)                        | Keep ours; adapt to upstream API changes the compiler reports                                                                                                             |
-| Upstream test asserting behaviour OAE changed                                                             | Keep upstream's test and add the OAE case in an OAE test file, never weaken upstream's                                                                                    |
-| Migration numbers                                                                                         | An OAE migration must never take upstream's next number (`OAE.md` rule 5)                                                                                                 |
+| Kind                                                                                                               | Resolution                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| File touched only by fork commits upstream now has (identical patch)                                               | `git checkout --theirs <file>`                                                                                                                                              |
+| Upstream file with an OAE dispatch hook (`create.mts`, `configured-harness.ts`, `kubernetes/index.ts`, …)          | Take upstream's file, then re-apply the hook from the fork commit (`git show <fork commit> -- <file>`). Keep the hook minimal; move logic into OAE-owned files if it grew   |
+| OAE-owned file (`docs/oae/`, `deploy/oae/`, `*-hermes.ts`, `claude-gateway.ts`, …)                                 | Keep ours; adapt to upstream API changes the compiler reports                                                                                                               |
+| Upstream-owned version pin (`deploy/runtime/openclaw-source.json`, `deploy/runtime/Dockerfile` node digests)       | Always `git checkout --theirs` — never keep ours, never hand-edit. OpenClaw moves only by syncing (`OAE.md` "Version pinning", Class A)                                     |
+| OAE-owned version pin (`hermes.ts` `HERMES_IMAGE`, `deploy/oae/runtime-*` `CLAUDE_CODE_VERSION`/`MSTEAMS_VERSION`) | Keep ours; if the new OpenClaw base needs it, bump to a matching version **in this sync PR** (`OAE.md` Class B), by digest or version+integrity hash — never a floating tag |
+| Upstream test asserting behaviour OAE changed                                                                      | Keep upstream's test and add the OAE case in an OAE test file, never weaken upstream's                                                                                      |
+| Migration numbers                                                                                                  | An OAE migration must never take upstream's next number (`OAE.md` rule 5)                                                                                                   |
 
 Then verify, in a container from a clean `git archive` (the host may lack the toolchain):
 
@@ -91,6 +93,13 @@ node --test --test-reporter=tap 'tests/conformance/*.test.{mjs,ts}'
 Run the same conformance suite on the target upstream commit as well and compare the failing
 test names: only failures new on the sync branch count (some tests need SSH, TLS or sockets a
 container lacks and fail on both).
+
+**Re-verify the Teams layer against the new OpenClaw base.** `@openclaw/msteams` is OpenClaw's own
+plugin, hosted by the OpenClaw commit Class A just inherited (`OAE.md` "Version pinning" — the one
+coupling). So after a sync that moved OpenClaw, confirm the pinned `MSTEAMS_VERSION` still loads:
+the type-check and conformance above cover the console/edge wiring, and the testbed check below
+covers the runtime. If the plugin no longer loads, bump the Class B Teams pin to a matching version
+in this sync PR.
 
 Commit the merge listing each resolution, push `sync/upstream-<sha>`, and build its controller and
 edge images (multi-arch, pushed by digest; `OAE.md`).
@@ -107,7 +116,10 @@ sudo oae-upgrade apply --ref <sync branch sha> --controller <image@sha256:…> -
 ```
 
 Run the testbed's verification checklist (`docs/oae/testbed.md`) and report each item. On any
-failure: `sudo oae-upgrade rollback`, fix on the sync branch, repeat. A sync that adds database
+failure: `sudo oae-upgrade rollback`, fix on the sync branch, repeat. Include the Teams smoke
+check: an unsigned `POST /api/messages` to a Teams-enabled Agent's edge route must return `401`
+(the plugin is loaded and validating Bot Framework's signed JWT) — a `404`/`502` means the
+`MSTEAMS_VERSION` plugin did not load against the new OpenClaw base, so bump the Class B Teams pin. A sync that adds database
 migrations cannot be rolled back by images: export the database first (the testbed doc says how).
 
 Only when the checklist passes: `git checkout oae && git merge --ff-only sync/upstream-<sha>`,
