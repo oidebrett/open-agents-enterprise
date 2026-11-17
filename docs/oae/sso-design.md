@@ -6,10 +6,14 @@ provider (Microsoft Entra ID, Google, Okta, …).** This note records why, what 
 provisions automatically, the external-Keycloak escape hatch, and the network-exposure model
 including the optional CIDR allowlist.
 
-No code yet — this is the design the manidae-cloud package work will follow. Today's shipping
-behaviour (external Keycloak, provisioned by hand) is in
-[`deploy/oae/central-sso/README.md`](../../deploy/oae/central-sso/README.md); this note keeps that
-as the "external" option and adds the bundled one as the default.
+Implemented (strike: see [`strikes.md`](strikes.md)). The managed mode's on-box installer is
+[`deploy/oae/central-sso/oae-keycloak-bundle`](../../deploy/oae/central-sso/oae-keycloak-bundle)
+(the realm/clients provisioning of [`oae-realm.sh`](../../deploy/oae/central-sso/oae-realm.sh), with
+the client secrets handed in by the platform); manidae-cloud drives it, generates the secrets and the
+separate Keycloak admin password, and applies the CIDR allowlist at Traefik
+(`backend/app/core/deployment/oce.py`). Today's other shipping behaviour (external Keycloak,
+provisioned by hand) is in [`deploy/oae/central-sso/README.md`](../../deploy/oae/central-sso/README.md);
+this note keeps that as the "external" option and adds the bundled one as the default.
 
 ## Why Keycloak at all — SSO is four jobs, not one
 

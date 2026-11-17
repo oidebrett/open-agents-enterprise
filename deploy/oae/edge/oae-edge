@@ -492,19 +492,25 @@ YAML
   local rules tmp
   rules=$(rules_dir); [ -n "$rules" ] || { log "no Traefik rules directory"; return 0; }
   tmp=$(mktemp)
+  # The optional CIDR allowlist (docs/oae/sso-design.md): manidae's install block writes the
+  # oae-allowlist middleware (default allow-all) into the rules dir. Reference it on every public
+  # Agent/auth host so narrowing oae_allowed_cidrs gates the edge too. Only when it exists, so the
+  # edge never writes a dangling middleware reference on an install without it.
+  local mw=""
+  [ -e "$rules/oae-middlewares.yml" ] && mw=$'\n      middlewares: [oae-allowlist@file]'
   {
     echo "# OAE human ingress (written by oae-edge sync; docs/oae/edge-design.md)"
     echo "http:"; echo "  routers:"
     for h in $AUTH_HOST $routes; do
       r=$(echo "$h" | cut -d. -f1)
-      printf '    oae-edge-%s:\n      entryPoints: [websecure]\n      rule: "Host(`%s`)"\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h"
+      printf '    oae-edge-%s:\n      entryPoints: [websecure]\n      rule: "Host(`%s`)"%s\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h" "$mw"
       [ "$h" = "$AUTH_HOST" ] && continue
       # App device tokens ride in the path (/d/oaed_…): keep those requests out of the access log
       # (Traefik >= 3.1 per-router observability); browser traffic stays logged (e.g. CrowdSec).
-      printf '    oae-edge-%s-app:\n      entryPoints: [websecure]\n      rule: "Host(`%s`) && PathPrefix(`/d/`)"\n      priority: 10000\n      observability: { accessLogs: false }\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h"
+      printf '    oae-edge-%s-app:\n      entryPoints: [websecure]\n      rule: "Host(`%s`) && PathPrefix(`/d/`)"\n      priority: 10000\n      observability: { accessLogs: false }%s\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h" "$mw"
       # Teams: Bot Framework's webhook path, logged (no secrets in it).
       if grep -qxF "$h" <<<"$teams"; then
-        printf '    oae-edge-%s-teams:\n      entryPoints: [websecure]\n      rule: "Host(`%s`) && Path(`/api/messages`)"\n      priority: 10000\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h"
+        printf '    oae-edge-%s-teams:\n      entryPoints: [websecure]\n      rule: "Host(`%s`) && Path(`/api/messages`)"\n      priority: 10000%s\n      service: oce-console\n      tls: { certResolver: letsencrypt }\n' "$r" "$h" "$mw"
       fi
     done
   } > "$tmp"

@@ -348,3 +348,34 @@ chat route and a native scope between `operator.sessions.write` and `operator.ad
   read-only, for any Agent on an OAE/SSO install.
 - Not done (out of PoC scope): live browser SSO chat as `oae-demo` (needs the user's credentials; no user
   is currently granted on the testbed), and the direct per-method WS scope-intersection probe.
+
+## 🟨 Strike 15 — Managed (bundled) Keycloak appliance + CIDR allowlist (branch `claude/managed-keycloak-0127d1` + manidae `oae/strike-managed-keycloak`)
+
+Implements the merged SSO design ([`sso-design.md`](sso-design.md)): the single-tenant appliance
+bundles Keycloak and provisions it automatically, so the deploy form pastes **no** secrets. The
+hand-provisioned external Keycloak stays as the "external" option (unchanged).
+
+- **OAE (add-only):** [`deploy/oae/central-sso/oae-keycloak-bundle`](../../deploy/oae/central-sso/oae-keycloak-bundle)
+  — brings up Keycloak + its own PostgreSQL behind the deployment's Traefik as `keycloak.<host>`, and
+  provisions the realm `oae`, the five clients (`oae-console`, `oae-edge`, `oae-edge-directory`,
+  `oae-claude-clients`, `groups` scope) and every redirect URI, reusing
+  [`oae-realm.sh`](../../deploy/oae/central-sso/oae-realm.sh)'s client settings but **setting** each
+  secret to the platform-supplied value. Idempotent: a redeploy keeps users/brokered identities and
+  _adds_ a new host's callbacks. [`deploy/oae/edge/oae-edge`](../../deploy/oae/edge/oae-edge) references
+  the `oae-allowlist@file` middleware on its public routers (guarded by the middleware file's presence).
+- **manidae-cloud (`backend/app/core/deployment/oce.py`):** a `_KEYCLOAK` install block drives the bundle
+  before SSO turns on; `managed_keycloak_oidc()` derives the issuer and fixed client IDs. The deploy form
+  gains an SSO mode toggle — **managed** (new default, no fields) vs **external** (unchanged). Secrets and
+  the **separate** Keycloak admin + DB passwords are generated once and stored write-only
+  (`deployments.py`, like the backup key). The CIDR allowlist (`oae_allowed_cidrs`, default allow-all =
+  off) is written as a Traefik `ipAllowList` middleware on the console, edge and Keycloak public routers;
+  Keycloak `/admin` stays loopback-only (operators tunnel), `/realms/*` stays public.
+- **Verified locally:** type-check + render (both modes, `bash -n`), 84 OAE/OCE package tests + 476 golden
+  configs, and a **real provisioning dry-run** against a local Docker Keycloak 26.7.5 (realm + five
+  objects created, client secret set to the supplied value, PKCE S256 / RS256, directory→`view-users`,
+  claude→`manage-clients,view-clients,view-users,query-users`; additive redirects on a second-host re-run).
+  **No Oracle testbed contact** — a from-scratch appliance test there is gated on the user (the box runs
+  the live AgentGateway, which must not be disturbed).
+- **Follow-ups (not in this strike):** wire the bundled Keycloak's PostgreSQL into `oae-backup` (identity
+  state — [`backup.md`](backup.md); mind the AgentGateway backup-folder collision noted in the design);
+  optional operator-CIDR for `/admin` instead of loopback-only.

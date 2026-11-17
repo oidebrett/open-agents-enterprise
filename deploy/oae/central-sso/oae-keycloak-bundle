@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# Bundled "managed Keycloak" for a single-tenant OAE appliance (docs/oae/sso-design.md): bring up
+# Keycloak + its own PostgreSQL behind the deployment's existing Traefik as keycloak.<host>, and
+# provision the realm, the five clients and every redirect URI automatically — the same objects
+# oae-realm.sh makes by hand for the external path (README.md), but with the client secrets handed
+# in by the platform (manidae-cloud) instead of generated here, so the deploy form needs no pasted
+# secrets. Idempotent: re-running keeps the realm, users and brokered identities, re-sets the
+# clients and *adds* any new host's callbacks. Called by manidae's OAE install block
+# (backend/app/core/deployment/oce.py). Run as root on the appliance.
+#
+#   oae-keycloak-bundle install
+#
+# Everything comes from the environment (the install block sets it); nothing is on the command line
+# so no secret is ever an argument:
+#   OAE_KC_PUBLIC_URL      https://keycloak.<host>         (issuer origin; fixed public name)
+#   OAE_KC_HOST            <host>                          (the OCE console host; redirect URIs)
+#   OAE_KC_REALM           oae                             (one realm per appliance)
+#   OAE_KC_ADMIN_PASSWORD  the bootstrap admin password    (generated + stored write-only by manidae)
+#   OAE_KC_DB_PASSWORD     Keycloak's PostgreSQL password
+#   OAE_KC_CONSOLE_SECRET / OAE_KC_EDGE_SECRET / OAE_KC_DIRECTORY_SECRET / OAE_KC_CLAUDE_SECRET
+#   OAE_KC_DIR             state dir (compose + env live here), default /opt/oce/prod/keycloak
+#   OAE_KC_HTTP_PORT       loopback HTTP port Traefik proxies, default 9080
+#   OAE_KC_MGMT_PORT       loopback management port (/health), default 9081
+#   OAE_KC_IMAGE / OAE_KC_PG_IMAGE   pinned images (manidae passes the digest-pinned pair)
+#   OAE_KC_RULES           the host Traefik rules dir (manidae already located it; empty = skip route)
+#   OAE_KC_UPSTREAM        host:port Traefik reaches the loopback port on, default 127.0.0.1
+#   OAE_SSO_REPLACE_REDIRECTS=1   prune stale hosts back to just this one (as oae-realm.sh)
+set -euo pipefail
+
+[ "${1:-}" = install ] || { echo "usage: oae-keycloak-bundle install" >&2; exit 2; }
+
+PUBLIC_URL=${OAE_KC_PUBLIC_URL:?OAE_KC_PUBLIC_URL is required}
+PUBLIC_URL=${PUBLIC_URL%/}
+HOST=${OAE_KC_HOST:?OAE_KC_HOST is required}
+REALM=${OAE_KC_REALM:-oae}
+ADMIN_USER=${OAE_KC_ADMIN_USER:-admin}
+ADMIN_PASSWORD=${OAE_KC_ADMIN_PASSWORD:?OAE_KC_ADMIN_PASSWORD is required}
+DB_PASSWORD=${OAE_KC_DB_PASSWORD:?OAE_KC_DB_PASSWORD is required}
+DIR=${OAE_KC_DIR:-/opt/oce/prod/keycloak}
+HTTP_PORT=${OAE_KC_HTTP_PORT:-9080}
+MGMT_PORT=${OAE_KC_MGMT_PORT:-9081}
+KC_IMAGE=${OAE_KC_IMAGE:?OAE_KC_IMAGE is required}
+PG_IMAGE=${OAE_KC_PG_IMAGE:-postgres:17-alpine}
+RULES=${OAE_KC_RULES:-}
+UPSTREAM=${OAE_KC_UPSTREAM:-127.0.0.1}
+PROJECT=oae-keycloak
+CONTAINER=${OAE_KC_CONTAINER:-${PROJECT}-keycloak-1}
+
+[[ $REALM =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]] || { echo "realm: lowercase letters, digits, hyphens" >&2; exit 2; }
+[[ $HOST =~ ^[a-z0-9.-]+$ ]] || { echo "host: a DNS name" >&2; exit 2; }
+ISSUER="$PUBLIC_URL/realms/$REALM"
+
+umask 077
+install -d -m700 "$DIR"
+
+# --- 1. Keycloak + its own PostgreSQL, published on loopback only (Traefik gives the public name).
+# Keycloak holds identity state (local users, brokered-user mappings, client secrets): its named
+# volume persists across redeploys, so an upgrade keeps users while a clean box provisions fresh.
+# Its own compose project and network, so OAE's install teardown (which removes the OCE network and
+# the oae-claude-* containers) never touches it.
+cat > "$DIR/compose.yaml" <<COMPOSE
+# Managed Keycloak for OAE (docs/oae/sso-design.md). Written by oae-keycloak-bundle; do not edit.
+name: $PROJECT
+
+services:
+  postgres:
+    image: $PG_IMAGE
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: \${OAE_KC_DB_PASSWORD:?}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  keycloak:
+    image: $KC_IMAGE
+    command: ["start"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: \${OAE_KC_DB_PASSWORD:?}
+      KC_HOSTNAME: \${OAE_KC_PUBLIC_URL:?}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: \${OAE_KC_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: \${OAE_KC_ADMIN_PASSWORD:?}
+    ports:
+      - "127.0.0.1:${HTTP_PORT}:8080"
+      - "127.0.0.1:${MGMT_PORT}:9000"
+
+volumes:
+  postgres:
+COMPOSE
+
+# The env file for compose (never the client secrets — those go straight into Keycloak over kcadm).
+cat > "$DIR/keycloak.env" <<ENV
+OAE_KC_PUBLIC_URL=$PUBLIC_URL
+OAE_KC_ADMIN_USER=$ADMIN_USER
+OAE_KC_ADMIN_PASSWORD=$ADMIN_PASSWORD
+OAE_KC_DB_PASSWORD=$DB_PASSWORD
+ENV
+chmod 600 "$DIR/keycloak.env"
+
+echo "oae-keycloak-bundle: starting Keycloak ($KC_IMAGE) and PostgreSQL"
+docker compose -p "$PROJECT" --env-file "$DIR/keycloak.env" -f "$DIR/compose.yaml" up -d
+
+# Wait for readiness on the local management port (no public name needed yet).
+ok=""
+for _ in $(seq 60); do
+  if curl -fsS -m 5 "http://127.0.0.1:${MGMT_PORT}/health/ready" 2>/dev/null | grep -q '"UP"'; then ok=1; break; fi
+  sleep 3
+done
+[ -n "$ok" ] || { echo "oae-keycloak-bundle: Keycloak did not become ready" >&2; exit 1; }
+
+# --- 2. Provision the realm, clients and redirect URIs over kcadm (docker exec, never the public
+# name), setting each client's secret to the value manidae generated. Same object settings as
+# oae-realm.sh; the one difference is -s secret=... so the platform owns the credential.
+kc() { docker exec -i "$CONTAINER" /opt/keycloak/bin/kcadm.sh "$@"; }
+kc config credentials --server http://localhost:8080 --realm master \
+  --user "$ADMIN_USER" --password "$ADMIN_PASSWORD" >/dev/null
+
+if ! kc get "realms/$REALM" >/dev/null 2>&1; then
+  kc create realms -s "realm=$REALM" -s enabled=true \
+    -s "displayName=Open Agents Enterprise ($REALM)" >/dev/null
+  echo "oae-keycloak-bundle: realm $REALM created"
+fi
+
+# merged_redirect_uris CID WANT: the client's current redirect URIs plus WANT (deduped, order kept),
+# so re-running for a new host never drops another host's callback. OAE_SSO_REPLACE_REDIRECTS=1 -> [WANT].
+merged_redirect_uris() {
+  local cid=$1 want=$2 uri json="" seen=" "
+  _collect() {
+    case "$seen" in *" $1 "*) return ;; esac
+    seen="$seen$1 "
+    json="$json${json:+,}\"$1\""
+  }
+  if [ "${OAE_SSO_REPLACE_REDIRECTS:-0}" != 1 ]; then
+    while IFS= read -r uri; do
+      [ -n "$uri" ] && _collect "$uri"
+    done < <(kc get "clients/$cid" -r "$REALM" --fields redirectUris 2>/dev/null | grep -oE 'https://[^"]+')
+  fi
+  _collect "$want"
+  printf '[%s]' "$json"
+}
+
+client_id_of() { kc get clients -r "$REALM" -q "clientId=$1" --fields id --format csv --noquotes | head -1; }
+
+# ensure_confidential CLIENT_ID SECRET REDIRECT_URI: a confidential standard-flow client (console /
+# edge), configured exactly as oidc-keycloak.md requires, its secret set to SECRET.
+ensure_confidential() {
+  local client=$1 secret=$2 redirect=$3 cid uris
+  cid=$(client_id_of "$client")
+  if [ -z "$cid" ]; then
+    kc create clients -r "$REALM" -s "clientId=$client" -s protocol=openid-connect -s enabled=true \
+      -s publicClient=false -s clientAuthenticatorType=client-secret -s standardFlowEnabled=true >/dev/null
+    cid=$(client_id_of "$client")
+    echo "oae-keycloak-bundle: client $client created"
+  fi
+  uris=$(merged_redirect_uris "$cid" "$redirect")
+  kc update "clients/$cid" -r "$REALM" \
+    -s "secret=$secret" \
+    -s "redirectUris=$uris" -s 'webOrigins=[]' \
+    -s frontchannelLogout=false -s directAccessGrantsEnabled=false -s implicitFlowEnabled=false \
+    -s serviceAccountsEnabled=false \
+    -s 'attributes."pkce.code.challenge.method"=S256' \
+    -s 'attributes."backchannel.logout.session.required"=false' \
+    -s 'attributes."backchannel.logout.url"=' \
+    -s 'attributes."standard.token.exchange.enabled"=false' \
+    -s 'attributes."oauth2.device.authorization.grant.enabled"=false' \
+    -s 'attributes."oidc.ciba.grant.enabled"=false' \
+    -s 'attributes."id.token.signed.response.alg"=RS256'
+}
+
+# ensure_service CLIENT_ID SECRET ROLE...: a confidential client that signs nobody in and whose
+# service account holds the given realm-management roles (directory lookup / Claude Gateway minting).
+ensure_service() {
+  local client=$1 secret=$2; shift 2
+  local cid
+  cid=$(client_id_of "$client")
+  if [ -z "$cid" ]; then
+    kc create clients -r "$REALM" -s "clientId=$client" -s protocol=openid-connect -s enabled=true \
+      -s publicClient=false -s clientAuthenticatorType=client-secret >/dev/null
+    cid=$(client_id_of "$client")
+    echo "oae-keycloak-bundle: client $client created"
+  fi
+  kc update "clients/$cid" -r "$REALM" \
+    -s "secret=$secret" \
+    -s standardFlowEnabled=false -s implicitFlowEnabled=false -s directAccessGrantsEnabled=false \
+    -s serviceAccountsEnabled=true -s 'redirectUris=[]' -s 'webOrigins=[]' \
+    -s 'attributes."standard.token.exchange.enabled"=false' \
+    -s 'attributes."oauth2.device.authorization.grant.enabled"=false' \
+    -s 'attributes."oidc.ciba.grant.enabled"=false'
+  local role
+  for role in "$@"; do
+    kc add-roles -r "$REALM" --uusername "service-account-$client" \
+      --cclientid realm-management --rolename "$role"
+  done
+}
+
+# ensure_groups_scope: the `groups` client scope (group names, no paths) for Claude Gateway policy.
+ensure_groups_scope() {
+  local sid
+  sid=$(kc get client-scopes -r "$REALM" --fields id,name --format csv --noquotes | awk -F, '$2=="groups"{print $1}')
+  [ -n "$sid" ] && return 0
+  kc create client-scopes -r "$REALM" -s name=groups -s protocol=openid-connect \
+    -s 'attributes."include.in.token.scope"=true' >/dev/null
+  sid=$(kc get client-scopes -r "$REALM" --fields id,name --format csv --noquotes | awk -F, '$2=="groups"{print $1}')
+  kc create "client-scopes/$sid/protocol-mappers/models" -r "$REALM" -s name=groups \
+    -s protocol=openid-connect -s protocolMapper=oidc-group-membership-mapper \
+    -s 'config."claim.name"=groups' -s 'config."full.path"=false' -s 'config."id.token.claim"=true' \
+    -s 'config."access.token.claim"=true' -s 'config."userinfo.token.claim"=true' >/dev/null
+  echo "oae-keycloak-bundle: client scope groups created"
+}
+
+ensure_confidential oae-console       "$OAE_KC_CONSOLE_SECRET"   "https://$HOST/api/auth/providers/oidc/callback"
+ensure_confidential oae-edge          "$OAE_KC_EDGE_SECRET"      "https://auth.agents.$HOST/callback"
+ensure_groups_scope
+ensure_service      oae-edge-directory "$OAE_KC_DIRECTORY_SECRET" view-users
+ensure_service      oae-claude-clients "$OAE_KC_CLAUDE_SECRET"    manage-clients view-clients view-users query-users
+echo "oae-keycloak-bundle: realm $REALM provisioned (issuer $ISSUER)"
+
+# --- 3. Publish keycloak.<host> through the host Traefik, and lock /admin to loopback (operators
+# reach it over an SSH tunnel; docs/oae/sso-design.md). /realms/* stays public. The shared allow
+# middlewares (oae-allowlist, oae-kc-admin-deny) are written by manidae's install block.
+if [ -n "$RULES" ] && [ -d "$RULES" ]; then
+  cat > "$RULES/oae-keycloak.yml" <<ROUTE
+# OAE managed Keycloak (written by oae-keycloak-bundle; docs/oae/sso-design.md)
+http:
+  routers:
+    oae-keycloak:
+      entryPoints: [websecure]
+      rule: "Host(\`keycloak.$HOST\`)"
+      middlewares: [oae-allowlist@file]
+      service: oae-keycloak
+      tls: { certResolver: letsencrypt }
+    oae-keycloak-admin:
+      entryPoints: [websecure]
+      rule: "Host(\`keycloak.$HOST\`) && (PathPrefix(\`/admin\`) || PathPrefix(\`/realms/master\`))"
+      priority: 10000
+      middlewares: [oae-kc-admin-deny@file]
+      service: oae-keycloak
+      tls: { certResolver: letsencrypt }
+  services:
+    oae-keycloak:
+      loadBalancer:
+        servers:
+          - url: "http://$UPSTREAM:$HTTP_PORT"
+ROUTE
+  chmod 644 "$RULES/oae-keycloak.yml"
+  echo "oae-keycloak-bundle: published https://keycloak.$HOST (/admin locked to loopback)"
+else
+  echo "oae-keycloak-bundle: WARNING no Traefik rules dir; keycloak.$HOST not published" >&2
+fi
